@@ -18,10 +18,19 @@ export default async function handler(req, res) {
     try {
       if (err) throw err;
 
-      const referenceText = fields.text;
-      const audioFile = files.audio;
+      // Debug: log fields and files
+      console.log('FIELDS:', fields);
+      console.log('FILES:', files);
 
-      if (!referenceText || !audioFile) {
+      const referenceText = fields.text;
+      let audioFile = files.audio;
+
+      // Formidable sometimes returns files as arrays or objects
+      if (Array.isArray(audioFile)) {
+        audioFile = audioFile[0];
+      }
+
+      if (!referenceText || !audioFile || !audioFile.filepath) {
         return res.status(400).json({ error: "Missing text or audio" });
       }
 
