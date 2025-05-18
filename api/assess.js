@@ -1,4 +1,4 @@
-import { IncomingForm } from "formidable";
+import formidable from "formidable";
 import fs from "fs/promises";
 
 export const config = {
@@ -12,20 +12,34 @@ export default async function handler(req, res) {
     return res.status(405).send("Only POST allowed");
   }
 
-  const form = new IncomingForm();
+  const form = formidable();
 
   form.parse(req, async (err, fields, files) => {
     try {
       if (err) throw err;
 
+      // LOG output for debugging
+      console.log("FIELDS:", fields);
+      console.log("FILES:", files);
+
+      // Try both direct and array access for audio file
       const referenceText = fields.text;
-      const audioFile = files.audio;
+      let audioFile = files.audio;
+      if (Array.isArray(audioFile)) {
+        audioFile = audioFile[0];
+      }
 
       if (!referenceText || !audioFile) {
         return res.status(400).json({ error: "Missing text or audio" });
       }
 
-      const audioData = await fs.readFile(audioFile.filepath);
+      // Try both .filepath and .path for compatibility
+      const audioPath = audioFile.filepath || audioFile.path;
+      if (!audioPath) {
+        return res.status(400).json({ error: "No file path found in upload" });
+      }
+
+      const audioData = await fs.readFile(audioPath);
 
       const result = await fetch(
         "https://eastus.api.cognitive.microsoft.com/speechtotext/v3.1/evaluations",
@@ -53,4 +67,3 @@ export default async function handler(req, res) {
     }
   });
 }
-
