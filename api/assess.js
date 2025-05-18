@@ -12,34 +12,20 @@ export default async function handler(req, res) {
     return res.status(405).send("Only POST allowed");
   }
 
-  const form = formidable();
+  const form = new formidable.IncomingForm();
 
   form.parse(req, async (err, fields, files) => {
     try {
       if (err) throw err;
 
-      // LOG output for debugging
-      console.log("FIELDS:", fields);
-      console.log("FILES:", files);
-
-      // Try both direct and array access for audio file
       const referenceText = fields.text;
-      let audioFile = files.audio;
-      if (Array.isArray(audioFile)) {
-        audioFile = audioFile[0];
-      }
+      const audioFile = files.audio;
 
       if (!referenceText || !audioFile) {
         return res.status(400).json({ error: "Missing text or audio" });
       }
 
-      // Try both .filepath and .path for compatibility
-      const audioPath = audioFile.filepath || audioFile.path;
-      if (!audioPath) {
-        return res.status(400).json({ error: "No file path found in upload" });
-      }
-
-      const audioData = await fs.readFile(audioPath);
+      const audioData = await fs.readFile(audioFile.filepath);
 
       const result = await fetch(
         "https://eastus.api.cognitive.microsoft.com/speechtotext/v3.1/evaluations",
@@ -59,8 +45,15 @@ export default async function handler(req, res) {
         }
       );
 
-      const data = await result.json();
-      res.status(200).json(data);
+      let data;
+      try {
+        data = await result.json();
+        res.status(200).json(data);
+      } catch (e) {
+        const errorText = await result.text();
+        console.error("AZURE RAW ERROR:", errorText);
+        res.status(500).json({ error: "Azure API Error", details: errorText });
+      }
     } catch (error) {
       console.error("API ERROR:", error);
       res.status(500).json({ error: "Server error", details: error.message });
