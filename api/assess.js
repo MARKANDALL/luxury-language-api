@@ -1,4 +1,4 @@
-import { formidable } from "formidable";
+import formidable from "formidable";
 import fs from "fs/promises";
 
 export const config = {
@@ -12,25 +12,15 @@ export default async function handler(req, res) {
     return res.status(405).send("Only POST allowed");
   }
 
-  const form = formidable();
-
+  const form = formidable({});
   form.parse(req, async (err, fields, files) => {
     try {
       if (err) throw err;
 
-      // Debug: log fields and files
-      console.log('FIELDS:', fields);
-      console.log('FILES:', files);
-
       const referenceText = fields.text;
-      let audioFile = files.audio;
+      const audioFile = files.audio;
 
-      // Formidable sometimes returns files as arrays or objects
-      if (Array.isArray(audioFile)) {
-        audioFile = audioFile[0];
-      }
-
-      if (!referenceText || !audioFile || !audioFile.filepath) {
+      if (!referenceText || !audioFile) {
         return res.status(400).json({ error: "Missing text or audio" });
       }
 
@@ -54,8 +44,18 @@ export default async function handler(req, res) {
         }
       );
 
-      const data = await result.json();
-      res.status(200).json(data);
+      // Instead of assuming JSON, let's capture whatever Azure returns
+      const rawText = await result.text();
+      console.log("AZURE RAW RESPONSE:", rawText);
+
+      let data;
+      try {
+        data = JSON.parse(rawText);
+      } catch (e) {
+        // If not JSON, send back the raw response so we can debug
+        return res.status(500).json({ error: "Azure did not return JSON", raw: rawText });
+      }
+      return res.status(200).json(data);
     } catch (error) {
       console.error("API ERROR:", error);
       res.status(500).json({ error: "Server error", details: error.message });
