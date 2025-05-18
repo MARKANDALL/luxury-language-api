@@ -1,4 +1,4 @@
-import formidable from "formidable";
+import { IncomingForm } from "formidable";
 import fs from "fs/promises";
 
 export const config = {
@@ -12,7 +12,7 @@ export default async function handler(req, res) {
     return res.status(405).send("Only POST allowed");
   }
 
-  const form = new formidable.IncomingForm();
+  const form = new IncomingForm();
 
   form.parse(req, async (err, fields, files) => {
     try {
@@ -53,3 +53,4 @@ export default async function handler(req, res) {
     }
   });
 }
+
