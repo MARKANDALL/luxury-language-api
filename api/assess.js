@@ -1,4 +1,4 @@
-import formidable from "formidable";
+import { formidable } from "formidable";
 import fs from "fs/promises";
 
 export const config = {
@@ -12,7 +12,7 @@ export default async function handler(req, res) {
     return res.status(405).send("Only POST allowed");
   }
 
-  const form = new formidable.IncomingForm();
+  const form = formidable();
 
   form.parse(req, async (err, fields, files) => {
     try {
@@ -45,15 +45,8 @@ export default async function handler(req, res) {
         }
       );
 
-      let data;
-      try {
-        data = await result.json();
-        res.status(200).json(data);
-      } catch (e) {
-        const errorText = await result.text();
-        console.error("AZURE RAW ERROR:", errorText);
-        res.status(500).json({ error: "Azure API Error", details: errorText });
-      }
+      const data = await result.json();
+      res.status(200).json(data);
     } catch (error) {
       console.error("API ERROR:", error);
       res.status(500).json({ error: "Server error", details: error.message });
