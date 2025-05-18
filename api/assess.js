@@ -1,5 +1,6 @@
 import formidable from "formidable";
-import fs from "fs";
+import fs from "fs/promises";
+import path from "path";
 
 export const config = {
   api: {
@@ -12,15 +13,22 @@ export default async function handler(req, res) {
     return res.status(405).send("Only POST allowed");
   }
 
-  const form = new formidable.IncomingForm();
+  const form = new formidable.IncomingForm({
+    uploadDir: "/tmp",
+    keepExtensions: true,
+  });
 
-  form.parse(req, async (err, fields, files) => {
-    if (err) return res.status(500).json({ error: "Form parsing error" });
+  try {
+    const [fields, files] = await form.parse(req);
 
     const referenceText = fields.text;
-    const audioFilePath = files.audio.filepath;
+    const audioFile = files.audio;
 
-    const audioData = fs.readFileSync(audioFilePath);
+    if (!audioFile || !audioFile.filepath) {
+      return res.status(400).json({ error: "No audio file uploaded" });
+    }
+
+    const audioData = await fs.readFile(audioFile.filepath);
 
     const result = await fetch(
       "https://eastus.api.cognitive.microsoft.com/speechtotext/v3.1/evaluations",
@@ -30,7 +38,7 @@ export default async function handler(req, res) {
           "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
           "Content-Type": "audio/wav",
           "Pronunciation-Assessment": JSON.stringify({
-            referenceText: referenceText,
+            referenceText,
             gradingSystem: "HundredMark",
             dimension: "Comprehensive",
             enableMiscue: true,
@@ -42,5 +50,9 @@ export default async function handler(req, res) {
 
     const data = await result.json();
     return res.status(200).json(data);
-  });
+  } catch (err) {
+    console.error("Error:", err);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
 }
+
