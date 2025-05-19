@@ -24,7 +24,15 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Missing text or audio" });
       }
 
-      const audioData = await fs.readFile(audioFile.filepath);
+      // Get audio data from either .filepath or .buffer
+      let audioData;
+      if (audioFile.filepath) {
+        audioData = await fs.readFile(audioFile.filepath);
+      } else if (audioFile.buffer) {
+        audioData = audioFile.buffer;
+      } else {
+        return res.status(400).json({ error: "Audio file missing buffer or path" });
+      }
 
       const result = await fetch(
         "https://eastus.api.cognitive.microsoft.com/speechtotext/v3.1/evaluations",
@@ -44,15 +52,12 @@ export default async function handler(req, res) {
         }
       );
 
-      // Instead of assuming JSON, let's capture whatever Azure returns
+      // Read raw response for debugging
       const rawText = await result.text();
-      console.log("AZURE RAW RESPONSE:", rawText);
-
       let data;
       try {
         data = JSON.parse(rawText);
       } catch (e) {
-        // If not JSON, send back the raw response so we can debug
         return res.status(500).json({ error: "Azure did not return JSON", raw: rawText });
       }
       return res.status(200).json(data);
