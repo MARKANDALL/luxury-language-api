@@ -15,12 +15,9 @@ export default async function handler(req, res) {
     try {
       if (err) throw err;
 
-      // Log what's being received
-      console.log("FIELDS:", fields);
-      console.log("FILES:", files);
-
+      // Support both array and object for files.audio
+      const audioFile = Array.isArray(files.audio) ? files.audio[0] : files.audio;
       const referenceText = fields.text;
-      const audioFile = files.audio;
 
       if (!referenceText || !audioFile) {
         return res.status(400).json({
