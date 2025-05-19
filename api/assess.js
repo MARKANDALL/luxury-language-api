@@ -18,7 +18,6 @@ export default async function handler(req, res) {
     const referenceText = fields.text;
     const audioFile = files.audio;
 
-    // ADD THIS LOGIC
     let audioBuffer;
     if (audioFile?.filepath) {
       audioBuffer = await fs.readFile(audioFile.filepath);
@@ -41,10 +40,22 @@ export default async function handler(req, res) {
         }
       );
 
-      const data = await result.json();
-      res.status(200).json(data);
+      // Try to parse JSON, but if it fails, send back the raw text for debugging
+      let data;
+      try {
+        data = await result.json();
+        res.status(200).json(data);
+      } catch (jsonErr) {
+        const text = await result.text();
+        res.status(500).json({
+          error: "Azure did not return JSON",
+          status: result.status,
+          statusText: result.statusText,
+          raw: text
+        });
+      }
     } catch (e) {
-      res.status(500).json({ error: "Azure request failed", details: e.message });
+      res.status(500).json({ error: "Could not reach Azure endpoint", details: e.message });
     }
   });
 }
