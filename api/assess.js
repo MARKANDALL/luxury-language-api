@@ -2,65 +2,49 @@ import formidable from "formidable";
 import fs from "fs/promises";
 
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false }
 };
 
 export default async function handler(req, res) {
-  // --- CORS support for browsers ---
-  if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    res.status(200).end();
-    return;
-  }
-  res.setHeader("Access-Control-Allow-Origin", "*");
-
   if (req.method !== "POST") {
     return res.status(405).send("Only POST allowed");
   }
 
-  const form = formidable();
+  const form = formidable({ multiples: false });
 
   form.parse(req, async (err, fields, files) => {
+    if (err) return res.status(400).json({ error: "Parse error", details: err.message });
+
+    const referenceText = fields.text;
+    const audioFile = files.audio;
+
+    // ADD THIS LOGIC
+    let audioBuffer;
+    if (audioFile?.filepath) {
+      audioBuffer = await fs.readFile(audioFile.filepath);
+    } else if (audioFile?.buffer) {
+      audioBuffer = audioFile.buffer;
+    } else {
+      return res.status(400).json({ error: "Audio file missing buffer or path", debug: audioFile });
+    }
+
     try {
-      if (err) throw err;
-
-      const referenceText = fields.text;
-      const audioFile = files.audio;
-
-      if (!referenceText || !audioFile) {
-        return res.status(400).json({ error: "Missing text or audio" });
-      }
-
-      const audioData = await fs.readFile(audioFile.filepath);
-
-      // Use the basic Speech-to-Text endpoint for free tier
       const result = await fetch(
-        `https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed`,
+        "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed",
         {
           method: "POST",
           headers: {
             "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
-            "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
-            Accept: "application/json",
+            "Content-Type": "audio/wav"
           },
-          body: audioData,
+          body: audioBuffer
         }
       );
 
-      let data;
-      try {
-        data = await result.json();
-      } catch (e) {
-        data = { error: "Azure did not return JSON", raw: await result.text() };
-      }
+      const data = await result.json();
       res.status(200).json(data);
-    } catch (error) {
-      console.error("API ERROR:", error);
-      res.status(500).json({ error: "Server error", details: error.message });
+    } catch (e) {
+      res.status(500).json({ error: "Azure request failed", details: e.message });
     }
   });
 }
