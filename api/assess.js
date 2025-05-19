@@ -14,47 +14,29 @@ export default async function handler(req, res) {
   form.parse(req, async (err, fields, files) => {
     try {
       if (err) throw err;
-
-      // Support both array and object for files.audio
       const audioFile = Array.isArray(files.audio) ? files.audio[0] : files.audio;
-      const referenceText = fields.text;
-
-      if (!referenceText || !audioFile) {
-        return res.status(400).json({
-          error: "Missing text or audio",
-          debug: { fields, files }
-        });
+      if (!audioFile) {
+        return res.status(400).json({ error: "Missing audio file", debug: { files } });
       }
-
       let audioData;
       if (audioFile.filepath) {
         audioData = await fs.readFile(audioFile.filepath);
       } else if (audioFile.buffer) {
         audioData = audioFile.buffer;
       } else {
-        return res.status(400).json({
-          error: "Audio file missing buffer or path",
-          debug: { audioFile }
-        });
+        return res.status(400).json({ error: "Audio file missing buffer or path", debug: { audioFile } });
       }
 
-      const result = await fetch(
-        "https://eastus.api.cognitive.microsoft.com/speechtotext/v3.1/evaluations",
-        {
-          method: "POST",
-          headers: {
-            "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
-            "Content-Type": "audio/wav",
-            "Pronunciation-Assessment": JSON.stringify({
-              referenceText,
-              gradingSystem: "HundredMark",
-              dimension: "Comprehensive",
-              enableMiscue: true,
-            }),
-          },
-          body: audioData,
-        }
-      );
+      // Standard Azure speech-to-text (no pronunciation, just to check pipeline)
+      const url = "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US";
+      const result = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
+          "Content-Type": "audio/wav"
+        },
+        body: audioData,
+      });
 
       const rawText = await result.text();
       let data;
