@@ -2,9 +2,7 @@ import formidable from "formidable";
 import fs from "fs/promises";
 
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false }
 };
 
 export default async function handler(req, res) {
@@ -12,26 +10,35 @@ export default async function handler(req, res) {
     return res.status(405).send("Only POST allowed");
   }
 
-  const form = formidable({});
+  const form = formidable();
   form.parse(req, async (err, fields, files) => {
     try {
       if (err) throw err;
+
+      // Log what's being received
+      console.log("FIELDS:", fields);
+      console.log("FILES:", files);
 
       const referenceText = fields.text;
       const audioFile = files.audio;
 
       if (!referenceText || !audioFile) {
-        return res.status(400).json({ error: "Missing text or audio" });
+        return res.status(400).json({
+          error: "Missing text or audio",
+          debug: { fields, files }
+        });
       }
 
-      // Get audio data from either .filepath or .buffer
       let audioData;
       if (audioFile.filepath) {
         audioData = await fs.readFile(audioFile.filepath);
       } else if (audioFile.buffer) {
         audioData = audioFile.buffer;
       } else {
-        return res.status(400).json({ error: "Audio file missing buffer or path" });
+        return res.status(400).json({
+          error: "Audio file missing buffer or path",
+          debug: { audioFile }
+        });
       }
 
       const result = await fetch(
@@ -52,7 +59,6 @@ export default async function handler(req, res) {
         }
       );
 
-      // Read raw response for debugging
       const rawText = await result.text();
       let data;
       try {
