@@ -22,34 +22,42 @@ export default async function handler(req, res) {
   const form = formidable({ multiples: false });
   form.parse(req, async (err, fields, files) => {
     try {
+      console.log("Form parse:", { fields, files });
       if (err) throw err;
 
       const referenceText = fields.text;
       const audioFile = files.audio?.[0] || files.audio;
       if (!referenceText || !audioFile) {
+        console.error("Missing text or audio", { referenceText, audioFile });
         return res.status(400).json({ error: "Missing text or audio" });
       }
 
       const inputPath = audioFile.filepath;
       const outputPath = path.join(tmpdir(), `converted_${Date.now()}.wav`);
+      console.log("Converting audio file:", inputPath, "->", outputPath);
 
-      // Convert audio to correct PCM WAV format for Azure
       await new Promise((resolve, reject) => {
         ffmpeg(inputPath)
           .outputOptions([
-            "-ar 16000",          // 16 kHz sample rate
-            "-ac 1",              // mono
-            "-f wav",             // WAV container
-            "-sample_fmt s16"     // 16-bit PCM
+            "-ar 16000",
+            "-ac 1",
+            "-f wav",
+            "-sample_fmt s16"
           ])
-          .on("end", resolve)
-          .on("error", reject)
+          .on("end", () => {
+            console.log("ffmpeg conversion complete");
+            resolve();
+          })
+          .on("error", (err) => {
+            console.error("ffmpeg error:", err);
+            reject(err);
+          })
           .save(outputPath);
       });
 
       const audioBuffer = await fs.readFile(outputPath);
+      console.log("Read converted audio buffer, size:", audioBuffer.length);
 
-      // Pronunciation-Assessment: base64 JSON
       const pronAssessmentParams = {
         ReferenceText: referenceText,
         GradingSystem: "HundredMark",
@@ -58,6 +66,7 @@ export default async function handler(req, res) {
         EnableMiscue: true,
       };
       const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "utf8").toString("base64");
+      console.log("Pronunciation-Assessment header:", pronAssessmentHeader);
 
       const endpoint =
         "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed";
@@ -73,8 +82,10 @@ export default async function handler(req, res) {
         body: audioBuffer,
       });
 
-      // Always return the exact Azure response to client (for debugging)
       const text = await result.text();
+      console.log("Azure response status:", result.status);
+      console.log("Azure response body:", text);
+
       let json;
       try {
         json = JSON.parse(text);
@@ -86,7 +97,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // Return JSON, even if error
       if (result.status >= 400) {
         return res.status(result.status).json({
           error: "Azure error",
