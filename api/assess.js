@@ -6,11 +6,12 @@ export const config = {
 };
 
 export default async function handler(req, res) {
-  // CORS headers for browser requests
+  // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
+  // Preflight
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
@@ -21,8 +22,11 @@ export default async function handler(req, res) {
 
       const referenceText = fields.text;
       const audioFile = files.audio?.[0] || files.audio;
-      if (!referenceText || !audioFile) return res.status(400).json({ error: "Missing text or audio" });
+      if (!referenceText || !audioFile) {
+        return res.status(400).json({ error: "Missing text or audio" });
+      }
 
+      // Read file buffer
       let audioBuffer;
       if (audioFile.filepath) {
         audioBuffer = await fs.readFile(audioFile.filepath);
@@ -32,18 +36,19 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Audio file missing buffer or path", debug: audioFile });
       }
 
-      // Pronunciation-Assessment: base64 JSON
+      // Build Pronunciation-Assessment header (base64-encoded JSON)
       const pronAssessmentParams = {
         ReferenceText: referenceText,
         GradingSystem: "HundredMark",
         Granularity: "Phoneme",
         Dimension: "Comprehensive",
-        EnableProsodyAssessment: true, // enables prosody scoring if available
-        EnableMiscue: true             // allows miscue analysis
+        EnableMiscue: true,
       };
       const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "utf8").toString("base64");
 
-      const endpoint = "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed";
+      // Azure Speech endpoint for detailed scoring
+      const endpoint =
+        "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed";
 
       const result = await fetch(endpoint, {
         method: "POST",
@@ -51,7 +56,7 @@ export default async function handler(req, res) {
           "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
           "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
           "Pronunciation-Assessment": pronAssessmentHeader,
-          "Accept": "application/json"
+          "Accept": "application/json",
         },
         body: audioBuffer,
       });
@@ -59,17 +64,18 @@ export default async function handler(req, res) {
       let data;
       try {
         data = await result.json();
-        return res.status(result.status).json(data);
+        return res.status(200).json(data);
       } catch (jsonErr) {
         const text = await result.text();
         return res.status(500).json({
           error: "Azure did not return JSON",
           status: result.status,
           statusText: result.statusText,
-          raw: text
+          raw: text,
         });
       }
     } catch (error) {
+      console.error("API ERROR:", error);
       res.status(500).json({ error: "Server error", details: error.message });
     }
   });
