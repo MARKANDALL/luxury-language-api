@@ -2,25 +2,17 @@ import formidable from "formidable";
 import fs from "fs/promises";
 
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false },
 };
 
 export default async function handler(req, res) {
-  // CORS headers
+  // CORS headers for browser requests
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  // CORS preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Only POST allowed" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
   const form = formidable({ multiples: false });
   form.parse(req, async (err, fields, files) => {
@@ -29,10 +21,7 @@ export default async function handler(req, res) {
 
       const referenceText = fields.text;
       const audioFile = files.audio?.[0] || files.audio;
-
-      if (!referenceText || !audioFile) {
-        return res.status(400).json({ error: "Missing text or audio" });
-      }
+      if (!referenceText || !audioFile) return res.status(400).json({ error: "Missing text or audio" });
 
       let audioBuffer;
       if (audioFile.filepath) {
@@ -49,9 +38,10 @@ export default async function handler(req, res) {
         GradingSystem: "HundredMark",
         Granularity: "Phoneme",
         Dimension: "Comprehensive",
-        EnableMiscue: true,
+        EnableProsodyAssessment: true, // enables prosody scoring if available
+        EnableMiscue: true             // allows miscue analysis
       };
-      const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams)).toString("base64");
+      const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "utf8").toString("base64");
 
       const endpoint = "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed";
 
@@ -69,7 +59,7 @@ export default async function handler(req, res) {
       let data;
       try {
         data = await result.json();
-        return res.status(200).json(data);
+        return res.status(result.status).json(data);
       } catch (jsonErr) {
         const text = await result.text();
         return res.status(500).json({
@@ -80,7 +70,6 @@ export default async function handler(req, res) {
         });
       }
     } catch (error) {
-      console.error("API ERROR:", error);
       res.status(500).json({ error: "Server error", details: error.message });
     }
   });
