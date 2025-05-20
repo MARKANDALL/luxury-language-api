@@ -26,7 +26,6 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Missing text or audio" });
       }
 
-      // Read file buffer
       let audioBuffer;
       if (audioFile.filepath) {
         audioBuffer = await fs.readFile(audioFile.filepath);
@@ -36,7 +35,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Audio file missing buffer or path", debug: audioFile });
       }
 
-      // Build Pronunciation-Assessment header (base64-encoded JSON)
+      // Pronunciation-Assessment: base64 JSON
       const pronAssessmentParams = {
         ReferenceText: referenceText,
         GradingSystem: "HundredMark",
@@ -46,7 +45,6 @@ export default async function handler(req, res) {
       };
       const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "utf8").toString("base64");
 
-      // Azure Speech endpoint for detailed scoring
       const endpoint =
         "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed";
 
@@ -61,19 +59,32 @@ export default async function handler(req, res) {
         body: audioBuffer,
       });
 
-      let data;
+      // Always return the exact Azure response to client (for debugging)
+      const text = await result.text();
+      let json;
       try {
-        data = await result.json();
-        return res.status(200).json(data);
-      } catch (jsonErr) {
-        const text = await result.text();
-        return res.status(500).json({
-          error: "Azure did not return JSON",
+        json = JSON.parse(text);
+      } catch {
+        // Not JSON, just return the raw text
+        return res.status(result.status).json({
+          error: "Azure returned non-JSON response",
           status: result.status,
-          statusText: result.statusText,
           raw: text,
         });
       }
+
+      // Return JSON, even if error
+      if (result.status >= 400) {
+        return res.status(result.status).json({
+          error: "Azure error",
+          status: result.status,
+          json,
+        });
+      }
+
+      // Success
+      return res.status(200).json(json);
+
     } catch (error) {
       console.error("API ERROR:", error);
       res.status(500).json({ error: "Server error", details: error.message });
