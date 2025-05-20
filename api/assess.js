@@ -1,9 +1,13 @@
 import formidable from "formidable";
 import fs from "fs/promises";
+import ffmpeg from "fluent-ffmpeg";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import { tmpdir } from "os";
+import path from "path";
 
-export const config = {
-  api: { bodyParser: false },
-};
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
+export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
   // CORS headers
@@ -26,16 +30,26 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Missing text or audio" });
       }
 
-      let audioBuffer;
-      if (audioFile.filepath) {
-        audioBuffer = await fs.readFile(audioFile.filepath);
-      } else if (audioFile._writeStream && audioFile._writeStream.path) {
-        audioBuffer = await fs.readFile(audioFile._writeStream.path);
-      } else {
-        return res.status(400).json({ error: "Audio file missing buffer or path", debug: audioFile });
-      }
+      const inputPath = audioFile.filepath;
+      const outputPath = path.join(tmpdir(), `converted_${Date.now()}.wav`);
 
-      // Pronunciation-Assessment: base64 JSON, ASCII encoding for Azure
+      // Convert audio to correct PCM WAV format for Azure
+      await new Promise((resolve, reject) => {
+        ffmpeg(inputPath)
+          .outputOptions([
+            "-ar 16000",          // 16 kHz sample rate
+            "-ac 1",              // mono
+            "-f wav",             // WAV container
+            "-sample_fmt s16"     // 16-bit PCM
+          ])
+          .on("end", resolve)
+          .on("error", reject)
+          .save(outputPath);
+      });
+
+      const audioBuffer = await fs.readFile(outputPath);
+
+      // Pronunciation-Assessment: base64 JSON
       const pronAssessmentParams = {
         ReferenceText: referenceText,
         GradingSystem: "HundredMark",
@@ -43,13 +57,7 @@ export default async function handler(req, res) {
         Dimension: "Comprehensive",
         EnableMiscue: true,
       };
-      const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "ascii").toString("base64");
-
-      // Debug logging (visible in Vercel logs)
-      console.log("===Azure Pronunciation Header===");
-      console.log(pronAssessmentHeader);
-      console.log("===Reference Text===");
-      console.log(referenceText);
+      const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "utf8").toString("base64");
 
       const endpoint =
         "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed";
@@ -71,7 +79,6 @@ export default async function handler(req, res) {
       try {
         json = JSON.parse(text);
       } catch {
-        // Not JSON, just return the raw text
         return res.status(result.status).json({
           error: "Azure returned non-JSON response",
           status: result.status,
@@ -88,9 +95,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // Success
       return res.status(200).json(json);
-
     } catch (error) {
       console.error("API ERROR:", error);
       res.status(500).json({ error: "Server error", details: error.message });
