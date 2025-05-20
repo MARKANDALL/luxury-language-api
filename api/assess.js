@@ -8,12 +8,12 @@ export const config = {
 };
 
 export default async function handler(req, res) {
-  // Set CORS headers for all requests
-  res.setHeader("Access-Control-Allow-Origin", "*"); // You can restrict this later
+  // CORS headers
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  // Handle preflight OPTIONS request (CORS)
+  // CORS preflight
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
@@ -34,7 +34,6 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Missing text or audio" });
       }
 
-      // Read file buffer
       let audioBuffer;
       if (audioFile.filepath) {
         audioBuffer = await fs.readFile(audioFile.filepath);
@@ -44,13 +43,25 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Audio file missing buffer or path", debug: audioFile });
       }
 
+      // Pronunciation-Assessment: base64 JSON
+      const pronAssessmentParams = {
+        ReferenceText: referenceText,
+        GradingSystem: "HundredMark",
+        Granularity: "Phoneme",
+        Dimension: "Comprehensive",
+        EnableMiscue: true,
+      };
+      const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams)).toString("base64");
+
       const endpoint = "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed";
 
       const result = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
-          "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000"
+          "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
+          "Pronunciation-Assessment": pronAssessmentHeader,
+          "Accept": "application/json"
         },
         body: audioBuffer,
       });
