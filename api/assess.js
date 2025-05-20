@@ -6,10 +6,12 @@ export const config = {
 };
 
 export default async function handler(req, res) {
+  // CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
+  // Preflight
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
@@ -17,11 +19,13 @@ export default async function handler(req, res) {
   form.parse(req, async (err, fields, files) => {
     try {
       if (err) throw err;
+
       const referenceText = fields.text;
       const audioFile = files.audio?.[0] || files.audio;
       if (!referenceText || !audioFile) {
         return res.status(400).json({ error: "Missing text or audio" });
       }
+
       let audioBuffer;
       if (audioFile.filepath) {
         audioBuffer = await fs.readFile(audioFile.filepath);
@@ -31,7 +35,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Audio file missing buffer or path", debug: audioFile });
       }
 
-      // Build Pronunciation-Assessment header
+      // Pronunciation-Assessment: base64 JSON, ASCII encoding for Azure
       const pronAssessmentParams = {
         ReferenceText: referenceText,
         GradingSystem: "HundredMark",
@@ -39,10 +43,17 @@ export default async function handler(req, res) {
         Dimension: "Comprehensive",
         EnableMiscue: true,
       };
-      const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams)).toString("base64");
+      const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "ascii").toString("base64");
+
+      // Debug logging (visible in Vercel logs)
+      console.log("===Azure Pronunciation Header===");
+      console.log(pronAssessmentHeader);
+      console.log("===Reference Text===");
+      console.log(referenceText);
 
       const endpoint =
         "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed";
+
       const result = await fetch(endpoint, {
         method: "POST",
         headers: {
@@ -54,19 +65,32 @@ export default async function handler(req, res) {
         body: audioBuffer,
       });
 
-      let data;
+      // Always return the exact Azure response to client (for debugging)
+      const text = await result.text();
+      let json;
       try {
-        data = await result.json();
-        return res.status(200).json(data);
-      } catch (jsonErr) {
-        const text = await result.text();
-        return res.status(500).json({
-          error: "Azure did not return JSON",
+        json = JSON.parse(text);
+      } catch {
+        // Not JSON, just return the raw text
+        return res.status(result.status).json({
+          error: "Azure returned non-JSON response",
           status: result.status,
-          statusText: result.statusText,
           raw: text,
         });
       }
+
+      // Return JSON, even if error
+      if (result.status >= 400) {
+        return res.status(result.status).json({
+          error: "Azure error",
+          status: result.status,
+          json,
+        });
+      }
+
+      // Success
+      return res.status(200).json(json);
+
     } catch (error) {
       console.error("API ERROR:", error);
       res.status(500).json({ error: "Server error", details: error.message });
