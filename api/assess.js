@@ -25,7 +25,13 @@ export default async function handler(req, res) {
       console.log("Form parse:", { fields, files });
       if (err) throw err;
 
-      const referenceText = fields.text;
+      // FIX: Always ensure referenceText is a string (not an array)
+      let referenceText = fields.text;
+      if (Array.isArray(referenceText)) {
+        referenceText = referenceText[0];
+      }
+      console.log("Reference text (for Azure):", referenceText);
+
       const audioFile = files.audio?.[0] || files.audio;
       if (!referenceText || !audioFile) {
         console.error("Missing text or audio", { referenceText, audioFile });
