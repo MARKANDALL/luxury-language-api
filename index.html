@@ -14,6 +14,7 @@
         margin: 0 auto;
         padding: 2vw 2vw 3vw 2vw;
         min-height: 100vh;
+        text-align: center;
       }
       h2 {
         font-size: 2.2rem;
@@ -22,6 +23,8 @@
       }
       label {
         font-size: 1.15rem;
+        display: block;
+        text-align: center;
       }
       input[type="text"] {
         font-size: 1.25rem;
@@ -33,6 +36,15 @@
         margin-top: 0.3em;
         margin-bottom: 1.3em;
         display: block;
+        margin-left: auto;
+        margin-right: auto;
+        text-align: center;
+      }
+      .btn-group {
+        display: flex;
+        justify-content: center;
+        gap: 12px;
+        margin-bottom: 1.3em;
       }
       button {
         font-size: 1.25rem;
@@ -55,8 +67,8 @@
         min-height: 2rem;
       }
       #prettyResult {
-        font-size: 1.08rem;
-        margin-top: 1.1rem;
+        font-size: 1.13rem;
+        margin: 1.1rem auto 0 auto;
         width: 100%;
         max-width: 620px;
         background: #f7f7f7;
@@ -65,18 +77,26 @@
         word-break: break-word;
         overflow-x: auto;
         box-sizing: border-box;
+        text-align: center;
       }
       .score-table {
         border-collapse: collapse;
-        margin-top: 1em;
-        width: 100%;
-        font-size: 1.04rem;
+        margin: 1em auto 0 auto;
+        width: 95%;
+        font-size: 1.09rem;
+        background: #fff;
       }
       .score-table th,
       .score-table td {
         border: 1px solid #bbb;
-        padding: 6px 8px;
+        padding: 10px 10px;
         text-align: center;
+        white-space: nowrap;
+      }
+      .score-table th {
+        background: #f3f7fa;
+        font-size: 1.09rem;
+        font-weight: bold;
       }
       .score-good {
         color: #2a7a19;
@@ -94,47 +114,56 @@
         position: relative;
         cursor: pointer;
         border-bottom: 1px dotted #888;
+        margin-left: 3px;
+        display: inline-block;
       }
       .tooltip .tooltiptext {
         visibility: hidden;
-        width: 180px;
+        width: 210px;
         background-color: #444;
         color: #fff;
         text-align: left;
         border-radius: 5px;
-        padding: 8px;
+        padding: 10px;
         position: absolute;
         z-index: 2;
-        bottom: 125%;
+        top: 110%;
         left: 50%;
-        margin-left: -90px;
+        transform: translateX(-50%);
         opacity: 0;
         transition: opacity 0.4s;
-        font-size: 0.97em;
+        font-size: 1.08em;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        pointer-events: none;
       }
       .tooltip:hover .tooltiptext {
         visibility: visible;
         opacity: 1;
+        pointer-events: auto;
       }
       .tips-section {
-        margin: 14px 0 10px 0;
+        margin: 20px 0 13px 0;
         color: #244f8f;
+        text-align: left;
+        display: inline-block;
       }
       .raw-data-section {
         background: #f3f3f3;
-        margin: 1em 0;
-        padding: 10px;
+        margin: 1em auto;
+        padding: 15px;
         border-radius: 6px;
-        font-size: 0.97em;
-        max-height: 230px;
+        font-size: 1.16em;
+        max-width: 96vw;
+        max-height: 340px;
         overflow: auto;
         display: none;
+        text-align: left;
       }
       .show-raw-link {
         cursor: pointer;
         color: #0083ff;
         text-decoration: underline;
-        font-size: 1.03em;
+        font-size: 1.12em;
         margin-left: 8px;
       }
       @media (max-width: 650px) {
@@ -147,7 +176,7 @@
         #prettyResult,
         .score-table th,
         .score-table td {
-          font-size: 0.98rem;
+          font-size: 1.04rem;
         }
         button,
         input[type="text"],
@@ -168,7 +197,7 @@
         Enter reference text:<br />
         <input id="referenceText" value="Hello world" type="text" />
       </label>
-      <div>
+      <div class="btn-group">
         <button id="record">Record</button>
         <button id="stop" disabled>Stop</button>
       </div>
@@ -182,19 +211,19 @@
     <script>
       let mediaRecorder,
         audioChunks = [];
+      let isAnalyzing = false;
+
       document.getElementById("record").onclick = async () => {
         audioChunks = [];
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: true,
         });
         mediaRecorder = new MediaRecorder(stream);
-        mediaRecorder.start();
-        document.getElementById("status").textContent = "Recording...";
-        document.getElementById("record").disabled = true;
-        document.getElementById("stop").disabled = false;
 
+        // Attach ondataavailable each time (working version)
         mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
 
+        // Always attach onstop handler here (working version)
         mediaRecorder.onstop = async () => {
           const blob = new Blob(audioChunks, { type: "audio/wav" });
           const formData = new FormData();
@@ -220,15 +249,27 @@
           showPrettyResults(data);
           showRawData(data);
         };
+
+        mediaRecorder.start();
+        document.getElementById("status").textContent = "Recording...";
+        document.getElementById("record").disabled = true;
+        document.getElementById("stop").disabled = false;
+        document.getElementById("prettyResult").innerHTML = "";
       };
+
       document.getElementById("stop").onclick = () => {
         if (mediaRecorder && mediaRecorder.state === "recording") {
           mediaRecorder.stop();
-          document.getElementById("status").textContent = "Stopped";
+          document.getElementById("status").textContent = "Analyzing...";
           document.getElementById("stop").disabled = true;
           document.getElementById("record").disabled = false;
+          document.getElementById(
+            "prettyResult"
+          ).innerHTML = `<div style="font-size:1.18em;margin-top:12px;color:#777;">Analyzing...</div>`;
+          isAnalyzing = true;
         }
       };
+
       document.getElementById("toggleRaw").onclick = () => {
         const raw = document.getElementById("rawData");
         raw.style.display = raw.style.display === "block" ? "none" : "block";
@@ -242,8 +283,9 @@
         if (score >= 70) return "score-warn";
         return "score-bad";
       }
-      // Main: show results simply
+
       function showPrettyResults(data) {
+        isAnalyzing = false;
         const $out = document.getElementById("prettyResult");
         if (!data || data.error) {
           $out.innerHTML = `<span class="score-bad">Error: ${
@@ -287,13 +329,18 @@
               .join(" | ")}
           </span>
         </div>
-        <div style="margin:9px 0 0 0;"><b>What you said:</b> "${
+        <div style="margin:13px 0 0 0;"><b>What you said:</b> "${
           data.DisplayText || nbest.Display || "(No speech detected)"
         }"</div>
         <table class="score-table"><thead>
-        <tr><th>Word</th><th>Score</th><th>Error</th><th>Phonemes <span class="tooltip">(?)<span class="tooltiptext">${
-          exp.Phoneme
-        }</span></span></th></tr>
+        <tr>
+          <th style="min-width:72px;">Word</th>
+          <th style="min-width:80px;">Score</th>
+          <th style="min-width:80px;">Error</th>
+          <th style="min-width:150px;">Phonemes <span class="tooltip">(?)<span class="tooltiptext">${
+            exp.Phoneme
+          }</span></span></th>
+        </tr>
         </thead><tbody>
         `;
         (nbest.Words || []).forEach((word) => {
@@ -316,19 +363,23 @@
           </tr>`;
         });
         html += "</tbody></table>";
-        // Tips
+
+        // Tips: only top 4 lowest scores
         let tips = [];
         (nbest.Words || []).forEach((word) => {
           (word.Phonemes || []).forEach((p) => {
             if (p.AccuracyScore !== undefined && p.AccuracyScore < 85)
-              tips.push(
-                `Try practicing ${word.Word} - the sound "${p.Phoneme}" was weak (${p.AccuracyScore}%)`
-              );
+              tips.push({
+                text: `Try practicing ${word.Word} - the sound "${p.Phoneme}" was weak (${p.AccuracyScore}%)`,
+                score: p.AccuracyScore,
+              });
           });
         });
+        tips.sort((a, b) => a.score - b.score);
         if (tips.length)
           html += `<div class="tips-section"><b>Tips for You:</b><ul>${tips
-            .map((t) => `<li>${t}</li>`)
+            .slice(0, 4)
+            .map((t) => `<li>${t.text}</li>`)
             .join("")}</ul></div>`;
         else
           html += `<div class="tips-section"><b>Tips for You:</b> No major errors—great job!</div>`;
@@ -389,6 +440,10 @@
           2
         );
       }
+    </script>
+  </body>
+</html>
+
     </script>
   </body>
 </html>
