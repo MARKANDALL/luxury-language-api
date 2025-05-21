@@ -209,37 +209,26 @@
       </div>
     </div>
     <script>
-      let mediaRecorder,
-        audioChunks = [];
+      let mediaRecorder, audioChunks = [];
       let isAnalyzing = false;
 
       document.getElementById("record").onclick = async () => {
         audioChunks = [];
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-        });
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         mediaRecorder = new MediaRecorder(stream);
 
-        // Attach ondataavailable each time (working version)
         mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
 
-        // Always attach onstop handler here (working version)
         mediaRecorder.onstop = async () => {
           const blob = new Blob(audioChunks, { type: "audio/wav" });
           const formData = new FormData();
           formData.append("audio", blob);
-          formData.append(
-            "text",
-            document.getElementById("referenceText").value
-          );
+          formData.append("text", document.getElementById("referenceText").value);
 
-          const response = await fetch(
-            "https://luxury-language-api.vercel.app/api/assess",
-            {
-              method: "POST",
-              body: formData,
-            }
-          );
+          const response = await fetch("https://luxury-language-api.vercel.app/api/assess", {
+            method: "POST",
+            body: formData
+          });
           let data;
           try {
             data = await response.json();
@@ -248,6 +237,9 @@
           }
           showPrettyResults(data);
           showRawData(data);
+          // Set status message to "Finished: Ready for your next one?"
+          document.getElementById("status").textContent =
+            "Finished: Ready for your next one?";
         };
 
         mediaRecorder.start();
@@ -263,9 +255,8 @@
           document.getElementById("status").textContent = "Analyzing...";
           document.getElementById("stop").disabled = true;
           document.getElementById("record").disabled = false;
-          document.getElementById(
-            "prettyResult"
-          ).innerHTML = `<div style="font-size:1.18em;margin-top:12px;color:#777;">Analyzing...</div>`;
+          document.getElementById("prettyResult").innerHTML =
+            `<div style="font-size:1.18em;margin-top:12px;color:#777;">Analyzing...</div>`;
           isAnalyzing = true;
         }
       };
@@ -288,9 +279,7 @@
         isAnalyzing = false;
         const $out = document.getElementById("prettyResult");
         if (!data || data.error) {
-          $out.innerHTML = `<span class="score-bad">Error: ${
-            data?.error || "Unknown"
-          }</span>`;
+          $out.innerHTML = `<span class="score-bad">Error: ${data?.error || "Unknown"}</span>`;
           return;
         }
         const nbest = data.NBest && data.NBest[0];
@@ -313,6 +302,11 @@
           ["Completeness", nbest.CompletenessScore],
           ["Pronunciation", nbest.PronScore],
         ];
+        // Check if ALL scores are 0 or undefined
+        const allZero = scores.every(
+          ([, v]) => v === 0 || v === undefined || v === null
+        );
+
         let html = `
         <div>
           <b>Your Results:</b><br>
@@ -321,9 +315,7 @@
               .map(
                 ([k, v]) => `
               <span class="${scoreClass(v)}">${k}
-                <span class="tooltip">(?)<span class="tooltiptext">${
-                  exp[k] || ""
-                }</span></span>: ${v !== undefined ? v + "%" : "–"}</span>
+                <span class="tooltip">(?)<span class="tooltiptext">${exp[k] || ""}</span></span>: ${v !== undefined ? v + "%" : "–"}</span>
             `
               )
               .join(" | ")}
@@ -337,52 +329,51 @@
           <th style="min-width:72px;">Word</th>
           <th style="min-width:80px;">Score</th>
           <th style="min-width:80px;">Error</th>
-          <th style="min-width:150px;">Phonemes <span class="tooltip">(?)<span class="tooltiptext">${
-            exp.Phoneme
-          }</span></span></th>
+          <th style="min-width:150px;">Phonemes <span class="tooltip">(?)<span class="tooltiptext">${exp.Phoneme}</span></span></th>
         </tr>
         </thead><tbody>
         `;
         (nbest.Words || []).forEach((word) => {
-          let err =
-            word.ErrorType && word.ErrorType !== "None" ? word.ErrorType : "";
+          let err = word.ErrorType && word.ErrorType !== "None" ? word.ErrorType : "";
           html += `<tr>
             <td>${word.Word}</td>
-            <td class="${scoreClass(word.AccuracyScore)}">${
-            word.AccuracyScore !== undefined ? word.AccuracyScore + "%" : "–"
-          }</td>
+            <td class="${scoreClass(word.AccuracyScore)}">${word.AccuracyScore !== undefined ? word.AccuracyScore + "%" : "–"}</td>
             <td>${err}</td>
             <td>${(word.Phonemes || [])
               .map(
                 (p) =>
-                  `<span class="${scoreClass(p.AccuracyScore)}">${p.Phoneme} (${
-                    p.AccuracyScore !== undefined ? p.AccuracyScore + "%" : "–"
-                  })</span>`
+                  `<span class="${scoreClass(p.AccuracyScore)}">${p.Phoneme} (${p.AccuracyScore !== undefined ? p.AccuracyScore + "%" : "–"})</span>`
               )
               .join(", ")}</td>
           </tr>`;
         });
         html += "</tbody></table>";
 
-        // Tips: only top 4 lowest scores
+        // Tips
         let tips = [];
-        (nbest.Words || []).forEach((word) => {
-          (word.Phonemes || []).forEach((p) => {
-            if (p.AccuracyScore !== undefined && p.AccuracyScore < 85)
-              tips.push({
-                text: `Try practicing ${word.Word} - the sound "${p.Phoneme}" was weak (${p.AccuracyScore}%)`,
-                score: p.AccuracyScore,
-              });
+        if (allZero) {
+          html += `<div class="tips-section" style="color:#d43c2c;"><b>Nothing was recorded.</b><br>
+          Make sure your microphone is allowed, and try speaking clearly and loud enough.<br>
+          (You may need to grant microphone permission or check your browser/device audio settings.)</div>`;
+        } else {
+          (nbest.Words || []).forEach((word) => {
+            (word.Phonemes || []).forEach((p) => {
+              if (p.AccuracyScore !== undefined && p.AccuracyScore < 85)
+                tips.push({
+                  text: `Try practicing ${word.Word} - the sound "${p.Phoneme}" was weak (${p.AccuracyScore}%)`,
+                  score: p.AccuracyScore,
+                });
+            });
           });
-        });
-        tips.sort((a, b) => a.score - b.score);
-        if (tips.length)
-          html += `<div class="tips-section"><b>Tips for You:</b><ul>${tips
-            .slice(0, 4)
-            .map((t) => `<li>${t.text}</li>`)
-            .join("")}</ul></div>`;
-        else
-          html += `<div class="tips-section"><b>Tips for You:</b> No major errors—great job!</div>`;
+          tips.sort((a, b) => a.score - b.score);
+          if (tips.length)
+            html += `<div class="tips-section"><b>Tips for You:</b><ul>${tips
+              .slice(0, 4)
+              .map((t) => `<li>${t.text}</li>`)
+              .join("")}</ul></div>`;
+          else
+            html += `<div class="tips-section"><b>Tips for You:</b> No major errors—great job!</div>`;
+        }
 
         $out.innerHTML = html;
       }
@@ -440,10 +431,6 @@
           2
         );
       }
-    </script>
-  </body>
-</html>
-
     </script>
   </body>
 </html>
