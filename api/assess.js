@@ -25,7 +25,7 @@ export default async function handler(req, res) {
       console.log("Form parse:", { fields, files });
       if (err) throw err;
 
-      // FIX: Always ensure referenceText is a string (not an array)
+      // Always ensure referenceText is a string (not an array)
       let referenceText = fields.text;
       if (Array.isArray(referenceText)) {
         referenceText = referenceText[0];
@@ -64,12 +64,14 @@ export default async function handler(req, res) {
       const audioBuffer = await fs.readFile(outputPath);
       console.log("Read converted audio buffer, size:", audioBuffer.length);
 
+      // Explicitly set US English in params and endpoint
       const pronAssessmentParams = {
         ReferenceText: referenceText,
         GradingSystem: "HundredMark",
         Granularity: "Phoneme",
         Dimension: "Comprehensive",
         EnableMiscue: true,
+        Language: "en-US", // <-- Explicitly set American English
       };
       const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "utf8").toString("base64");
       console.log("Pronunciation-Assessment header:", pronAssessmentHeader);
