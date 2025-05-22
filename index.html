@@ -173,6 +173,11 @@
         margin-left: 8px;
         font-size: 1.06em;
       }
+      #chunkProgress {
+        margin-left: 8px;
+        font-size: 1.07em;
+        color: #1a3a80;
+      }
       @media (max-width: 650px) {
         #container {
           padding: 1vw 0.5vw 4vw 0.5vw;
@@ -204,12 +209,17 @@
         Enter reference text:<br />
         <input id="referenceText" placeholder="Type here, then record what you typed!" type="text" />
       </label>
-      <!-- Rotating Sentences Section -->
+      <!-- Rainbow Passage Chunks Section -->
       <div id="suggested-section">
-        <span style="font-size:1.05em;">Try this sentence:</span>
+        <span style="font-size:1.05em;">Rainbow Passage:</span>
         <span id="suggestedSentence"></span>
+        <div style="margin:8px 0;">
+          <span id="chunkProgress"></span>
+        </div>
+        <button id="nextChunkBtn" style="margin-right:8px;">Next Chunk</button>
+        <button id="showSummaryBtn" style="display:none;">Show Summary</button>
         <span class="tooltip" style="margin-left:5px;cursor:pointer;">(?)<span class="tooltiptext" style="font-size:1em;">
-          These sentences are designed to cover nearly all sounds in English. Practicing them helps reveal your pronunciation strengths and weaknesses.
+          These chunks are designed to cover nearly all sounds in English. Practicing them helps reveal your pronunciation strengths and weaknesses.
         </span></span>
       </div>
       <div class="btn-group">
@@ -224,26 +234,57 @@
       </div>
     </div>
     <script>
-      // Rotating sentences logic
-      const sentences = [
-        "The quick brown fox jumps over the lazy dog.",
-        "Sheep wish to watch the television.",
-        "I thought about the rough cough and the tough laugh.",
-        "A huge orange umbrella opened up on an ugly day.",
-        "Will you bring the blue glue to Sue’s shoe?",
-        "He’s measuring pleasure and treasure in leisure.",
-        "Bright lights frighten night right away.",
-        "Cats chase mice quietly by the river.",
-        "This thin thing is the author’s thesis."
+      // --- Rainbow Passage Chunking ---
+      const rainbowChunks = [
+        "When the sunlight strikes raindrops in the air, they act like a prism and form a rainbow.",
+        "The rainbow is a division of white light into many beautiful colors.",
+        "These take the shape of a long, round arch, with its path high above,",
+        "and its two ends apparently beyond the horizon.",
+        "There is, according to legend, a boiling pot of gold at one end.",
+        "People look, but no one ever finds it.",
+        "When a man looks for something beyond his reach,",
+        "his friends say he is looking for the pot of gold at the end of the rainbow.",
+        "Others have tried to explain the phenomenon physically.",
+        "Aristotle thought that the rainbow was caused by reflection of the sun’s rays by the rain.",
+        "Since then, physicists have found that it is not reflection, but refraction by the raindrops,",
+        "which causes the rainbows."
       ];
-      let sentIdx = 0;
-      function showSentence() {
-        document.getElementById('suggestedSentence').textContent = sentences[sentIdx];
-        sentIdx = (sentIdx + 1) % sentences.length;
-      }
-      showSentence();
-      setInterval(showSentence, 7000); // Rotate every 7 seconds
+      let currentChunkIdx = 0;
 
+      function showCurrentChunk() {
+        document.getElementById('suggestedSentence').textContent = rainbowChunks[currentChunkIdx];
+        document.getElementById('referenceText').value = rainbowChunks[currentChunkIdx];
+        document.getElementById('chunkProgress').textContent =
+          `Chunk ${currentChunkIdx + 1} of ${rainbowChunks.length}`;
+        document.getElementById('nextChunkBtn').style.display =
+          currentChunkIdx < rainbowChunks.length - 1 ? '' : 'none';
+        document.getElementById('showSummaryBtn').style.display =
+          currentChunkIdx === rainbowChunks.length - 1 ? '' : 'none';
+      }
+
+      function goToNextChunk() {
+        if (currentChunkIdx < rainbowChunks.length - 1) {
+          currentChunkIdx++;
+          showCurrentChunk();
+          document.getElementById('prettyResult').innerHTML = "";
+          document.getElementById('status').textContent = "Not recording";
+        }
+      }
+
+      function showSummary() {
+        document.getElementById('prettyResult').innerHTML =
+          `<b>All chunks completed!</b><br>This is where a full summary/analysis will go.`;
+        document.getElementById('showSummaryBtn').style.display = 'none';
+      }
+
+      window.onload = function() {
+        showCurrentChunk();
+      };
+
+      document.getElementById('nextChunkBtn').onclick = goToNextChunk;
+      document.getElementById('showSummaryBtn').onclick = showSummary;
+
+      // --- Your existing audio/analysis code below remains unchanged! ---
       let mediaRecorder, audioChunks = [];
       let isAnalyzing = false;
 
@@ -429,42 +470,4 @@
               (k === "Words" && Array.isArray(data[k]))
             )
               continue;
-            if (Array.isArray(data[k]) && k === "NBest") {
-              cleaned[k] = data[k].map((nb) => {
-                const nb2 = { ...nb };
-                delete nb2.Offset;
-                delete nb2.SNR;
-                delete nb2.ITN;
-                delete nb2.MaskedITN;
-                if (Array.isArray(nb2.Words)) {
-                  nb2.Words = nb2.Words.map((w) => {
-                    const w2 = { ...w };
-                    delete w2.Offset;
-                    delete w2.Syllables;
-                    if (Array.isArray(w2.Phonemes)) {
-                      w2.Phonemes = w2.Phonemes.map((p) => {
-                        const p2 = { ...p };
-                        delete p2.Offset;
-                        return p2;
-                      });
-                    }
-                    return w2;
-                  });
-                }
-                return nb2;
-              });
-            } else {
-              cleaned[k] = filter(data[k]);
-            }
-          }
-          return cleaned;
-        }
-        document.getElementById("rawData").textContent = JSON.stringify(
-          filter(data),
-          null,
-          2
-        );
-      }
-    </script>
-  </body>
-</html>
+            if (Array
