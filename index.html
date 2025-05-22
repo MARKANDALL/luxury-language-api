@@ -217,8 +217,10 @@
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         mediaRecorder = new MediaRecorder(stream);
 
+        // Attach ondataavailable each time (working version)
         mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
 
+        // Always attach onstop handler here (working version)
         mediaRecorder.onstop = async () => {
           const blob = new Blob(audioChunks, { type: "audio/wav" });
           const formData = new FormData();
@@ -237,9 +239,6 @@
           }
           showPrettyResults(data);
           showRawData(data);
-          // Set status message to "Finished: Ready for your next one?"
-          document.getElementById("status").textContent =
-            "Finished: Ready for your next one?";
         };
 
         mediaRecorder.start();
@@ -302,11 +301,6 @@
           ["Completeness", nbest.CompletenessScore],
           ["Pronunciation", nbest.PronScore],
         ];
-        // Check if ALL scores are 0 or undefined
-        const allZero = scores.every(
-          ([, v]) => v === 0 || v === undefined || v === null
-        );
-
         let html = `
         <div>
           <b>Your Results:</b><br>
@@ -349,31 +343,25 @@
         });
         html += "</tbody></table>";
 
-        // Tips
+        // Tips: only top 4 lowest scores
         let tips = [];
-        if (allZero) {
-          html += `<div class="tips-section" style="color:#d43c2c;"><b>Nothing was recorded.</b><br>
-          Make sure your microphone is allowed, and try speaking clearly and loud enough.<br>
-          (You may need to grant microphone permission or check your browser/device audio settings.)</div>`;
-        } else {
-          (nbest.Words || []).forEach((word) => {
-            (word.Phonemes || []).forEach((p) => {
-              if (p.AccuracyScore !== undefined && p.AccuracyScore < 85)
-                tips.push({
-                  text: `Try practicing ${word.Word} - the sound "${p.Phoneme}" was weak (${p.AccuracyScore}%)`,
-                  score: p.AccuracyScore,
-                });
-            });
+        (nbest.Words || []).forEach((word) => {
+          (word.Phonemes || []).forEach((p) => {
+            if (p.AccuracyScore !== undefined && p.AccuracyScore < 85)
+              tips.push({
+                text: `Try practicing ${word.Word} - the sound "${p.Phoneme}" was weak (${p.AccuracyScore}%)`,
+                score: p.AccuracyScore,
+              });
           });
-          tips.sort((a, b) => a.score - b.score);
-          if (tips.length)
-            html += `<div class="tips-section"><b>Tips for You:</b><ul>${tips
-              .slice(0, 4)
-              .map((t) => `<li>${t.text}</li>`)
-              .join("")}</ul></div>`;
-          else
-            html += `<div class="tips-section"><b>Tips for You:</b> No major errors—great job!</div>`;
-        }
+        });
+        tips.sort((a, b) => a.score - b.score);
+        if (tips.length)
+          html += `<div class="tips-section"><b>Tips for You:</b><ul>${tips
+            .slice(0, 4)
+            .map((t) => `<li>${t.text}</li>`)
+            .join("")}</ul></div>`;
+        else
+          html += `<div class="tips-section"><b>Tips for You:</b> No major errors—great job!</div>`;
 
         $out.innerHTML = html;
       }
