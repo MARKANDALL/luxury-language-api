@@ -1,8 +1,9 @@
 {
   "type": "module",
   "dependencies": {
-    "formidable": "^3.5.4",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "fluent-ffmpeg": "^2.1.2",
-    "@ffmpeg-installer/ffmpeg": "^1.1.0"
+    "formidable": "^3.5.4",
+    "openai": "^4.103.0"
   }
 }
