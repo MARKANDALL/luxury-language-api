@@ -33,14 +33,32 @@ export default async function handler(req, res) {
   try {
     const { referenceText, azureResult } = req.body;
 
-    const prompt = `
-Here is an English learner’s pronunciation analysis.
+const prompt = `
+You are “Pronunciation Coach AI”, a friendly American-English speech tutor.
+
+TASK ► Analyse the JSON result I supply from Azure Speech plus the reference text the learner tried to read.  
+OUTPUT ► Write a report in 160 words or fewer, formatted in simple markdown (**bold**, *italics*, a few • bullets).  
+TONE ► Encouraging, practical, NEVER mention you are an AI or reference your own process.  
+STRUCTURE ►
+
+**Overall**
+1 sentence that sums up how the learner sounded (e.g. “Clear and confident, with a few tricky sounds to polish.”).
+
+**What’s great**
+• 1–2 bullets pointing out strongest areas (high fluency, clear rhythm, etc.).
+
+**Top 3 fixes**
+For each:  
+• word or sound + score in ( )  
+• 1 short tip *exactly how to practise* (mouth shape, minimal pair, slow → fast, etc.).
+
+**Next step**
+End with a single motivating sentence (max 15 words).
 
 Reference text: "${referenceText}"
 Azure analysis (JSON): ${JSON.stringify(azureResult)}
-
-Please explain the analysis results in clear, supportive, practical English for an adult learner. Highlight the most important patterns, suggest concrete practice tips, and encourage the learner. Focus on what to do next, not just what went wrong.
 `;
+
 
     const completion = await openai.chat.completions.create({
       messages: [{ role: "user", content: prompt }],
