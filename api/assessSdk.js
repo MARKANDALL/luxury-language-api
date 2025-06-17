@@ -1,3 +1,4 @@
+
 import formidable from "formidable";
 import fs from "fs/promises";
 import ffmpeg from "fluent-ffmpeg";
@@ -19,6 +20,13 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST")
     return res.status(405).json({ error: "Only POST allowed" });
+    // ---------- simple diagnostics ----------
+  console.log("[/api/assessSdk] called");
+  console.log("Incoming headers:", req.headers);
+  console.log("AZURE_SPEECH_KEY set? ", !!process.env.AZURE_SPEECH_KEY);
+  console.log("AZURE_SPEECH_REGION :", process.env.AZURE_SPEECH_REGION);
+  //-----------------------------------------
+
 
   // ── 1. Parse the multipart form (text + audio blob) ───────────
   const form = formidable({ multiples: false });
