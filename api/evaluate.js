@@ -1,5 +1,3 @@
-// api/evaluate.ts  — Node runtime, full rewrite 18 Jun 2025
-// ---------------- ↓↓ three lines above for orientation ↓↓
 import formidable from "formidable";
 import fs from "fs/promises";
 import { tmpdir } from "os";
