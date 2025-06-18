@@ -1,5 +1,7 @@
 {
   "functions": {
-    "api/evaluate.js": { "runtime": "nodejs18.x@latest" }
+    "api/evaluate.js": {
+      "runtime": "nodejs18.x"
+    }
   }
 }
