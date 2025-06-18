@@ -90,7 +90,7 @@ recognizer.recognizeOnceAsync(
     if (result.reason === sdk.ResultReason.RecognizedSpeech) {
       const detailJson = result.properties.get(
         sdk.PropertyId.SpeechServiceResponse_JsonResult
-      );
+      );   // ← notice, just one closing parenthesis and semicolon
       return res.status(200).json(JSON.parse(detailJson));
     }
 
