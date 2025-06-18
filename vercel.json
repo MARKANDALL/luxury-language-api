@@ -1,5 +1,5 @@
 {
   "functions": {
-    "api/evaluate.js": { "runtime": "vercel-nodejs@4.34.0" }
+    "api/evaluate.js": { "runtime": "nodejs18.x@latest" }
   }
 }
