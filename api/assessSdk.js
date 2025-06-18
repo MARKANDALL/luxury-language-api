@@ -85,26 +85,24 @@ export default async function handler(req, res) {
       const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
       paConfig.applyTo(recognizer);
 
-      recognizer.recognizeOnceAsync(
-        (result) => {
-          if (result.reason === sdk.ResultReason.RecognizedSpeech) {
-            // parse JSON in result.properties
-            const detailJson = result.properties.get(
-              sdk.PropertyId.SpeechServiceResponse_JsonResult
-            );
-            res.status(200).json(JSON.parse(detailJson));
-          } else {
-            res
-              .status(500)
-              .json({ error: "Recognition failed", detail: result });
-          }
-        },
-        (err) => {
-          res.status(500).json({ error: err.toString() });
-        }
+recognizer.recognizeOnceAsync(
+  (result) => {
+    if (result.reason === sdk.ResultReason.RecognizedSpeech) {
+      const detailJson = result.properties.get(
+        sdk.PropertyId.SpeechServiceResponse_JsonResult
       );
-    } catch (e) {
-      res.status(500).json({ error: e.message });
+      return res.status(200).json(JSON.parse(detailJson));
     }
-  });
-}
+
+    // ‼️ log everything Azure gives us
+    console.error('[Azure-result]', JSON.stringify(result, null, 2));
+
+    return res
+      .status(500)
+      .json({ error: "Recognition failed", detail: result });
+  },
+  (err) => {
+    console.error('[Azure-error]', err); // 👈 this logs SDK and runtime errors!
+    res.status(500).json({ error: err.toString() });
+  }
+);
