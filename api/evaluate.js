@@ -35,8 +35,8 @@ export default async function handler(req, res) {
 
   // ---- 3. Azure Pronunciation + Prosody ----
   const speechConfig = sdk.SpeechConfig.fromSubscription(
-    process.env.AZURE_SPEECH_KEY!,
-    process.env.AZURE_REGION!
+    process.env.AZURE_SPEECH_KEY,
+    process.env.AZURE_REGION
   );
   speechConfig.setProperty(
     "SpeechServiceResponse_OutputFormat",
