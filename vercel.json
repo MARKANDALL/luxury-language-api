@@ -1,7 +1,5 @@
 {
   "functions": {
-    "api/assessSdk.js": { "runtime": "nodejs18.x" },
-    "api/pronunciation-gpt.js": { "runtime": "nodejs18.x" },
-    "api/assess.js": { "runtime": "nodejs18.x" }
+    "api/evaluate.js": { "runtime": "nodejs18.x" }
   }
 }
