@@ -104,5 +104,6 @@ recognizer.recognizeOnceAsync(
   (err) => {
     console.error('[Azure-error]', err); // 👈 this logs SDK and runtime errors!
     res.status(500).json({ error: err.toString() });
-  }
-);
+    }             
+  });                
+}    
