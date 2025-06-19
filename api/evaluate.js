@@ -31,22 +31,36 @@ export default async function handler(req, res) {
   try {
     // --- 1. Parse incoming WebM file with formidable ---
     const form = formidable({ multiples: false });
-    const files = await new Promise((resolve, reject) => {
-      form.parse(req, (err, fields, files) => (err ? reject(err) : resolve(files)));
+    const { fields, files } = await new Promise((resolve, reject) => {
+      form.parse(req, (err, fields, files) => (err ? reject(err) : resolve({ fields, files })));
     });
-    const inputFile = Object.values(files)[0];
 
-    // --- LOGGING for debugging upload/file path issues ---
-    console.log("inputFile:", inputFile);
+    // LOG: dump the full files object to see field names/properties
+    console.error("FORMIDABLE FILES OBJECT:", files);
 
-    // --- Check for file presence and path validity ---
-    if (!inputFile) throw new Error("No file uploaded (files is empty).");
+    // If you use custom field name for file upload, adjust here!
+    // Try to always prefer the 'file' field; fallback to first file if not present.
+    const inputFile = files.file || Object.values(files)[0];
 
-    // Support both `.filepath` and `.path` for compatibility
+    // LOG: show which inputFile we are using
+    console.error("SELECTED inputFile:", inputFile);
+
+    if (!inputFile) {
+      throw new Error("No file uploaded (files object is empty): " + JSON.stringify(files));
+    }
+
+    // LOG: check for both possible path properties
     const inPath = inputFile.filepath || inputFile.path;
-    console.log("inPath:", inPath); // LOGGING
+    console.error("inputFile.filepath:", inputFile.filepath);
+    console.error("inputFile.path:", inputFile.path);
+    console.error("Resolved inPath:", inPath);
 
-    if (!inPath) throw new Error("No valid file path in upload (missing .filepath and .path).");
+    if (!inPath) {
+      throw new Error(
+        "No valid file path in upload (missing .filepath and .path). InputFile: " +
+        JSON.stringify(inputFile)
+      );
+    }
 
     const wavPath = path.join(tmpdir(), `${Date.now()}.wav`);
 
@@ -60,7 +74,10 @@ export default async function handler(req, res) {
         .format("wav")
         .save(wavPath)
         .on("end", resolve)
-        .on("error", reject);
+        .on("error", err => {
+          console.error("ffmpeg error:", err);
+          reject(err);
+        });
     });
 
     // --- 3. Azure Speech Config ---
