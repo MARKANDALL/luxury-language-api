@@ -29,27 +29,31 @@ export default async function handler(req, res) {
   }
 
   try {
-    // --- 1. Parse incoming WebM file with formidable ---
+    // 1. Parse incoming file with formidable
     const form = formidable({ multiples: false });
     const { fields, files } = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => (err ? reject(err) : resolve({ fields, files })));
     });
 
-    // LOG: dump the full files object to see field names/properties
+    // LOG: see the full files object
     console.error("FORMIDABLE FILES OBJECT:", files);
 
-    // Get the file whether it's directly or inside an array
-    let inputFile = files.file || Object.values(files)[0];
-    if (Array.isArray(inputFile)) inputFile = inputFile[0];
+    // Use the field "audio" if present, or fallback to any field.
+    let inputFile;
+    if (files.audio) {
+      inputFile = Array.isArray(files.audio) ? files.audio[0] : files.audio;
+    } else {
+      // fallback: pick the first field if you ever switch back to "file"
+      const firstField = Object.values(files)[0];
+      inputFile = Array.isArray(firstField) ? firstField[0] : firstField;
+    }
 
-    // LOG: show which inputFile we are using
     console.error("SELECTED inputFile:", inputFile);
 
     if (!inputFile) {
       throw new Error("No file uploaded (files object is empty): " + JSON.stringify(files));
     }
 
-    // LOG: check for both possible path properties
     const inPath = inputFile.filepath || inputFile.path;
     console.error("inputFile.filepath:", inputFile.filepath);
     console.error("inputFile.path:", inputFile.path);
