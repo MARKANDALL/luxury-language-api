@@ -1,5 +1,3 @@
-// api/evaluate.js — Node runtime, CORS enabled, full rewrite 18 Jun 2025
-
 import formidable from "formidable";
 import fs from "fs/promises";
 import { tmpdir } from "os";
@@ -15,12 +13,11 @@ export const config = {
 };
 
 export default async function handler(req, res) {
-  // --- Add CORS headers to all responses ---
+  // --- CORS headers ---
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  // --- Respond immediately to OPTIONS (CORS preflight) ---
   if (req.method === "OPTIONS") {
     res.status(200).end();
     return;
@@ -32,25 +29,31 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Save incoming WebM to temp
+    // 1. Parse incoming WebM file
     const form = formidable({ multiples: false });
-    const [{ filepath: inPath }] = await new Promise((ok, fail) =>
-      form.parse(req, (e, _fields, files) => (e ? fail(e) : ok(Object.values(files))))
-    );
+    const files = await new Promise((resolve, reject) => {
+      form.parse(req, (err, fields, files) => (err ? reject(err) : resolve(files)));
+    });
+    const inputFile = Object.values(files)[0];
+    if (!inputFile) throw new Error("No file uploaded.");
 
+    const inPath = inputFile.filepath || inputFile.path;
     const wavPath = path.join(tmpdir(), `${Date.now()}.wav`);
 
-    // 2. Convert → 16 kHz mono WAV (Azure wants this)
-    await new Promise((ok, fail) =>
+    // 2. ffmpeg: Convert WebM to 16kHz mono WAV
+    await new Promise((resolve, reject) => {
       ffmpeg(inPath)
-        .outputOptions("-ar 16000", "-ac 1")
-        .toFormat("wav")
+        .inputFormat("webm")
+        .audioCodec("pcm_s16le")
+        .audioFrequency(16000)         // This is the correct way!
+        .audioChannels(1)
+        .format("wav")
         .save(wavPath)
-        .on("end", ok)
-        .on("error", fail)
-    );
+        .on("end", resolve)
+        .on("error", reject);
+    });
 
-    // 3. Azure Pronunciation + Prosody
+    // 3. Azure Speech Config
     const speechConfig = sdk.SpeechConfig.fromSubscription(
       process.env.AZURE_SPEECH_KEY,
       process.env.AZURE_REGION
@@ -58,29 +61,35 @@ export default async function handler(req, res) {
     speechConfig.setProperty("SpeechServiceResponse_OutputFormat", "Detailed");
     speechConfig.setProperty("EnableAudioProsodyData", "True");
 
-    const audioConfig = sdk.AudioConfig.fromWavFileInput(await fs.readFile(wavPath));
+    // 4. Load WAV and analyze
+    const wavData = await fs.readFile(wavPath);
+    const audioConfig = sdk.AudioConfig.fromWavFileInput(wavData);
     const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
 
-    const result = await new Promise((ok, fail) =>
-      recognizer.recognizeOnceAsync(r => (r.errorDetails ? fail(r) : ok(r)))
-    );
+    const result = await new Promise((resolve, reject) => {
+      recognizer.recognizeOnceAsync(r => (r.errorDetails ? reject(r) : resolve(r)));
+    });
 
-    // 4. Parse core + prosody into lean JSON
-    const payload = extractPronunciationAndProsody(JSON.parse(result.json));
+    if (!result || !result.json) throw new Error("No recognition result.");
+    const data = JSON.parse(result.json);
+
+    // 5. Extract prosody and core scoring
+    const payload = extractPronunciationAndProsody(data);
 
     res.status(200).json(payload);
   } catch (err) {
-    // Return error info to frontend (for debugging)
+    console.error("API error:", err);
     res.status(500).json({ error: err.message || "Server error" });
   }
 }
 
-// ---------- helper ----------
+// --- Helper: extract word-level and prosody data ---
 function extractPronunciationAndProsody(data) {
-  const words = data.NBest[0].Words || [];
-  const prosody = data.NBest[0].AudioProsodyData || [];
+  const nbest = (data.NBest && data.NBest[0]) || {};
+  const words = nbest.Words || [];
+  const prosody = nbest.AudioProsodyData || [];
 
-  // Map pitch points to words (nearest-timestamp match)
+  // For each word, find prosody segments whose offset is within word offset & duration
   const enriched = words.map(w => {
     const segment = prosody.filter(
       p => p.Offset >= w.Offset && p.Offset <= w.Offset + w.Duration
@@ -92,7 +101,9 @@ function extractPronunciationAndProsody(data) {
   });
 
   return {
-    overallScore: data.NBest[0].PronunciationAssessment.OverallScore,
+    overallScore: nbest.PronunciationAssessment
+      ? nbest.PronunciationAssessment.OverallScore
+      : null,
     words: enriched,
   };
 }
