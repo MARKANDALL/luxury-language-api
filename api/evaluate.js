@@ -38,9 +38,9 @@ export default async function handler(req, res) {
     // LOG: dump the full files object to see field names/properties
     console.error("FORMIDABLE FILES OBJECT:", files);
 
-    // If you use custom field name for file upload, adjust here!
-    // Try to always prefer the 'file' field; fallback to first file if not present.
-    const inputFile = files.file || Object.values(files)[0];
+    // Get the file whether it's directly or inside an array
+    let inputFile = files.file || Object.values(files)[0];
+    if (Array.isArray(inputFile)) inputFile = inputFile[0];
 
     // LOG: show which inputFile we are using
     console.error("SELECTED inputFile:", inputFile);
