@@ -29,23 +29,33 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Parse incoming WebM file
+    // --- 1. Parse incoming WebM file with formidable ---
     const form = formidable({ multiples: false });
     const files = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => (err ? reject(err) : resolve(files)));
     });
     const inputFile = Object.values(files)[0];
-    if (!inputFile) throw new Error("No file uploaded.");
 
+    // --- LOGGING for debugging upload/file path issues ---
+    console.log("inputFile:", inputFile);
+
+    // --- Check for file presence and path validity ---
+    if (!inputFile) throw new Error("No file uploaded (files is empty).");
+
+    // Support both `.filepath` and `.path` for compatibility
     const inPath = inputFile.filepath || inputFile.path;
+    console.log("inPath:", inPath); // LOGGING
+
+    if (!inPath) throw new Error("No valid file path in upload (missing .filepath and .path).");
+
     const wavPath = path.join(tmpdir(), `${Date.now()}.wav`);
 
-    // 2. ffmpeg: Convert WebM to 16kHz mono WAV
+    // --- 2. ffmpeg: Convert WebM to 16kHz mono WAV ---
     await new Promise((resolve, reject) => {
       ffmpeg(inPath)
         .inputFormat("webm")
         .audioCodec("pcm_s16le")
-        .audioFrequency(16000)         // This is the correct way!
+        .audioFrequency(16000)
         .audioChannels(1)
         .format("wav")
         .save(wavPath)
@@ -53,7 +63,7 @@ export default async function handler(req, res) {
         .on("error", reject);
     });
 
-    // 3. Azure Speech Config
+    // --- 3. Azure Speech Config ---
     const speechConfig = sdk.SpeechConfig.fromSubscription(
       process.env.AZURE_SPEECH_KEY,
       process.env.AZURE_REGION
@@ -61,7 +71,7 @@ export default async function handler(req, res) {
     speechConfig.setProperty("SpeechServiceResponse_OutputFormat", "Detailed");
     speechConfig.setProperty("EnableAudioProsodyData", "True");
 
-    // 4. Load WAV and analyze
+    // --- 4. Load WAV and analyze ---
     const wavData = await fs.readFile(wavPath);
     const audioConfig = sdk.AudioConfig.fromWavFileInput(wavData);
     const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
@@ -73,7 +83,7 @@ export default async function handler(req, res) {
     if (!result || !result.json) throw new Error("No recognition result.");
     const data = JSON.parse(result.json);
 
-    // 5. Extract prosody and core scoring
+    // --- 5. Extract prosody and core scoring ---
     const payload = extractPronunciationAndProsody(data);
 
     res.status(200).json(payload);
