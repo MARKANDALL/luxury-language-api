@@ -11,7 +11,7 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
-  // --- CORS headers ---
+  /* ---------- CORS ---------- */
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -19,29 +19,28 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
   try {
-    // --- Parse fields and file ---
+    /* ---------- 1  Parse multipart ---------- */
     const { fields, files } = await new Promise((ok, fail) =>
       formidable({ multiples: false }).parse(req, (e, flds, fls) =>
         e ? fail(e) : ok({ fields: flds, files: fls })
       )
     );
 
-    // --- Handle referenceText safely ---
-    let referenceTextRaw = fields.text || "";
-    let referenceText = referenceTextRaw;
-    if (typeof referenceTextRaw !== "string") referenceText = String(referenceTextRaw);
-    if (referenceText.trim().startsWith("[")) referenceText = JSON.parse(referenceText)[0];
+    const inFile =
+      files.audio ??
+      Object.values(files)[0] ??
+      (() => {
+        throw new Error("No audio uploaded.");
+      })();
 
-    let inputFile = files.audio ?? Object.values(files)[0];
-    if (Array.isArray(inputFile)) inputFile = inputFile[0];
-    if (!inputFile) throw new Error("No file uploaded – check front-end FormData field name.");
-    const inPath = inputFile.filepath || inputFile.path;
+    const inPath = inFile.filepath || inFile.path;
     if (!inPath) throw new Error("Upload missing .filepath/.path property.");
 
-    // --- Convert to 16kHz mono WAV ---
+    /* ---------- 2  Convert to 16 kHz mono WAV ---------- */
     const wavPath = path.join(tmpdir(), `${Date.now()}.wav`);
     await new Promise((ok, fail) =>
       ffmpeg(inPath)
+        .inputFormat("webm") // clients send WebM (MediaRecorder)
         .audioCodec("pcm_s16le")
         .audioFrequency(16000)
         .audioChannels(1)
@@ -51,62 +50,57 @@ export default async function handler(req, res) {
         .on("error", fail)
     );
 
-    // --- Azure config ---
-    const region = process.env.AZURE_REGION || process.env.AZURE_SPEECH_REGION || "eastus";
+    /* ---------- 3  Azure Speech setup ---------- */
+    const region = process.env.AZURE_REGION || process.env.AZURE_SPEECH_REGION;
     const key = process.env.AZURE_SPEECH_KEY || process.env.AZURE_KEY;
     if (!region || !key)
-      throw new Error("Azure env vars missing – check AZURE_REGION/AZURE_SPEECH_REGION and AZURE_SPEECH_KEY/AZURE_KEY.");
+      throw new Error("Azure env vars missing – set AZURE_REGION & AZURE_SPEECH_KEY.");
 
     const speechConfig = sdk.SpeechConfig.fromSubscription(key, region);
+    speechConfig.speechRecognitionLanguage = "en-US";
     speechConfig.setProperty("SpeechServiceResponse_OutputFormat", "Detailed");
     speechConfig.setProperty("EnableAudioProsodyData", "True");
 
-    // --- Attach PronunciationAssessmentConfig (FIXED ENUMS) ---
-    const pronConfig = new sdk.PronunciationAssessmentConfig(
+    /* ---------- 4  Pronunciation-assessment config ---------- */
+    let referenceText = (fields.text ?? "").toString().trim();
+    // if the front-end accidentally sent '["text"]', fix it:
+    if (/^\s*\[\s*".+"\s*\]\s*$/.test(referenceText))
+      referenceText = JSON.parse(referenceText)[0];
+
+    const pronCfg = new sdk.PronunciationAssessmentConfig(
       referenceText,
       sdk.PronunciationAssessmentGradingSystem.HundredMark,
-      sdk.PronunciationAssessmentGradingMode.Pronunciation,
-      "en-US"
+      sdk.PronunciationAssessmentGranularity.Phoneme,
+      true /* enable miscue */
     );
-    const audioConfig = sdk.AudioConfig.fromWavFileInput(
-      await fs.readFile(wavPath)
-    );
-    const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
-    pronConfig.applyTo(recognizer);
 
-    // --- Recognize speech ---
+    const audioConfig = sdk.AudioConfig.fromWavFileInput(await fs.readFile(wavPath));
+    const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
+    pronCfg.applyTo(recognizer);
+
+    /* ---------- 5  Run recognition ---------- */
     const result = await new Promise((ok, fail) =>
       recognizer.recognizeOnceAsync(r =>
         r.errorDetails ? fail(new Error(r.errorDetails)) : ok(r)
       )
     );
 
-    if (!result.json) throw new Error("Azure returned no JSON payload.");
-    const data = JSON.parse(result.json);
-    const nbest = data.NBest?.[0] ?? {};
-    const words = nbest.Words ?? [];
-    const prosody = nbest.AudioProsodyData ?? [];
-    const duration = data.Duration ?? null;
+    const detailed = JSON.parse(result.properties.getProperty(
+      sdk.PropertyId.SpeechServiceResponse_JsonResult
+    ));
 
-    const enrichedWords = words.map(w => {
-      const seg = prosody.filter(
-        p => p.Offset >= w.Offset && p.Offset <= w.Offset + w.Duration
-      );
-      const avgPitch =
-        seg.length > 0 ? seg.reduce((s, p) => s + p.Pitch, 0) / seg.length : null;
-      return { ...w, avgPitch };
-    });
-
+    /* ---------- 6  Trim payload for the UI ---------- */
+    const best = detailed.NBest?.[0] ?? {};
     const payload = {
-      accuracyScore: nbest.PronunciationAssessment?.AccuracyScore ?? null,
-      fluencyScore: nbest.PronunciationAssessment?.FluencyScore ?? null,
-      completenessScore: nbest.PronunciationAssessment?.CompletenessScore ?? null,
-      words: enrichedWords,
+      overallScore: best.PronunciationAssessment?.OverallScore ?? null,
+      words: best.Words ?? [],
       referenceText,
-      duration
+      duration: detailed.Duration ?? null,
+      ProsodyAssessment: detailed.ProsodyAssessment ?? null,
+      ContentAssessment: detailed.ContentAssessment ?? null
     };
 
-    console.error("RESPONSE PAYLOAD:", payload);
+    console.log("RESPONSE PAYLOAD:", JSON.stringify(payload).slice(0, 500));
     res.status(200).json(payload);
   } catch (err) {
     console.error("API error:", err);
