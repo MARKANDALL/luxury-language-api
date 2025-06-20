@@ -8,68 +8,42 @@ import sdk from "microsoft-cognitiveservices-speech-sdk";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
-export const config = {
-  api: { bodyParser: false },
-};
+export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
-  // --- CORS headers ---
+  /* ---------- CORS ---------- */
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    res.status(200).end();
-    return;
-  }
-
-  if (req.method !== "POST") {
-    res.status(405).end("Method Not Allowed");
-    return;
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
   try {
-    // 1. Parse incoming file with formidable
-    const form = formidable({ multiples: false });
-    const { fields, files } = await new Promise((resolve, reject) => {
-      form.parse(req, (err, fields, files) => (err ? reject(err) : resolve({ fields, files })));
-    });
+    /* ---------- 1. Parse multipart upload ---------- */
+    const { files } = await new Promise((ok, fail) =>
+      formidable({ multiples: false }).parse(req, (e, flds, fls) =>
+        e ? fail(e) : ok({ fields: flds, files: fls })
+      )
+    );
 
-    // LOG: see the full files object
     console.error("FORMIDABLE FILES OBJECT:", files);
 
-    // Use the field "audio" if present, or fallback to any field.
-    let inputFile;
-    if (files.audio) {
-      inputFile = Array.isArray(files.audio) ? files.audio[0] : files.audio;
-    } else {
-      // fallback: pick the first field if you ever switch back to "file"
-      const firstField = Object.values(files)[0];
-      inputFile = Array.isArray(firstField) ? firstField[0] : firstField;
-    }
+    let inputFile =
+      files.audio ?? // prefer “audio” field
+      Object.values(files)[0]; // fallback
 
-    console.error("SELECTED inputFile:", inputFile);
-
-    if (!inputFile) {
-      throw new Error("No file uploaded (files object is empty): " + JSON.stringify(files));
-    }
+    if (Array.isArray(inputFile)) inputFile = inputFile[0];
+    if (!inputFile)
+      throw new Error("No file uploaded – check front-end FormData field name.");
 
     const inPath = inputFile.filepath || inputFile.path;
-    console.error("inputFile.filepath:", inputFile.filepath);
-    console.error("inputFile.path:", inputFile.path);
+    if (!inPath) throw new Error("Upload missing .filepath/.path property.");
+
     console.error("Resolved inPath:", inPath);
 
-    if (!inPath) {
-      throw new Error(
-        "No valid file path in upload (missing .filepath and .path). InputFile: " +
-        JSON.stringify(inputFile)
-      );
-    }
-
+    /* ---------- 2. Convert to 16 kHz mono WAV ---------- */
     const wavPath = path.join(tmpdir(), `${Date.now()}.wav`);
-
-    // --- 2. ffmpeg: Convert WebM to 16kHz mono WAV ---
-    await new Promise((resolve, reject) => {
+    await new Promise((ok, fail) =>
       ffmpeg(inPath)
         .inputFormat("webm")
         .audioCodec("pcm_s16le")
@@ -77,14 +51,22 @@ export default async function handler(req, res) {
         .audioChannels(1)
         .format("wav")
         .save(wavPath)
-        .on("end", resolve)
-        .on("error", err => {
-          console.error("ffmpeg error:", err);
-          reject(err);
-        });
-    });
+        .on("end", ok)
+        .on("error", fail)
+    );
 
-    // --- 3. Azure Speech Config ---
+    /* ---------- 3. Azure Speech ---------- */
+    console.error(
+      "ENV CHECK → REGION:",
+      process.env.AZURE_REGION,
+      "KEY PRESENT:",
+      !!process.env.AZURE_SPEECH_KEY
+    );
+
+    if (!process.env.AZURE_REGION || !process.env.AZURE_SPEECH_KEY) {
+      throw new Error("Azure env vars missing – set AZURE_REGION & AZURE_SPEECH_KEY.");
+    }
+
     const speechConfig = sdk.SpeechConfig.fromSubscription(
       process.env.AZURE_SPEECH_KEY,
       process.env.AZURE_REGION
@@ -92,49 +74,45 @@ export default async function handler(req, res) {
     speechConfig.setProperty("SpeechServiceResponse_OutputFormat", "Detailed");
     speechConfig.setProperty("EnableAudioProsodyData", "True");
 
-    // --- 4. Load WAV and analyze ---
-    const wavData = await fs.readFile(wavPath);
-    const audioConfig = sdk.AudioConfig.fromWavFileInput(wavData);
+    const audioConfig = sdk.AudioConfig.fromWavFileInput(
+      await fs.readFile(wavPath)
+    );
     const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
 
-    const result = await new Promise((resolve, reject) => {
-      recognizer.recognizeOnceAsync(r => (r.errorDetails ? reject(r) : resolve(r)));
-    });
+    const result = await new Promise((ok, fail) =>
+      recognizer.recognizeOnceAsync(r =>
+        r.errorDetails ? fail(new Error(r.errorDetails)) : ok(r)
+      )
+    );
 
-    if (!result || !result.json) throw new Error("No recognition result.");
+    if (!result.json) throw new Error("Azure returned no JSON payload.");
     const data = JSON.parse(result.json);
 
-    // --- 5. Extract prosody and core scoring ---
-    const payload = extractPronunciationAndProsody(data);
-
-    res.status(200).json(payload);
+    /* ---------- 4. Build response ---------- */
+    res.status(200).json(extractPronunciationAndProsody(data));
   } catch (err) {
     console.error("API error:", err);
     res.status(500).json({ error: err.message || "Server error" });
   }
 }
 
-// --- Helper: extract word-level and prosody data ---
+/* ---------- Helper ---------- */
 function extractPronunciationAndProsody(data) {
-  const nbest = (data.NBest && data.NBest[0]) || {};
-  const words = nbest.Words || [];
-  const prosody = nbest.AudioProsodyData || [];
+  const nbest = data.NBest?.[0] ?? {};
+  const words = nbest.Words ?? [];
+  const prosody = nbest.AudioProsodyData ?? [];
 
-  // For each word, find prosody segments whose offset is within word offset & duration
   const enriched = words.map(w => {
-    const segment = prosody.filter(
+    const seg = prosody.filter(
       p => p.Offset >= w.Offset && p.Offset <= w.Offset + w.Duration
     );
-    const avgPitch = segment.length
-      ? segment.reduce((s, p) => s + p.Pitch, 0) / segment.length
-      : null;
+    const avgPitch =
+      seg.length > 0 ? seg.reduce((s, p) => s + p.Pitch, 0) / seg.length : null;
     return { ...w, avgPitch };
   });
 
   return {
-    overallScore: nbest.PronunciationAssessment
-      ? nbest.PronunciationAssessment.OverallScore
-      : null,
+    overallScore: nbest.PronunciationAssessment?.OverallScore ?? null,
     words: enriched,
   };
 }
