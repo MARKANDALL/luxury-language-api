@@ -65,7 +65,9 @@ export default async function handler(req, res) {
     );
 
     if (!region || !key) {
-      throw new Error("Azure env vars missing – check AZURE_REGION or AZURE_SPEECH_REGION and AZURE_SPEECH_KEY.");
+      throw new Error(
+        "Azure env vars missing – check AZURE_REGION or AZURE_SPEECH_REGION and AZURE_SPEECH_KEY."
+      );
     }
 
     const speechConfig = sdk.SpeechConfig.fromSubscription(key, region);
