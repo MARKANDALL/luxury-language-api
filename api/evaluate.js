@@ -11,7 +11,7 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
-  /* CORS */
+  // --- CORS headers ---
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -19,28 +19,46 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
   try {
-    /* 1. Parse upload */
+    // --- 1. Parse multipart upload ---
     const { fields, files } = await new Promise((ok, fail) =>
       formidable({ multiples: false }).parse(req, (e, flds, fls) =>
         e ? fail(e) : ok({ fields: flds, files: fls })
       )
     );
-    const referenceText =
-      fields.referenceText || fields.text || fields.script || "";
-    if (!referenceText.trim())
-      throw new Error("referenceText is required but missing in form fields.");
 
-    let inputFile = files.audio ?? Object.values(files)[0];
+    console.error("FORMIDABLE FILES OBJECT:", files);
+    // --- Extract referenceText robustly ---
+    const referenceTextRaw =
+      fields.referenceText ?? fields.text ?? fields.script ?? "";
+    // Always coerce to string (should normally be a string already)
+    const referenceText =
+      typeof referenceTextRaw === "string"
+        ? referenceTextRaw
+        : JSON.stringify(referenceTextRaw);
+
+    console.error("REFERENCE TEXT:", referenceText);
+
+    if (!referenceText.trim())
+      throw new Error(
+        "referenceText is required but missing in form fields."
+      );
+
+    // --- Get input audio file ---
+    let inputFile =
+      files.audio ?? Object.values(files)[0]; // fallback
     if (Array.isArray(inputFile)) inputFile = inputFile[0];
-    if (!inputFile) throw new Error("No audio uploaded.");
+    if (!inputFile)
+      throw new Error("No file uploaded – check front-end FormData field name.");
 
     const inPath = inputFile.filepath || inputFile.path;
-    const wavPath = path.join(tmpdir(), `${Date.now()}.wav`);
+    if (!inPath) throw new Error("Upload missing .filepath/.path property.");
 
-    /* 2. ffmpeg 48k/44k → 16 kHz mono wav */
+    console.error("Resolved inPath:", inPath);
+
+    // --- 2. Convert to 16 kHz mono WAV ---
+    const wavPath = path.join(tmpdir(), `${Date.now()}.wav`);
     await new Promise((ok, fail) =>
       ffmpeg(inPath)
-        .inputFormat("webm")
         .audioCodec("pcm_s16le")
         .audioFrequency(16000)
         .audioChannels(1)
@@ -50,43 +68,48 @@ export default async function handler(req, res) {
         .on("error", fail)
     );
 
-    /* 3. Azure config */
+    // --- 3. Azure Speech Config (support both env var names) ---
     const region = process.env.AZURE_REGION || process.env.AZURE_SPEECH_REGION;
-    const key    = process.env.AZURE_SPEECH_KEY || process.env.AZURE_KEY;
-    if (!region || !key) throw new Error("Azure env vars missing.");
+    const key = process.env.AZURE_SPEECH_KEY || process.env.AZURE_KEY;
+    console.error("ENV CHECK → REGION:", region, "KEY PRESENT:", !!key);
+    if (!region || !key) {
+      throw new Error("Azure env vars missing – check AZURE_REGION or AZURE_SPEECH_REGION and AZURE_SPEECH_KEY.");
+    }
 
+    // --- 4. Build Pronunciation Assessment config ---
     const speechConfig = sdk.SpeechConfig.fromSubscription(key, region);
     speechConfig.setProperty("SpeechServiceResponse_OutputFormat", "Detailed");
     speechConfig.setProperty("EnableAudioProsodyData", "True");
 
-    /* 3a. PronunciationAssessmentConfig via JSON string */
-    const paJson = JSON.stringify({
-      ReferenceText: referenceText,
-      GradingSystem: "HundredMark",
-      Granularity:   "Phoneme",
-      EnableMiscue:  "True",
-      EnableProsodyAssessment: "True"
-    });
-    const paConfig = sdk.PronunciationAssessmentConfig.fromJSON(paJson);
+    // *** Configure Pronunciation Assessment ***
+    const pronConfig = new sdk.PronunciationAssessmentConfig(
+      referenceText,
+      sdk.PronunciationAssessmentGradingSystem.HundredMark,
+      sdk.PronunciationAssessmentGranularity.Phoneme,
+      true // Enable miscue detection (optional, true is default)
+    );
+    // You may want to add additional config here if needed.
 
     const audioConfig = sdk.AudioConfig.fromWavFileInput(
       await fs.readFile(wavPath)
     );
     const recognizer = new sdk.SpeechRecognizer(speechConfig, audioConfig);
-    paConfig.applyTo(recognizer);
 
-    /* 4. Recognize */
+    pronConfig.applyTo(recognizer);
+
+    // --- 5. Recognize & parse result ---
     const result = await new Promise((ok, fail) =>
       recognizer.recognizeOnceAsync(r =>
         r.errorDetails ? fail(new Error(r.errorDetails)) : ok(r)
       )
     );
-    if (!result.json) throw new Error("Azure returned no JSON.");
+
+    if (!result.json) throw new Error("Azure returned no JSON payload.");
     const data = JSON.parse(result.json);
 
-    /* 5. Build payload */
-    const payload = buildPayload(data, referenceText);
-    console.error("RESPONSE PAYLOAD:", payload);        // debug
+    // --- 6. Build and send response ---
+    const payload = extractPronunciationAndProsody(data, referenceText, result.duration);
+    console.error("RESPONSE PAYLOAD:", payload);
     res.status(200).json(payload);
   } catch (err) {
     console.error("API error:", err);
@@ -94,8 +117,8 @@ export default async function handler(req, res) {
   }
 }
 
-/* helper */
-function buildPayload(data, referenceText) {
+// --- Helper: extract word-level and prosody data ---
+function extractPronunciationAndProsody(data, referenceText, duration) {
   const nbest = data.NBest?.[0] ?? {};
   const words = nbest.Words ?? [];
   const prosody = nbest.AudioProsodyData ?? [];
@@ -104,13 +127,14 @@ function buildPayload(data, referenceText) {
       p => p.Offset >= w.Offset && p.Offset <= w.Offset + w.Duration
     );
     const avgPitch =
-      seg.length ? seg.reduce((s, p) => s + p.Pitch, 0) / seg.length : null;
+      seg.length > 0 ? seg.reduce((s, p) => s + p.Pitch, 0) / seg.length : null;
     return { ...w, avgPitch };
   });
+
   return {
     overallScore: nbest.PronunciationAssessment?.OverallScore ?? null,
     words: enriched,
     referenceText,
-    duration: data.Duration ?? null
+    duration,
   };
 }
