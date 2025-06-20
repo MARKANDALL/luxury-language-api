@@ -55,21 +55,20 @@ export default async function handler(req, res) {
         .on("error", fail)
     );
 
-    // --- CRUCIAL DEBUG LINE: Log Azure ENV values right before using them ---
+    // --- 3. Azure Speech Config ---
+    const region = process.env.AZURE_REGION || process.env.AZURE_SPEECH_REGION;
+    const key = process.env.AZURE_SPEECH_KEY || process.env.AZURE_KEY;
+
     console.error(
-      "ENV CHECK → REGION:", process.env.AZURE_REGION,
-      "KEY PRESENT:", !!process.env.AZURE_SPEECH_KEY
+      "ENV CHECK → REGION:", region,
+      "KEY PRESENT:", !!key
     );
 
-    if (!process.env.AZURE_REGION || !process.env.AZURE_SPEECH_KEY) {
-      throw new Error("Azure env vars missing – set AZURE_REGION & AZURE_SPEECH_KEY.");
+    if (!region || !key) {
+      throw new Error("Azure env vars missing – check AZURE_REGION or AZURE_SPEECH_REGION and AZURE_SPEECH_KEY.");
     }
 
-    // --- 3. Azure Speech ---
-    const speechConfig = sdk.SpeechConfig.fromSubscription(
-      process.env.AZURE_SPEECH_KEY,
-      process.env.AZURE_REGION
-    );
+    const speechConfig = sdk.SpeechConfig.fromSubscription(key, region);
     speechConfig.setProperty("SpeechServiceResponse_OutputFormat", "Detailed");
     speechConfig.setProperty("EnableAudioProsodyData", "True");
 
