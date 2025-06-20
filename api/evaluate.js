@@ -19,20 +19,20 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
   try {
-    /* 1. Parse upload */
-    const { files } = await new Promise((ok, fail) =>
+    /* 1. Parse multipart upload + reference text */
+    const { fields, files } = await new Promise((ok, fail) =>
       formidable({ multiples: false }).parse(req, (e, flds, fls) =>
         e ? fail(e) : ok({ fields: flds, files: fls })
       )
     );
+    const referenceText = fields.text ?? "";           // <-- sent from frontend FormData
     let inputFile = files.audio ?? Object.values(files)[0];
     if (Array.isArray(inputFile)) inputFile = inputFile[0];
-    if (!inputFile) throw new Error("No file uploaded.");
-
+    if (!inputFile) throw new Error("No audio uploaded.");
     const inPath = inputFile.filepath || inputFile.path;
-    const wavPath = path.join(tmpdir(), `${Date.now()}.wav`);
 
-    /* 2. ffmpeg -> wav */
+    /* 2. Convert WebM ➜ 16-kHz mono WAV */
+    const wavPath = path.join(tmpdir(), `${Date.now()}.wav`);
     await new Promise((ok, fail) =>
       ffmpeg(inPath)
         .inputFormat("webm")
@@ -45,20 +45,27 @@ export default async function handler(req, res) {
         .on("error", fail)
     );
 
-    /* 3. Azure */
+    /* 3. Azure Speech setup */
     const region = process.env.AZURE_REGION || process.env.AZURE_SPEECH_REGION;
-    const key = process.env.AZURE_SPEECH_KEY || process.env.AZURE_KEY;
+    const key    = process.env.AZURE_SPEECH_KEY || process.env.AZURE_KEY;
     if (!region || !key) throw new Error("Azure env vars missing.");
 
     const speechConfig = sdk.SpeechConfig.fromSubscription(key, region);
     speechConfig.setProperty("SpeechServiceResponse_OutputFormat", "Detailed");
     speechConfig.setProperty("EnableAudioProsodyData", "True");
 
-    const recognizer = new sdk.SpeechRecognizer(
-      speechConfig,
-      sdk.AudioConfig.fromWavFileInput(await fs.readFile(wavPath))
-    );
+    /* 3a. Enable Pronunciation-Assessment */
+    const paConfig = sdk.PronunciationAssessmentConfig.fromJSON({
+      ReferenceText: referenceText,
+      GradingSystem: "HundredMark",
+      Granularity:   "Phoneme",
+      EnableProsodyAssessment: true
+    });
+    const audioConfig = sdk.AudioConfig.fromWavFileInput(await fs.readFile(wavPath));
+    const recognizer  = new sdk.SpeechRecognizer(speechConfig, audioConfig);
+    paConfig.applyTo(recognizer);                      // <-- activates scoring
 
+    /* 4. Recognize & score */
     const result = await new Promise((ok, fail) =>
       recognizer.recognizeOnceAsync(r =>
         r.errorDetails ? fail(new Error(r.errorDetails)) : ok(r)
@@ -67,15 +74,13 @@ export default async function handler(req, res) {
     if (!result.json) throw new Error("Azure returned no JSON.");
     const data = JSON.parse(result.json);
 
-    /* 4. Build enriched payload */
+    /* 5. Build payload expected by your UI */
     const core = extractPronunciationAndProsody(data);
     const enriched = {
       ...core,
-      referenceText: data.DisplayText ?? "",
+      referenceText,
       duration: data.Duration ?? null
     };
-
-    console.error("RESPONSE PAYLOAD:", enriched); // debug
     res.status(200).json(enriched);
   } catch (err) {
     console.error("API error:", err);
@@ -83,6 +88,7 @@ export default async function handler(req, res) {
   }
 }
 
+/* Helper */
 function extractPronunciationAndProsody(data) {
   const nbest = data.NBest?.[0] ?? {};
   const words = nbest.Words ?? [];
