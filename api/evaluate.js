@@ -11,7 +11,7 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
-  /* ---------- CORS ---------- */
+  // --- CORS headers ---
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -19,7 +19,7 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end("Method Not Allowed");
 
   try {
-    /* ---------- 1. Parse multipart upload ---------- */
+    // --- 1. Parse multipart upload ---
     const { files } = await new Promise((ok, fail) =>
       formidable({ multiples: false }).parse(req, (e, flds, fls) =>
         e ? fail(e) : ok({ fields: flds, files: fls })
@@ -41,7 +41,7 @@ export default async function handler(req, res) {
 
     console.error("Resolved inPath:", inPath);
 
-    /* ---------- 2. Convert to 16 kHz mono WAV ---------- */
+    // --- 2. Convert to 16 kHz mono WAV ---
     const wavPath = path.join(tmpdir(), `${Date.now()}.wav`);
     await new Promise((ok, fail) =>
       ffmpeg(inPath)
@@ -55,18 +55,17 @@ export default async function handler(req, res) {
         .on("error", fail)
     );
 
-    /* ---------- 3. Azure Speech ---------- */
+    // --- CRUCIAL DEBUG LINE: Log Azure ENV values right before using them ---
     console.error(
-      "ENV CHECK → REGION:",
-      process.env.AZURE_REGION,
-      "KEY PRESENT:",
-      !!process.env.AZURE_SPEECH_KEY
+      "ENV CHECK → REGION:", process.env.AZURE_REGION,
+      "KEY PRESENT:", !!process.env.AZURE_SPEECH_KEY
     );
 
     if (!process.env.AZURE_REGION || !process.env.AZURE_SPEECH_KEY) {
       throw new Error("Azure env vars missing – set AZURE_REGION & AZURE_SPEECH_KEY.");
     }
 
+    // --- 3. Azure Speech ---
     const speechConfig = sdk.SpeechConfig.fromSubscription(
       process.env.AZURE_SPEECH_KEY,
       process.env.AZURE_REGION
@@ -88,7 +87,7 @@ export default async function handler(req, res) {
     if (!result.json) throw new Error("Azure returned no JSON payload.");
     const data = JSON.parse(result.json);
 
-    /* ---------- 4. Build response ---------- */
+    // --- 4. Build response ---
     res.status(200).json(extractPronunciationAndProsody(data));
   } catch (err) {
     console.error("API error:", err);
@@ -96,7 +95,7 @@ export default async function handler(req, res) {
   }
 }
 
-/* ---------- Helper ---------- */
+// --- Helper: extract word-level and prosody data ---
 function extractPronunciationAndProsody(data) {
   const nbest = data.NBest?.[0] ?? {};
   const words = nbest.Words ?? [];
