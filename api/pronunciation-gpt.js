@@ -1,16 +1,16 @@
 // /api/pronunciation-gpt.js
 
 export const config = {
-  api: { bodyParser: true, externalResolver: true }
+  api: { bodyParser: true, externalResolver: true },
 };
 
 import { OpenAI } from "openai";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const universallyHard = new Set(["θ", "ð", "ɹ"]);
-
-// L1 language codes to readable names for translation & display
-const languageMap = {
+/**
+ * Map language codes to English names
+ */
+const L1_MAP = {
   "ko": "Korean",
   "ar": "Arabic",
   "pt": "Portuguese",
@@ -19,30 +19,21 @@ const languageMap = {
   "ru": "Russian",
   "de": "German",
   "es": "Spanish",
-  "zh": "Chinese",
+  "zh": "Mandarin Chinese",
   "hi": "Hindi",
   "mr": "Marathi",
   "universal": "Universal (all learners)",
-  "": "Universal (all learners)"
+  "": "",
 };
 
-// IPA-to-likely-difficulty map (expand as you wish)
-function guessLikelyL1(ipa) {
-  const map = {
-    "θ": "Spanish, French, Portuguese, German, Arabic, Japanese, Chinese, Russian, Hindi, Korean",
-    "ð": "Spanish, French, Portuguese, German, Arabic, Japanese, Chinese, Russian, Hindi, Korean",
-    "ɹ": "Japanese, Korean, Russian, German, French, Chinese, Arabic, Spanish, Portuguese, Hindi",
-    "l": "Japanese, Korean, Chinese, Hindi",
-    "w": "German, Japanese, Korean, Chinese, Russian, Arabic",
-    "v": "Spanish, Japanese, Korean, Arabic, Hindi, Portuguese",
-    // ... etc.
-  };
-  return map[ipa] || "Portuguese, Arabic, Korean, Russian, French, Japanese, Spanish, German, Hindi, and Chinese";
-}
+/**
+ * Utility: Normalize phoneme keys (for Azure/IPA mapping)
+ */
 function norm(sym) {
   const alias = { dh: "ð", th: "θ", r: "ɹ" };
   return alias[sym] || sym;
 }
+
 function findWorstPhoneme(res) {
   const tally = {};
   res?.NBest?.[0]?.Words?.forEach(w =>
@@ -55,6 +46,7 @@ function findWorstPhoneme(res) {
   );
   return Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
 }
+
 function findWorstWords(res, n = 3) {
   return (res?.NBest?.[0]?.Words || [])
     .filter(w => w.AccuracyScore < 70)
@@ -63,8 +55,26 @@ function findWorstWords(res, n = 3) {
     .map(w => w.Word);
 }
 
+/**
+ * IPA-to-L1-language map for feedback context
+ */
+const universallyHard = new Set(["θ", "ð", "ɹ"]);
+
+function guessLikelyL1(ipa) {
+  const map = {
+    "θ": "Spanish, French, Portuguese, German, Arabic, Japanese, Chinese, Russian, Hindi, Korean",
+    "ð": "Spanish, French, Portuguese, German, Arabic, Japanese, Chinese, Russian, Hindi, Korean",
+    "ɹ": "Japanese, Korean, Russian, German, French, Chinese, Arabic, Spanish, Portuguese, Hindi",
+    // ... expand as needed
+  };
+  return map[ipa] || "Portuguese, Arabic, Korean, Russian, French, Japanese, Spanish, German, Hindi, and Chinese";
+}
+
+// ---------------- API HANDLER ----------------
 export default async function handler(req, res) {
-  // Handle CORS for preflight
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+
+  // Handle preflight
   if (req.method === "OPTIONS") {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -74,102 +84,102 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Only POST allowed" });
   }
-  // CORS for POST
+
+  // CORS for actual POST
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   try {
-    // Pull firstLang from req.body (from your frontend FormData)
-    const { referenceText, azureResult, firstLang = "" } = req.body;
-    const worst   = findWorstPhoneme(azureResult);      // e.g. "θ"
-    const badList = findWorstWords(azureResult);        // ["the", "air"]
-    const l1Guess = guessLikelyL1(worst);
-    const isUniversal = universallyHard.has(worst);
+    const {
+      referenceText = "",
+      azureResult,
+      firstLang = "",
+    } = req.body;
 
-    // Determine language for translation
-    const l1Code = (firstLang || "").toLowerCase();
-    const l1Name = languageMap[l1Code] || "Universal (all learners)";
+    // Support both legacy and new: sometimes sent as "firstLang" (code), sometimes as "l1" or "l1Code"
+    const l1Code = firstLang || req.body.l1 || req.body.l1Code || "";
+    const l1Name = L1_MAP[l1Code] || l1Code || "Universal";
 
-    // Build system prompt: now fully L1 aware, and gives bilingual output!
+    const worstPhoneme = findWorstPhoneme(azureResult);
+    const worstWords = findWorstWords(azureResult);
+    const l1Guess = guessLikelyL1(worstPhoneme);
+    const isUniversal = universallyHard.has(worstPhoneme);
+
+    // --- SYSTEM PROMPT for GPT-4o ---
     const systemPrompt = `
-You are an expert American-English pronunciation coach and linguist. 
-The user is a non-native speaker; their first language is "${l1Name}". 
-They want feedback about a specific problematic English sound and word(s).
+You are an expert American-English pronunciation coach and a professional translator.
 
-## FEEDBACK RULES ##
-1. **ALWAYS** generate two versions for each section: (A) in English, and (B) a native-quality translation into "${l1Name}" on the *very next line*, in parentheses, in that language. 
-2. The translation line must be visually lighter: *wrap in <span style="color:#888;font-style:italic"></span> tags.*
-3. Use their first language for cultural/phonetic context and advice wherever relevant.
-4. If the first language is missing or "universal", reply only in English.
-5. TOTAL length ≤220 words, but include at least 6 sections:
-   - Quick Coaching (≤2 tips, both lines)
-   - Phoneme Profile (details & bullet list, both lines)
-   - L1 Caution Zone (what makes this sound hard for speakers of "${l1Name}", both lines)
-   - Reassurance (if "universal": "This sound is hard for most learners worldwide…", else focus on "${l1Name}")
-   - Did You Know? (trivia or linguistic fact about the sound, both lines)
-   - World Language Spotlight (short, ONLY about the L1 selected, both lines)
+The user's first language (L1) code: "${l1Code}".
+The user's first language (L1) name: "${l1Name}".
 
-6. Section headings must be H3s ("### Heading").
-7. Always be friendly, clear, and positive.
+######## RULES ########
+- If L1 is "" or "universal": feedback in English only.
+- Otherwise, for every section:
+    1. First line: write in the user's L1 (${l1Name}). If you don't know it, say "(translation unavailable)".
+    2. Second line: English translation (paraphrase) wrapped as
+       <span style="color:#888;font-style:italic"> ... </span>
+- Strictly use the L1 language. Do not substitute with Portuguese or any other language.
 
-## EXAMPLES OF FORMAT ##
-### Quick Coaching
+######## SECTIONS ########
+Respond with these seven sections, with these markdown H3 headings:
+### 🎯 Quick Coaching
+### 🔬 Phoneme Profile
+### 🤝 Reassurance
+### 🪜 Common Pitfalls for ${l1Name}
+### 💪 ${l1Name} Super-Power
+### 🧠 Did You Know?
+### 🌍 ${l1Name} Spotlight
 
-(Tip in English.)  
-<span style="color:#888;font-style:italic">Translation in ${l1Name}.</span>
+######## CONTENT ########
+- Quick Coaching: 1-2 practical tips about the most difficult sound ★<worstPhoneme>★ and the worst words.
+- Phoneme Profile: 3-4 sentences: (IPA, class, mouth description, example)
+- Reassurance: If isUniversallyDifficult, begin "This sound is difficult for most learners worldwide ...". Else, begin "Many ${l1Name} speakers ...".
+- Common Pitfalls: 2-3 bullet points on common mistakes for ${l1Name} speakers.
+- ${l1Name} Super-Power: 1-2 sentences on strengths of ${l1Name} speakers learning English pronunciation.
+- Did You Know?: 1-2 fun facts or linguistic trivia.
+- ${l1Name} Spotlight: ≤20 words about ${l1Name} (phonetics, fun fact, etc).
+- Limit L1 lines to ≤180 words (English lines don’t count). Be concise.
+- Only use HTML for the English "subtitle" line as shown above.
 
-### Phoneme Profile
+######## EXAMPLES ########
+If L1 is "es" (Spanish):
+### 🎯 Quick Coaching
+Aprende a colocar la lengua entre los dientes para el sonido "th".
+<span style="color:#888;font-style:italic">Try putting your tongue between your teeth for "th".</span>
+Evita decir "de" en vez de "the".
+<span style="color:#888;font-style:italic">Avoid "de" for "the".</span>
 
-(...)
+If L1 is "" or "universal":
+### 🎯 Quick Coaching
+Try putting your tongue between your teeth for "th".
+Avoid "de" for "the".
 
-### L1 Caution Zone
-
-(...)
-
-### Reassurance
-
-(...)
-
-### Did You Know?
-
-(...)
-
-### World Language Spotlight
-
-(...)
-
-----
-
-### CONTEXT ###
-- Problem phoneme: ${worst}
-- Problem words: ${JSON.stringify(badList)}
-- User's sample: ${JSON.stringify(referenceText)}
-- Is "universally difficult" sound: ${isUniversal}
-- L1: ${l1Name}
-- If no L1 given, respond only in English as a general coach.
+If you do not know the L1, write: (translation unavailable)
 `.trim();
 
-    // Compose user message
-    const userMsg = `
-JSON input:
+    // --- USER PROMPT (always send worst/words/sample/isUniversal/L1 for max context) ---
+    const userPrompt = `
+Input:
 {
-  "worstPhoneme": "${worst}",
-  "worstWords": ${JSON.stringify(badList)},
+  "worstPhoneme": "${worstPhoneme}",
+  "worstWords": ${JSON.stringify(worstWords)},
   "sampleText": ${JSON.stringify(referenceText)},
   "isUniversallyDifficult": ${isUniversal},
-  "firstLang": "${l1Name}"
+  "firstLang": "${l1Code}",
+  "firstLangName": "${l1Name}"
 }
-    `.trim();
+`.trim();
 
+    // --- GPT-4o completion ---
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
-      temperature: 0.65,
-      max_tokens: 750,
+      temperature: 0.7,
+      max_tokens: 700,
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user",   content: userMsg }
-      ]
+        { role: "user",   content: userPrompt },
+      ],
     });
 
     res.status(200).json({ feedback: completion.choices[0].message.content });
