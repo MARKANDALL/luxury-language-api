@@ -7,27 +7,22 @@ export const config = {
 import { OpenAI } from "openai";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const L1_MAP = {
-  ko: "Korean",
-  ar: "Arabic",
-  pt: "Portuguese",
-  ja: "Japanese",
-  fr: "French",
-  ru: "Russian",
-  de: "German",
-  es: "Spanish",
-  zh: "Mandarin Chinese",
-  hi: "Hindi",
-  mr: "Marathi",
-  universal: "Universal (all learners)",
-  "": "",
-};
+const universallyHard = new Set(["θ", "ð", "ɹ"]);
+
+function guessLikelyL1(ipa) {
+  const map = {
+    "θ": "Spanish, French, Portuguese, German, Arabic, Japanese, Chinese, Russian, Hindi, Korean",
+    "ð": "Spanish, French, Portuguese, German, Arabic, Japanese, Chinese, Russian, Hindi, Korean",
+    "ɹ": "Japanese, Korean, Russian, German, French, Chinese, Arabic, Spanish, Portuguese, Hindi",
+    // add others as needed...
+  };
+  return map[ipa] || "Portuguese, Arabic, Korean, Russian, French, Japanese, Spanish, German, Hindi, and Chinese";
+}
 
 function norm(sym) {
   const alias = { dh: "ð", th: "θ", r: "ɹ" };
   return alias[sym] || sym;
 }
-
 function findWorstPhoneme(res) {
   const tally = {};
   res?.NBest?.[0]?.Words?.forEach(w =>
@@ -40,7 +35,6 @@ function findWorstPhoneme(res) {
   );
   return Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
 }
-
 function findWorstWords(res, n = 3) {
   return (res?.NBest?.[0]?.Words || [])
     .filter(w => w.AccuracyScore < 70)
@@ -49,124 +43,99 @@ function findWorstWords(res, n = 3) {
     .map(w => w.Word);
 }
 
-const universallyHard = new Set(["θ", "ð", "ɹ"]);
-function guessLikelyL1(ipa) {
-  const map = {
-    "θ": "Spanish, French, Portuguese, German, Arabic, Japanese, Chinese, Russian, Hindi, Korean",
-    "ð": "Spanish, French, Portuguese, German, Arabic, Japanese, Chinese, Russian, Hindi, Korean",
-    "ɹ": "Japanese, Korean, Russian, German, French, Chinese, Arabic, Spanish, Portuguese, Hindi",
-  };
-  return map[ipa] || "Portuguese, Arabic, Korean, Russian, French, Japanese, Spanish, German, Hindi, and Chinese";
-}
-
 export default async function handler(req, res) {
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-
   if (req.method === "OPTIONS") {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     return res.status(200).end();
   }
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Only POST allowed" });
-  }
+  if (req.method !== "POST")
+    return res.status(405).json({ error: "Only POST" });
+
+  // CORS for the actual POST response
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   try {
-    const {
-      referenceText = "",
-      azureResult,
-      firstLang = "",
-    } = req.body;
+    const { referenceText, azureResult, firstLang = "" } = req.body;
+    const worst   = findWorstPhoneme(azureResult);
+    const badList = findWorstWords(azureResult);
+    const l1Guess = guessLikelyL1(worst);
+    const isUniversal = universallyHard.has(worst);
 
-    const l1Code = firstLang || req.body.l1 || req.body.l1Code || "";
-    const l1Name = L1_MAP[l1Code] || l1Code || "Universal";
-    const worstPhoneme = findWorstPhoneme(azureResult);
-    const worstWords = findWorstWords(azureResult);
-    const isUniversal = universallyHard.has(worstPhoneme);
-
-    // 1. English Feedback
+    // MAIN ENGLISH FEEDBACK
     const systemPrompt = `
-You are an expert American-English pronunciation coach.
-Respond in detailed, concise, user-friendly markdown with these sections:
+You are a friendly American-English pronunciation coach AND linguistics nerd.
 
-### 🎯 Quick Coaching
-### 🔬 Phoneme Profile
-### 🤝 Reassurance
-### 🪜 Common Pitfalls for ${l1Name}
-### 💪 ${l1Name} Super-Power
-### 🧠 Did You Know?
-### 🌍 ${l1Name} Spotlight
+Create feedback as a set of clear markdown sections, **customized for the user's first language if provided (use language code: "${firstLang}")**. 
+Include as much cross-linguistic and phonetic insight as possible, relating English sounds to ${firstLang || "universal learners"}.
 
-Base all guidance on the user's worst phoneme: "${worstPhoneme}", these words: ${JSON.stringify(worstWords)}, and their first language: "${l1Name}".
-Keep it ≤ 180 words per section.
-If their L1 is "Universal" or blank, use general tips.
-`;
+Return these sections:
+1. 🎯 Quick Coaching
+2. 🔬 Phoneme Profile
+3. 🤝 Reassurance (make it L1-specific; mention common errors speakers of "${firstLang}" make with "${worst}")
+4. 🪜 Common Pitfalls for "${firstLang || "universal"}"
+5. 💪 "${firstLang || "Universal"}" Super-Power
+6. 🧠 Did You Know?
+7. 🌍 "${firstLang || "Universal"}" Spotlight
 
-    const userPrompt = `
-Input:
+All sections ≤130 words each, in **English**. Keep the advice extremely relevant for speakers of "${firstLang || "universal"}".
+    `.trim();
+
+    const userMsg = `
+JSON input:
 {
-  "worstPhoneme": "${worstPhoneme}",
-  "worstWords": ${JSON.stringify(worstWords)},
+  "worstPhoneme": "${worst}",
+  "worstWords": ${JSON.stringify(badList)},
   "sampleText": ${JSON.stringify(referenceText)},
-  "isUniversallyDifficult": ${isUniversal},
-  "firstLang": "${l1Code}",
-  "firstLangName": "${l1Name}"
+  "isUniversallyDifficult": ${isUniversal}
 }
-`.trim();
+    `.trim();
 
-    // 1st Call: English output
-    const feedbackRes = await openai.chat.completions.create({
+    // 1. Main feedback (English)
+    const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0.7,
-      max_tokens: 700,
+      max_tokens: 600,
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user",   content: userPrompt }
-      ],
+        { role: "user",   content: userMsg }
+      ]
     });
 
-    const feedbackMarkdown = feedbackRes.choices[0].message.content;
+    const feedback = completion.choices[0].message.content;
 
-    // 2. Translate to L1 if needed
-    let translationMarkdown = "";
-    if (l1Code && l1Code !== "universal" && l1Code !== "") {
+    // 2. Translation, only if user picked a language
+    let translated = "";
+    if (firstLang && !["universal", ""].includes(firstLang)) {
+      // Compose a prompt for translation
       const translatePrompt = `
-You are a professional linguist and translator.
+Translate the following English text into the language indicated by this language code: "${firstLang}".
+Keep the formatting, and make the translation natural and clear for a language learner. Do not add explanations.
 
-- Translate the following markdown feedback to ${l1Name}.
-- Retain the markdown structure and ALL section headings.
-- Do not translate words or sounds in quotation marks or IPA.
-- If the section heading mentions "${l1Name}", do not translate the heading.
-- Do NOT use any language other than ${l1Name}.
-- If you cannot translate, return "(translation unavailable)" under each section.
-
---- BEGIN MARKDOWN ---
-
-${feedbackMarkdown}
-
---- END MARKDOWN ---
+English text:
+${feedback}
       `.trim();
 
-      const translationRes = await openai.chat.completions.create({
-        model: "gpt-4o",
-        temperature: 0.6,
-        max_tokens: 850,
+      // Use GPT-4o-mini for translation (much cheaper)
+      const translationResult = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0.4,
+        max_tokens: 900,
         messages: [
-          { role: "system", content: translatePrompt }
+          { role: "system", content: "You are a professional translator." },
+          { role: "user",   content: translatePrompt }
         ]
       });
-      translationMarkdown = translationRes.choices[0].message.content;
+      translated = translationResult.choices[0]?.message?.content?.trim() || "";
     }
 
+    // Return both English and L1 translation
     res.status(200).json({
-      english: feedbackMarkdown,
-      l1: translationMarkdown,
-      l1Code,
-      l1Name,
+      feedback,      // Always in English
+      translation: translated // In L1 if provided, else ""
     });
   } catch (err) {
     console.error("pronunciation-gpt error:", err);
