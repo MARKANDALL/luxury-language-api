@@ -74,7 +74,7 @@ export default async function handler(req, res) {
     const badList = worstWords(azureResult);
     const universal = universallyHard.has(worst);
 
-    /* ---------- PROMPT ---------- */
+    /* ---------- EMOJI TITLES ---------- */
     const sections = [
       "🎯 Quick Coaching",
       "🔬 Phoneme Profile",
@@ -85,24 +85,26 @@ export default async function handler(req, res) {
       `🌍 ${l1Label} Spotlight`
     ];
 
+    /* ---------- PROMPT ---------- */
     const system = `
 You are a bilingual pronunciation coach.
 
 Output JSON:
 {
   "sections":[          // array of objects in the SAME order as list below
-    { "title":"", "en":"", "l1":"" },
+    { "title":"", "english":"", "l1":"" },
     ...
   ]
 }
 
 RULES
-1. _English_ text (≈45-65 words) **first** → clear, specific coaching.
-2. _L1 translation line_ **second**, prefixed with \`<span …>\`, styled **gray italics**:
-   <span style="color:#888;font-style:italic">…</span>
+1. "english" is a tip in English (45–65 words), clear and specific, **first**.
+2. "l1" is the translation of the tip into the user's language, **second**.
+   - For L1, wrap the translation with: <span style="color:#888;font-style:italic">…</span>
 3. If target language is "Universal", leave l1 = "".
-4. Per section max 65 English words. 7 sections total.
-5. Do **NOT** add any keys besides "title,en,l1".
+4. Each section's "english" and "l1" should match the topic from this list:
+   ${sections.map((t, i) => `${i + 1}. ${t}`).join('\n   ')}
+5. 7 sections, do **NOT** add any keys besides "title,english,l1".
 `.trim();
 
     const user = {
@@ -117,7 +119,7 @@ RULES
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.55,
-      max_tokens: 1000,
+      max_tokens: 1100,
       messages: [
         { role: "system", content: system },
         { role: "user",   content: JSON.stringify(user) }
@@ -128,7 +130,14 @@ RULES
     let payload;
     try {
       payload = JSON.parse(completion.choices[0].message.content);
-      if (!Array.isArray(payload.sections)) throw "bad shape";
+      if (
+        !Array.isArray(payload.sections) ||
+        !payload.sections.every(
+          (s) => "title" in s && "english" in s && "l1" in s
+        )
+      ) {
+        throw "Bad AI JSON shape";
+      }
     } catch (_) {
       return res.status(500).json({ error: "Bad AI JSON shape." });
     }
