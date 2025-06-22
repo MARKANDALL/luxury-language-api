@@ -20,7 +20,7 @@ const langMap = {
   hi: "Hindi",
   mr: "Marathi",
   universal: "Universal",
-  "": "Universal"
+  "": "Universal",
 };
 
 const alias = { dh: "ð", th: "θ", r: "ɹ" };
@@ -74,7 +74,7 @@ export default async function handler(req, res) {
     const badList = worstWords(azureResult);
     const universal = universallyHard.has(worst);
 
-    /* ---------- EMOJI TITLES ---------- */
+    // ----- EMOJI section titles -----
     const sections = [
       "🎯 Quick Coaching",
       "🔬 Phoneme Profile",
@@ -85,27 +85,51 @@ export default async function handler(req, res) {
       `🌍 ${l1Label} Spotlight`
     ];
 
-    /* ---------- PROMPT ---------- */
+    // ----- SYSTEM PROMPT with PER-SECTION WORD LIMITS -----
     const system = `
 You are a bilingual pronunciation coach.
 
 Output JSON:
 {
-  "sections":[          // array of objects in the SAME order as list below
-    { "title":"", "english":"", "l1":"" },
+  "sections": [
+    { "title":"", "en":"", "l1":"" },
     ...
   ]
 }
 
-RULES
-1. "english" is a tip in English (45–65 words), clear and specific, **first**.
-2. "l1" is the translation of the tip into the user's language, **second**.
-   - For L1, wrap the translation with: <span style="color:#888;font-style:italic">…</span>
-3. If target language is "Universal", leave l1 = "".
-4. Each section's "english" and "l1" should match the topic from this list:
-   ${sections.map((t, i) => `${i + 1}. ${t}`).join('\n   ')}
-5. 7 sections, do **NOT** add any keys besides "title,english,l1".
-`.trim();
+For each section below, output an object with:
+- title: (as in the list/order below, including emoji and language name if shown)
+- en: English feedback or tip for that section.
+- l1: L1 translation for that section, OR "" if Universal.
+
+Use these instructions for **content length and style**:
+
+1. 🎯 Quick Coaching:
+   - Max 45 words, min 32, plain, actionable, 2–3 sentences.
+2. 🔬 Phoneme Profile:
+   - 45–65 words. Briefly describe the main technical issue and what to do with the mouth/tongue/etc; give one example.
+3. 🤝 Reassurance:
+   - 25–40 words, one concise supportive paragraph.
+4. 🪜 Common Pitfalls for [LANG]:
+   - 40–55 words **or** exactly 3 concise bullets (≤12 words each). Use what fits best.
+5. 💪 [LANG] Super-Power:
+   - 30–45 words, motivational, connect native-language strengths to English pronunciation.
+6. 🧠 Did You Know?:
+   - 20–35 words, light/interesting fact, 1–2 sentences max.
+7. 🌍 [LANG] Spotlight:
+   - 18–30 words, cultural/linguistic trivia, very brief.
+
+— For each, the L1 string should be a **single translation line** in the user's language (target: ≈70% of English word count, always ≤45 words).
+— L1 should be plain, no extra commentary.
+— For Universal, leave l1 as "".
+— All tips should be specific, practical, and student-friendly, not generic.
+
+Do NOT add any other keys besides "title", "en", and "l1".
+Order and titles **must match** this list:
+${sections.map((t) => `- "${t}"`).join("\n")}
+
+Respond only with the JSON.
+    `.trim();
 
     const user = {
       worstPhoneme: worst,
@@ -119,25 +143,17 @@ RULES
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.55,
-      max_tokens: 1100,
+      max_tokens: 1200,
       messages: [
         { role: "system", content: system },
         { role: "user",   content: JSON.stringify(user) }
       ]
     });
 
-    // safety-parse
     let payload;
     try {
       payload = JSON.parse(completion.choices[0].message.content);
-      if (
-        !Array.isArray(payload.sections) ||
-        !payload.sections.every(
-          (s) => "title" in s && "english" in s && "l1" in s
-        )
-      ) {
-        throw "Bad AI JSON shape";
-      }
+      if (!Array.isArray(payload.sections)) throw "bad shape";
     } catch (_) {
       return res.status(500).json({ error: "Bad AI JSON shape." });
     }
