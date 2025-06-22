@@ -42,11 +42,11 @@ function worstWords(json, n = 3) {
 const sectionMeta = [
   { emoji: "🎯", en: "Quick Coaching",      min: 60, max: 80 },
   { emoji: "🔬", en: "Phoneme Profile",     min: 60, max: 80 },
-  { emoji: "🤝", en: "Reassurance",         min: 35, max: 55 },
-  { emoji: "🪜", en: "Common Pitfalls",     min: 45, max: 65 },
+  { emoji: "🤝", en: "Reassurance",         min: 30, max: 50 },
+  { emoji: "🪜", en: "Common Pitfalls",     min: 50, max: 70 },
   { emoji: "💪", en: "L1 Super-Power",      min: 35, max: 55 },
   { emoji: "🧠", en: "Did You Know?",       min: 25, max: 45 },
-  { emoji: "🌍", en: "L1 Spotlight",        min: 45, max: 65 }
+  { emoji: "🌍", en: "L1 Spotlight",        min: 40, max: 60 }
 ];
 
 /* ---------------- API handler ---------------------- */
