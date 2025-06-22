@@ -51,20 +51,16 @@ const sectionMeta = [
 
 /* ---------------- API handler ---------------------- */
 export default async function handler(req, res) {
-  /* --- CORS boiler-plate (unchanged) --- */
-  if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    return res.status(200).end();
-  }
-  if (req.method !== "POST")
-    return res.status(405).json({ error: "Only POST allowed" });
-
+  // Always set CORS headers for every request
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Content-Type", "application/json; charset=utf-8");
+
+  // Handle CORS preflight
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST")
+    return res.status(405).json({ error: "Only POST allowed" });
 
   try {
     const { referenceText, azureResult, firstLang = "" } = req.body;
@@ -83,7 +79,7 @@ export default async function handler(req, res) {
       .join("\n");
 
     const system = `
-You are a bilingual pronunciation coach.
+You are the best bilingual pronunciation coach in the world.  You are also the most knowledgeable expert in world languages. 
 
 ❏ Output EXACTLY:
 {
