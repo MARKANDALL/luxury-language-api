@@ -1,29 +1,18 @@
 // /api/pronunciation-gpt.js
-//
-// NEXT.js / Vercel API route
-// ----------------------------------------------------------------
+// -------------------------
 export const config = { api: { bodyParser: true, externalResolver: true } };
 
 import { OpenAI } from "openai";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ---------- helpers ---------- */
+/* ---------------- helper utilities ---------------- */
 const universallyHard = new Set(["θ", "ð", "ɹ"]);
 
 const langMap = {
-  es: "Spanish",
-  fr: "French",
-  pt: "Portuguese",
-  zh: "Chinese",
-  ja: "Japanese",
-  ko: "Korean",
-  ar: "Arabic",
-  ru: "Russian",
-  de: "German",
-  hi: "Hindi",
-  mr: "Marathi",
-  universal: "Universal",
-  "": "Universal",
+  es: "Spanish", fr: "French", pt: "Portuguese", zh: "Chinese",
+  ja: "Japanese", ko: "Korean", ar: "Arabic", ru: "Russian",
+  de: "German", hi: "Hindi", mr: "Marathi",
+  universal: "Universal", "": "Universal"
 };
 
 const alias = { dh: "ð", th: "θ", r: "ɹ" };
@@ -49,67 +38,73 @@ function worstWords(json, n = 3) {
     .map((w) => w.Word);
 }
 
-/* ---------- handler ---------- */
+/* ---------------- section catalogue ---------------- */
+const sectionMeta = [
+  { emoji: "🎯", en: "Quick Coaching",      min: 60, max: 80 },
+  { emoji: "🔬", en: "Phoneme Profile",     min: 60, max: 80 },
+  { emoji: "🤝", en: "Reassurance",         min: 35, max: 55 },
+  { emoji: "🪜", en: "Common Pitfalls",     min: 45, max: 65 },
+  { emoji: "💪", en: "L1 Super-Power",      min: 35, max: 55 },
+  { emoji: "🧠", en: "Did You Know?",       min: 25, max: 45 },
+  { emoji: "🌍", en: "L1 Spotlight",        min: 45, max: 65 }
+];
+
+/* ---------------- API handler ---------------------- */
 export default async function handler(req, res) {
-  /* ---------- CORS pre-flight ---------- */
+  /* --- CORS boiler-plate (unchanged) --- */
   if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Origin",  "*");
+    res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     return res.status(200).end();
   }
-  if (req.method !== "POST") {
+  if (req.method !== "POST")
     return res.status(405).json({ error: "Only POST allowed" });
-  }
 
-  res.setHeader("Access-Control-Allow-Origin",  "*");
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Content-Type",               "application/json; charset=utf-8");
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
 
   try {
-    /* ---------- pull POST body ---------- */
     const { referenceText, azureResult, firstLang = "" } = req.body;
 
-    const targetLangCode = firstLang.trim().toLowerCase();       // e.g. "es"
+    const targetLangCode = firstLang.trim().toLowerCase();
     const l1Label        = langMap[targetLangCode] || targetLangCode || "Universal";
 
+    /* ---- gather pronunciation facts to feed GPT ---- */
     const worst   = worstPhoneme(azureResult);
     const badList = worstWords(azureResult);
     const universal = universallyHard.has(worst);
 
-    /* ---------- section labels (emoji titles) ---------- */
-    const baseTitles = [
-      "🎯 Quick Coaching",
-      "🔬 Phoneme Profile",
-      "🤝 Reassurance",
-      `🪜 Common Pitfalls for ${l1Label}`,
-      `💪 ${l1Label} Super-Power`,
-      "🧠 Did You Know?",
-      `🌍 ${l1Label} Spotlight`,
-    ];
+    /* ------------- BUILD SYSTEM PROMPT -------------- */
+    const rangesStr = sectionMeta
+      .map((s, i) => `${i + 1}. ${s.emoji} ${s.en} — ${s.min}-${s.max} EN words`)
+      .join("\n");
 
-    /* ---------- GPT prompt ---------- */
     const system = `
 You are a bilingual pronunciation coach.
 
-Output JSON with EXACTLY this shape:
+❏ Output EXACTLY:
 {
-  "sections":[             // always 7 objects, SAME order as titles list
+  "sections":[                       // order preserved
     { "title":"", "titleL1":"", "en":"", "l1":"" },
     ...
   ]
 }
 
-RULES
-1. \`title\`     = the emoji title supplied (do NOT translate it).
-2. \`titleL1\`   = **translate title text only** (no emoji) into learner’s language.
-   • If target language is "Universal", leave titleL1 = "".
-3. \`en\`        = English coaching, 45-65 words.
-4. \`l1\`        = L1 translation of \`en\`, wrapped in
-   <span style="color:#888;font-style:italic">…</span>
-   • Leave empty if "Universal".
-5. Do **NOT** add any extra keys.
+❏ For the 7 sections use these English titles *with emoji* and word ranges:
+${rangesStr}
+
+  • "title"   = emoji + English label (fixed)
+  • "titleL1" = title translated into the learner's L-1 (omit emoji)
+  • "en"      = coaching text in English (respect min/max word range of that section)
+  • "l1"      = same content translated into the learner's L-1
+               Leave "" if firstLang == "Universal"
+
+Styling rules
+  – NO HTML / Markdown in any field
+  – Plain text only; frontend handles styling.
 `.trim();
 
     const user = {
@@ -118,22 +113,21 @@ RULES
       sampleText   : referenceText,
       universal,
       firstLang    : targetLangCode,
-      l1Label,
-      titles       : baseTitles,        // give GPT the exact list
+      l1Label
     };
 
-    /* ---------- single GPT-4o call does everything ---------- */
+    /* ------------- CALL OPEN-AI --------------------- */
     const completion = await openai.chat.completions.create({
-      model       : "gpt-4o-mini",
-      temperature : 0.55,
-      max_tokens  : 1100,
-      messages    : [
+      model: "gpt-4o-mini",
+      temperature: 0.55,
+      max_tokens: 1200,
+      messages: [
         { role: "system", content: system },
-        { role: "user",   content: JSON.stringify(user) },
-      ],
+        { role: "user",   content: JSON.stringify(user) }
+      ]
     });
 
-    /* ---------- safe parse ---------- */
+    /* ------------- sanity-check JSON ---------------- */
     let payload;
     try {
       payload = JSON.parse(completion.choices[0].message.content);
@@ -142,7 +136,6 @@ RULES
       return res.status(500).json({ error: "Bad AI JSON shape." });
     }
 
-    /* ---------- success ---------- */
     res.status(200).json(payload);
   } catch (e) {
     console.error("pronunciation-gpt error:", e);
