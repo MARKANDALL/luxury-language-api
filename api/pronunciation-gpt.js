@@ -1,11 +1,11 @@
 // api/pronunciation-gpt.js
 // -----------------------------------------------------------------------------
-//  Pronunciation Feedback + Translation (two-pass, token-safe)
+//  Pronunciation Feedback + Translation (two-pass, token-safe, forced JSON)
 // -----------------------------------------------------------------------------
 export const config = { api: { bodyParser: true, externalResolver: true } };
 
 import OpenAI from "openai";
-import { encode, decode } from "gpt-tokenizer";         // NEW
+import { encode, decode } from "gpt-tokenizer";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ---------- Helper look-ups ---------- */
@@ -91,7 +91,7 @@ function buildUserJson(refText, azureJson, langCode, l1Label){
 }
 
 /* =============================================================================
-   MAIN HANDLER  —  two GPT-mini calls
+   MAIN HANDLER  —  two GPT-mini calls, JSON forced
 ============================================================================= */
 export default async function handler(req,res){
   // ---- CORS boilerplate ----
@@ -116,13 +116,17 @@ export default async function handler(req,res){
       model:"gpt-4o-mini",
       temperature:0.6,
       max_tokens:2048,
+      response_format: { type: "json_object" },    // <<--- FORCE JSON
       messages:[
         {role:"system",content:sysEN},
         {role:"user",  content:JSON.stringify(userEN)}
       ]
     });
 
-    let payload = JSON.parse(enResp.choices[0].message.content);
+    let payload = enResp.choices[0].message?.content 
+      ? JSON.parse(enResp.choices[0].message.content)
+      : enResp.choices[0].message;
+
     if(!Array.isArray(payload.sections))
       throw new Error("Bad shape from GPT EN pass");
 
@@ -140,13 +144,16 @@ Return the SAME array shape with a new key "l1", others untouched.`;
         model:"gpt-4o-mini",
         temperature:0.3,
         max_tokens:1024,
+        response_format: { type: "json_object" },   // <<--- FORCE JSON
         messages:[
           {role:"system",content:sysTR},
           {role:"user",  content:JSON.stringify(payload.sections)}
         ]
       });
 
-      payload.sections = JSON.parse(trResp.choices[0].message.content);
+      payload.sections = trResp.choices[0].message?.content
+        ? JSON.parse(trResp.choices[0].message.content)
+        : trResp.choices[0].message;
     }
 
     /* ---------- Respond ---------- */
