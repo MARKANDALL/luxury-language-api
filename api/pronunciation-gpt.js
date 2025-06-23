@@ -145,8 +145,7 @@ Return the SAME array shape with a new key "l1", others untouched.`;
       const trResp = await openai.chat.completions.create({
         model:"gpt-4o-mini",
         temperature:0.3,
-        max_tokens:1024,
-        response_format: { type: "json_object" },   // <<--- FORCE JSON
+  max_tokens: 2048,        response_format: { type: "json_object" },   // <<--- FORCE JSON
         messages:[
           {role:"system",content:sysTR},
           {role:"user",  content:JSON.stringify(payload.sections)}
