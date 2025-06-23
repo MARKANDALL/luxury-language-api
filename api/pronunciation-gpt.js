@@ -158,7 +158,7 @@ Return the SAME array shape with a new key "l1", others untouched.`;
     }
 
     /* ---------- Respond ---------- */
-    return res.status(200).json(payload);
+return res.status(200).json({ sections: payload.sections });
 
   }catch(err){
     console.error("pronunciation-gpt error:", err);
