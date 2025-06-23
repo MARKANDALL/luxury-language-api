@@ -1,100 +1,122 @@
-// pronunciation-gpt.js  (full file)
-import OpenAI from "openai";
-import { encoding_for_model } from "@dqbd/tiktoken";
+// pronunciation.js – small, self‑contained backend helper that
+// 1) counts tokens before every call
+// 2) generates the six English feedback sections with GPT‑4o (128k context)
+// 3) translates them with GPT‑4o‑mini (cheap) when the user picked a first‑language (l1)
+// -----------------------------------------------------------------------------
+// Environment variables expected
+//   OPENAI_API_KEY             – your key
+//   MODEL_SECTIONS (optional)  – default "gpt-4o"
+//   MODEL_TRANSLATE (optional) – default "gpt-4o-mini"
+//   MAX_SECTION_TOKENS         – default  250  (per language, per section)
+//   MAX_PROMPT_TOKENS          – default 13500 (safety buffer for the sections call)
+//
+// Requires: npm i openai tiktoken
+// -----------------------------------------------------------------------------
+import OpenAI from 'openai';
+import { encoding_for_model } from 'tiktoken';
+
+//--------------------------------------------------------------------
+// 🔧  Config & helpers
+//--------------------------------------------------------------------
+const MODEL_SECTIONS  = process.env.MODEL_SECTIONS  || 'gpt-4o';      // big window
+const MODEL_TRANSLATE = process.env.MODEL_TRANSLATE || 'gpt-4o-mini'; // cheap window
+const MAX_SECTION_TOKENS = +(process.env.MAX_SECTION_TOKENS || 250);  // per sec / per lang
+const MAX_PROMPT_TOKENS  = +(process.env.MAX_PROMPT_TOKENS  || 13500);
 
 const openai = new OpenAI();
 
-const MODEL_SECTIONS  = process.env.MODEL_SECTIONS  || "gpt-4o";       // big
-const MODEL_TRANSLATE = process.env.MODEL_TRANSLATE || "gpt-4o-mini";  // cheap
-const TOK_SECT = +(process.env.MAX_SECTION_TOKENS || 250);
-const TOK_PROM = +(process.env.MAX_PROMPT_TOKENS  || 13500);
-
-// ---------- helpers ----------------------------------------------------------
+// simple tokenizer wrapper -----------------------------------------------------
 const encCache = new Map();
-const enc = m => {
-  if (!encCache.has(m)) encCache.set(m, encoding_for_model(m));
-  return encCache.get(m);
-};
-const count = (m, s) => enc(m).encode(s).length;
-const clip  = (m, s, max) =>
-  count(m, s) <= max ? s : enc(m).decode(enc(m).encode(s).slice(0, max - 1)) + "…";
-
-const mapLang = c =>
-  ({ ko:"Korean", ar:"Arabic", pt:"Portuguese", ja:"Japanese", fr:"French",
-     ru:"Russian", de:"German", es:"Spanish", zh:"Chinese (Mandarin)",
-     hi:"Hindi",   mr:"Marathi" }[c] || "");
-
-// ---------- 1) English sections ---------------------------------------------
-async function buildSections ({ referenceText, azureJson }) {
-  const sys =
-`You are an ESL pronunciation coach.
-Respond ONLY with valid JSON.  ←← includes the magic word`;
-
+function getEncoding(model){
+  if(encCache.has(model)) return encCache.get(model);
+  const enc = encoding_for_model(model);
+  encCache.set(model, enc);
+  return enc;
+}
+function countTokens(model, str){
+  const enc = getEncoding(model);
+  return enc.encode(str).length;
+}
+//--------------------------------------------------------------------
+// 1️⃣  Build the English sections
+//--------------------------------------------------------------------
+export async function buildEnglishSections({referenceText, azureJson}){
+  const sys = `You are an ESL pronunciation coach. Produce EXACTLY six JSON objects, each with keys: title, titleL1, en. Do NOT include l1 in this step.`;
   const user = `Reference text: "${referenceText}"
-Azure JSON (shortened):
-${JSON.stringify(azureJson).slice(0, 2000)} …
-Return an ARRAY (length 6) of objects:
-[{title, titleL1, en}, …] using these titles:
-🎯 Quick Coaching, 🔬 Phoneme Profile, 🪜 Common Pitfalls, ⚖️ Comparisons, 🌍 Did You Know?, 🤝 Reassurance`;
+Azure JSON (shortened):\n${JSON.stringify(azureJson).slice(0,2000)}…\n\nReturn six sections: 🎯 Quick Coaching, 🔬 Phoneme Profile, 🪜 Common Pitfalls, ⚖️ Comparisons, 🌍 Did You Know?, 🤝 Reassurance.`;
 
-  if (count(MODEL_SECTIONS, sys + user) > TOK_PROM)
-    throw new Error("Prompt too large, clip first.");
+  // token‑count guard ----------------------------------------------------------
+  const usedTokens = countTokens(MODEL_SECTIONS, sys + user);
+  if(usedTokens > MAX_PROMPT_TOKENS){
+    throw new Error(`Prompt would be ${usedTokens} tokens – clip or split first.`);
+  }
 
-  const { choices } = await openai.chat.completions.create({
+  const resp = await openai.chat.completions.create({
     model: MODEL_SECTIONS,
     temperature: 0.7,
-    max_tokens: 4096,
-    response_format: { type: "json_object" },
-    messages: [{ role:"system", content: sys }, { role:"user", content: user }]
+    max_tokens: 4096,               // plenty of room for reply
+    messages:[{role:'system',content:sys},{role:'user',content:user}],
+  });
+  const raw = resp.choices[0].message.content.trim();
+  return safeJsonParse(raw);
+}
+//--------------------------------------------------------------------
+// 2️⃣  Translate each .en to .l1 if needed
+//--------------------------------------------------------------------
+export async function translateSections(sections,targetCode){
+  if(!targetCode) return sections; // nothing to do
+
+  // squash long English bodies to stay inside cheap‑model limits
+  sections.forEach(s=>{
+    s.en = trimToTokens(MODEL_TRANSLATE,s.en,MAX_SECTION_TOKENS);
   });
 
-  const data = JSON.parse(choices[0].message.content);
-  if (!Array.isArray(data)) throw new Error("Model did not return an array");
-  return data;
-}
+  const sys = `Translate the field \"en\" into ${targetCode}. Return the SAME array shape with a new key l1 (translation). Leave other keys untouched.`;
+  const user = JSON.stringify(sections);
 
-// ---------- 2) translate -----------------------------------------------------
-async function translate (sections, target) {
-  if (!target) return sections;                 // nothing to do
-  if (!Array.isArray(sections)) throw new Error("translate() expects array");
-
-  const trimmed = sections.map(obj => ({
-    ...obj,
-    en: clip(MODEL_TRANSLATE, obj.en, TOK_SECT)
-  }));
-
-  const sys =
-`Translate the field "en" into ${target}.
-Return the SAME array shape with an added "l1" key.
-Respond ONLY with valid JSON.`;                 // magic word again
-
-  const { choices } = await openai.chat.completions.create({
+  const resp = await openai.chat.completions.create({
     model: MODEL_TRANSLATE,
-    temperature: 0.2,
+    temperature: 0.3,
     max_tokens: 2048,
-    response_format: { type: "json_object" },
-    messages: [{ role:"system", content: sys },
-               { role:"user",   content: JSON.stringify(trimmed) }]
+    messages:[{role:'system',content:sys},{role:'user',content:user}],
   });
-
-  return JSON.parse(choices[0].message.content);
+  return safeJsonParse(resp.choices[0].message.content.trim());
 }
-
-// ---------- 3) serverless handler -------------------------------------------
-export default async function handler (req, res) {
-  // CORS – allow Codesandbox
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
-
-  try {
-    const { referenceText, azureResult, firstLang = "" } = req.body || {};
-    const english = await buildSections({ referenceText, azureJson: azureResult });
-    const final   = await translate(english, mapLang(firstLang));
-    res.status(200).json({ sections: final });
-  } catch (err) {
+//--------------------------------------------------------------------
+// 3️⃣  Public handler (Express style)
+//--------------------------------------------------------------------
+export async function handler(req,res){
+  try{
+    const {referenceText, azureResult, firstLang='' } = req.body;
+    const englishSections = await buildEnglishSections({referenceText, azureJson:azureResult});
+    const finalSections   = await translateSections(englishSections, mapLang(firstLang));
+    res.json({sections:finalSections});
+  }catch(err){
     console.error(err);
-    res.status(500).json({ error: String(err) });
+    res.status(500).json({error:String(err)});
   }
 }
+//--------------------------------------------------------------------
+// 🔸  Utility helpers
+//--------------------------------------------------------------------
+function safeJsonParse(str){
+  try{ return JSON.parse(str); }catch{ throw new Error('Model did not return valid JSON'); }
+}
+
+function trimToTokens(model,str,max){
+  const enc = getEncoding(model);
+  let tokens = enc.encode(str);
+  if(tokens.length<=max) return str;
+  tokens = tokens.slice(0,max-1);
+  return enc.decode(tokens)+"…";
+}
+
+// Map your <select id="l1Select"> value to an ISO language code the translator understands
+function mapLang(code){
+  const table={ko:'Korean',ar:'Arabic',pt:'Portuguese',ja:'Japanese',fr:'French',ru:'Russian',de:'German',es:'Spanish',zh:'Chinese (Mandarin)',hi:'Hindi',mr:'Marathi'};
+  return table[code]||''; // empty string ➜ no translation
+}
+
+// -----------------------------------------------------------------------------
+//  End of file – drop this into /api/pronunciation.js (or .ts) and wire it up
+// -----------------------------------------------------------------------------
