@@ -68,6 +68,7 @@ function buildSystemPrompt(withTranslate){
   return `
 You are the world's leading bilingual pronunciation coach.
 
+Respond in JSON format.
 Return exactly:
 {"sections":[{"title":"","en":""${withTranslate?', "l1":""':''}]}
 
@@ -138,6 +139,7 @@ export default async function handler(req,res){
     /* ---------- 2️⃣  Translation pass (if needed) ---------- */
     if(langCode){
       const sysTR = `Translate the field "en" into ${l1Label}. 
+Respond in JSON format.
 Return the SAME array shape with a new key "l1", others untouched.`;
 
       const trResp = await openai.chat.completions.create({
