@@ -1,132 +1,122 @@
-// api/pronunciation-gpt.js
-export const config = { api: { bodyParser: true, externalResolver: true } };
+// pronunciation.js – small, self‑contained backend helper that
+// 1) counts tokens before every call
+// 2) generates the six English feedback sections with GPT‑4o (128k context)
+// 3) translates them with GPT‑4o‑mini (cheap) when the user picked a first‑language (l1)
+// -----------------------------------------------------------------------------
+// Environment variables expected
+//   OPENAI_API_KEY             – your key
+//   MODEL_SECTIONS (optional)  – default "gpt-4o"
+//   MODEL_TRANSLATE (optional) – default "gpt-4o-mini"
+//   MAX_SECTION_TOKENS         – default  250  (per language, per section)
+//   MAX_PROMPT_TOKENS          – default 13500 (safety buffer for the sections call)
+//
+// Requires: npm i openai tiktoken
+// -----------------------------------------------------------------------------
+import OpenAI from 'openai';
+import { encoding_for_model } from 'tiktoken';
 
-import { OpenAI } from "openai";
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+//--------------------------------------------------------------------
+// 🔧  Config & helpers
+//--------------------------------------------------------------------
+const MODEL_SECTIONS  = process.env.MODEL_SECTIONS  || 'gpt-4o';      // big window
+const MODEL_TRANSLATE = process.env.MODEL_TRANSLATE || 'gpt-4o-mini'; // cheap window
+const MAX_SECTION_TOKENS = +(process.env.MAX_SECTION_TOKENS || 250);  // per sec / per lang
+const MAX_PROMPT_TOKENS  = +(process.env.MAX_PROMPT_TOKENS  || 13500);
 
-/* Helper utilities unchanged */
-const universallyHard = new Set(["θ", "ð", "ɹ"]);
-const langMap = {
-  es: "Spanish", fr: "French", pt: "Portuguese", zh: "Chinese",
-  ja: "Japanese", ko: "Korean", ar: "Arabic", ru: "Russian",
-  de: "German", hi: "Hindi", mr: "Marathi", universal: "Universal", "": "Universal"
-};
-const alias = { dh: "ð", th: "θ", r: "ɹ" };
-const norm = (sym) => alias[sym] || sym;
+const openai = new OpenAI();
 
-function worstPhoneme(json) {
-  const tally = {};
-  json?.NBest?.[0]?.Words?.forEach((w) =>
-    w.Phonemes?.forEach((p) => {
-      if (p.AccuracyScore < 85) {
-        const k = norm(p.Phoneme);
-        tally[k] = (tally[k] || 0) + 1;
-      }
-    })
-  );
-  return Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+// simple tokenizer wrapper -----------------------------------------------------
+const encCache = new Map();
+function getEncoding(model){
+  if(encCache.has(model)) return encCache.get(model);
+  const enc = encoding_for_model(model);
+  encCache.set(model, enc);
+  return enc;
 }
-function worstWords(json, n = 3) {
-  return (json?.NBest?.[0]?.Words || [])
-    .filter((w) => w.AccuracyScore < 70)
-    .sort((a, b) => a.AccuracyScore - b.AccuracyScore)
-    .slice(0, n)
-    .map((w) => w.Word);
+function countTokens(model, str){
+  const enc = getEncoding(model);
+  return enc.encode(str).length;
 }
+//--------------------------------------------------------------------
+// 1️⃣  Build the English sections
+//--------------------------------------------------------------------
+export async function buildEnglishSections({referenceText, azureJson}){
+  const sys = `You are an ESL pronunciation coach. Produce EXACTLY six JSON objects, each with keys: title, titleL1, en. Do NOT include l1 in this step.`;
+  const user = `Reference text: "${referenceText}"
+Azure JSON (shortened):\n${JSON.stringify(azureJson).slice(0,2000)}…\n\nReturn six sections: 🎯 Quick Coaching, 🔬 Phoneme Profile, 🪜 Common Pitfalls, ⚖️ Comparisons, 🌍 Did You Know?, 🤝 Reassurance.`;
 
-/* NEW Updated section metadata: 6 sections total */
-const sectionMeta = [
-  { emoji: "🎯", en: "Quick Coaching", min: 80, max: 120 },
-  { emoji: "🔬", en: "Phoneme Profile", min: 90, max: 130 },
-  { emoji: "🪜", en: "Common Pitfalls", min: 80, max: 120 },
-  { emoji: "⚖️", en: "Comparisons", min: 90, max: 130 },
-  { emoji: "🌍", en: "Did You Know?", min: 80, max: 120 }, // merged with L1 Spotlight
-  { emoji: "🤝", en: "Reassurance", min: 50, max: 90 }
-];
+  // token‑count guard ----------------------------------------------------------
+  const usedTokens = countTokens(MODEL_SECTIONS, sys + user);
+  if(usedTokens > MAX_PROMPT_TOKENS){
+    throw new Error(`Prompt would be ${usedTokens} tokens – clip or split first.`);
+  }
 
-export default async function handler(req, res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
-
-  try {
-    const { referenceText, azureResult, firstLang = "" } = req.body;
-    const targetLangCode = firstLang.trim().toLowerCase();
-    const l1Label = langMap[targetLangCode] || "Universal";
-
-    const worst = worstPhoneme(azureResult);
-    const badList = worstWords(azureResult);
-    const universal = universallyHard.has(worst);
-
-    const rangesStr = sectionMeta
-      .map((s, i) => `${i + 1}. ${s.emoji} ${s.en} — ${s.min}-${s.max} EN words`)
-      .join("\n");
-
-    const system = `
-You are the world's leading expert bilingual pronunciation coach and linguist.
-
-❏ Output exactly:
-{
-  "sections": [
-    {"title":"", "titleL1":"", "en":"", "l1":""},
-    ...
-  ]
+  const resp = await openai.chat.completions.create({
+    model: MODEL_SECTIONS,
+    temperature: 0.7,
+    max_tokens: 4096,               // plenty of room for reply
+    messages:[{role:'system',content:sys},{role:'user',content:user}],
+  });
+  const raw = resp.choices[0].message.content.trim();
+  return safeJsonParse(raw);
 }
+//--------------------------------------------------------------------
+// 2️⃣  Translate each .en to .l1 if needed
+//--------------------------------------------------------------------
+export async function translateSections(sections,targetCode){
+  if(!targetCode) return sections; // nothing to do
 
-❏ Provide exactly 6 sections, in this order:
-${rangesStr}
+  // squash long English bodies to stay inside cheap‑model limits
+  sections.forEach(s=>{
+    s.en = trimToTokens(MODEL_TRANSLATE,s.en,MAX_SECTION_TOKENS);
+  });
 
-• "title": emoji + English title above (fixed)
-• "titleL1": Title translated to learner's L1 (no emoji)
-• "en": English coaching (respect word limits above, be rich & specific, never generic)
-• "l1": Same text translated to learner's L1. Leave blank if firstLang = "Universal".
+  const sys = `Translate the field \"en\" into ${targetCode}. Return the SAME array shape with a new key l1 (translation). Leave other keys untouched.`;
+  const user = JSON.stringify(sections);
 
-❏ Sections explained:
-1. Quick Coaching: Direct advice how to pronounce difficult phoneme or word.
-2. Phoneme Profile: Precise articulation details, tongue/lip positions, airflow.
-3. Common Pitfalls: Typical mistakes by L1 speakers, specific solutions.
-4. Comparisons: Explicitly compare English sound/word shape vs learner's L1, similarities & differences clearly stated.
-5. Did You Know?: Engaging facts linking phoneme to L1 & global language context.
-6. Reassurance: Warm encouragement, remind learner errors are natural.
-
-No markdown or HTML, just plain text.
-`.trim();
-
-    const user = {
-      worstPhoneme: worst,
-      worstWords: badList,
-      sampleText: referenceText,
-      universal,
-      firstLang: targetLangCode,
-      l1Label
-    };
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.6,
-      max_tokens: 1800,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: JSON.stringify(user) }
-      ]
-    });
-
-    let payload;
-    try {
-      payload = JSON.parse(completion.choices[0].message.content);
-      if (!Array.isArray(payload.sections)) throw "Invalid GPT response format.";
-    } catch (err) {
-      console.error("GPT JSON parse error:", err);
-      return res.status(500).json({ error: "Bad AI JSON shape." });
-    }
-
-    res.status(200).json(payload);
-  } catch (e) {
-    console.error("pronunciation-gpt error:", e);
-    res.status(500).json({ error: "AI feedback failed." });
+  const resp = await openai.chat.completions.create({
+    model: MODEL_TRANSLATE,
+    temperature: 0.3,
+    max_tokens: 2048,
+    messages:[{role:'system',content:sys},{role:'user',content:user}],
+  });
+  return safeJsonParse(resp.choices[0].message.content.trim());
+}
+//--------------------------------------------------------------------
+// 3️⃣  Public handler (Express style)
+//--------------------------------------------------------------------
+export async function handler(req,res){
+  try{
+    const {referenceText, azureResult, firstLang='' } = req.body;
+    const englishSections = await buildEnglishSections({referenceText, azureJson:azureResult});
+    const finalSections   = await translateSections(englishSections, mapLang(firstLang));
+    res.json({sections:finalSections});
+  }catch(err){
+    console.error(err);
+    res.status(500).json({error:String(err)});
   }
 }
+//--------------------------------------------------------------------
+// 🔸  Utility helpers
+//--------------------------------------------------------------------
+function safeJsonParse(str){
+  try{ return JSON.parse(str); }catch{ throw new Error('Model did not return valid JSON'); }
+}
+
+function trimToTokens(model,str,max){
+  const enc = getEncoding(model);
+  let tokens = enc.encode(str);
+  if(tokens.length<=max) return str;
+  tokens = tokens.slice(0,max-1);
+  return enc.decode(tokens)+"…";
+}
+
+// Map your <select id="l1Select"> value to an ISO language code the translator understands
+function mapLang(code){
+  const table={ko:'Korean',ar:'Arabic',pt:'Portuguese',ja:'Japanese',fr:'French',ru:'Russian',de:'German',es:'Spanish',zh:'Chinese (Mandarin)',hi:'Hindi',mr:'Marathi'};
+  return table[code]||''; // empty string ➜ no translation
+}
+
+// -----------------------------------------------------------------------------
+//  End of file – drop this into /api/pronunciation.js (or .ts) and wire it up
+// -----------------------------------------------------------------------------
