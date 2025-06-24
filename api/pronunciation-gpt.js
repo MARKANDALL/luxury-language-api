@@ -16,13 +16,11 @@ const MODEL_LIMIT = { "gpt-4o": 8192, "gpt-4o-mini": 4096 };
 
  // Allow up to 1 800 answer-tokens (≈ 6×150 words in EN + L1)  
  // while still respecting model limits.
+ // new guard – give the model everything that’s left
  function safeMax(model, prompt) {
    const tokensUsed = countTokens(prompt);
    const limit      = MODEL_LIMIT[model] ?? 4096;
-   const headroom   = limit - tokensUsed - 50;   // 50-token safety buffer
-
-   // We need at least 1200 tokens to fit 6 EN + 6 L1 sections comfortably
-   return Math.min(Math.max(1200, headroom), 1800);
+   return Math.max(100, limit - tokensUsed - 50);  // leave 50-token buffer
  }
 
 /* ---------- pronunciation logic helpers ---------- */
@@ -109,7 +107,7 @@ ${rangesStr}
 • "title":   emoji + English title above (fixed)
 • "titleL1": Title translated to learner's L1 (no emoji)
 • "en":      English coaching (respect word limits above, be rich & specific)
-• "l1":      Same text translated to learner's L1 — leave blank if firstLang = "Universal"
+• "l1":      Same text translated to learner's L1 — **MUST NOT** be blank unless firstLang = "Universal"
 
 ❏ Sections explained:
 1. Quick Coaching  – direct advice for the hardest phoneme/word
