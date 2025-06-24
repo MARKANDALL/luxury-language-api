@@ -152,8 +152,11 @@ ${JSON.stringify(enChunks)}
       if(translations.length===missing.length){
         missing.forEach((idx,i)=>{
           data.sections[idx].l1=translations[i];
-          data.sections[idx].titleL1=
-            sections[idx].en ? translations[i].split(/[.!?]/)[0] : "";
+ // put only the first ~6 tokens in the heading
+ data.sections[idx].titleL1 = translations[i]
+        .split(/\s+/)        // words
+        .slice(0, 6)         // keep six
+        .join(" ");
         });
       }
     }
