@@ -14,12 +14,16 @@ import { countTokens } from "gpt-tokenizer";
 
 const MODEL_LIMIT = { "gpt-4o": 8192, "gpt-4o-mini": 4096 };
 
-function safeMax(model, prompt) {
-  const tokensUsed = countTokens(prompt);
-  // leave a 50-token buffer to avoid hitting the model limit
-  const limit = MODEL_LIMIT[model] ?? 4096;
-  return Math.max(100, Math.min(900, limit - tokensUsed - 50));
-}
+ // Allow up to 1 800 answer-tokens (≈ 6×150 words in EN + L1)  
+ // while still respecting model limits.
+ function safeMax(model, prompt) {
+   const tokensUsed = countTokens(prompt);
+   const limit      = MODEL_LIMIT[model] ?? 4096;
+   const headroom   = limit - tokensUsed - 50;   // 50-token safety buffer
+
+   // We need at least 1200 tokens to fit 6 EN + 6 L1 sections comfortably
+   return Math.min(Math.max(1200, headroom), 1800);
+ }
 
 /* ---------- pronunciation logic helpers ---------- */
 const universallyHard = new Set(["θ", "ð", "ɹ"]);
