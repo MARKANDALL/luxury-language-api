@@ -6,8 +6,8 @@
 
 export const config = { api: { bodyParser: true, externalResolver: true } };
 
-import { OpenAI }      from "openai";
-import gptTokenizer    from "gpt-tokenizer";    // default export
+import { OpenAI }   from "openai";
+import gptTokenizer from "gpt-tokenizer";          // default export
 const { countTokens } = gptTokenizer;
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -17,8 +17,8 @@ const MODEL_LIMIT = { "gpt-4o": 8192, "gpt-4o-mini": 4096 };
 
 function safeMax(model, prompt) {
   const used  = countTokens(prompt, model);
-  const spare = MODEL_LIMIT[model] - used - 50;         // 50-token cushion
-  return Math.max(200, Math.min(1800, spare));          // ↑ ceiling → 1800
+  const spare = MODEL_LIMIT[model] - used - 50;     // 50-token cushion
+  return Math.max(200, Math.min(1500, spare));      // <— cap 1 500
 }
 
 /* ---------- pronunciation helpers ---------- */
@@ -29,7 +29,7 @@ const langMap = {
   de: "German",   hi: "Hindi",  mr: "Marathi",
   universal: "Universal", "": "Universal"
 };
-const alias = { dh: "ð", th: "θ", r:  "ɹ" };
+const alias = { dh: "ð", th: "θ", r: "ɹ" };
 const norm  = (sym) => alias[sym] || sym;
 
 function worstPhoneme(json) {
@@ -60,14 +60,12 @@ const sectionMeta = [
   { emoji: "🪜", en: "Common Pitfalls",  min: 80, max: 120 },
   { emoji: "⚖️", en: "Comparisons",      min: 90, max: 130 },
   { emoji: "🌍", en: "Did You Know?",    min: 80, max: 130 },
-  { emoji: "🤝", en: "Reassurance",      min: 35, max: 55  } // trimmed
+  { emoji: "🤝", en: "Reassurance",      min: 35, max: 55 }  // trimmed
 ];
 
 /* ============================================================ */
-/*  Main handler                                                */
-/* ============================================================ */
 export default async function handler(req, res) {
-  // ----- CORS -----
+  /* ---------- CORS ---------- */
   res.setHeader("Access-Control-Allow-Origin",  "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -76,7 +74,7 @@ export default async function handler(req, res) {
   if (req.method !==  "POST")   return res.status(405).json({ error: "Only POST allowed" });
 
   try {
-    /* pull body */
+    /* ---------- request body ---------- */
     const { referenceText, azureResult, firstLang = "" } = req.body;
     const targetLangCode = firstLang.trim().toLowerCase();
     const l1Label        = langMap[targetLangCode] || "Universal";
@@ -85,7 +83,7 @@ export default async function handler(req, res) {
     const badList   = worstWords(azureResult);
     const universal = universallyHard.has(worst);
 
-    /* build system & user prompts */
+    /* ---------- prompts ---------- */
     const rangesStr = sectionMeta
       .map((s, i) => `${i + 1}. ${s.emoji} ${s.en} — ${s.min}-${s.max} EN words`)
       .join("\n");
@@ -106,7 +104,9 @@ ${rangesStr}
 • "title":   emoji + English title above (fixed)
 • "titleL1": Title translated to learner's L1 (no emoji)
 • "en":      English coaching (respect word limits above, be rich & specific)
-• "l1":      Same text translated to learner's L1 — leave blank if firstLang = "Universal"
+• "l1":      Same text translated to learner's L1 — leave blank only if firstLang = "Universal"
+
+⚠️ If firstLang ≠ "Universal", every “l1” must contain at least one full sentence (> 10 characters).  Otherwise retry internally before responding.
 
 Respond in JSON format.
 `.trim();
@@ -120,36 +120,51 @@ Respond in JSON format.
       l1Label
     });
 
-    /* call OpenAI */
+    /* ---------- call OpenAI with retry ---------- */
     const model      = "gpt-4o-mini";
-    const max_tokens = safeMax(model, systemPrompt + userPrompt);
+    const promptSize = systemPrompt + userPrompt;
+    const max_tokens = safeMax(model, promptSize);
 
-    const completion = await openai.chat.completions.create({
-      model,
-      temperature: 0.6,
-      response_format: { type: "json_object" },
-      max_tokens,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user",   content: userPrompt   }
-      ]
-    });
-
-    /* parse */
+    const MAX_TRIES = 3;
+    let attempt = 0;
     let payload;
-    try {
-      payload = JSON.parse(completion.choices[0].message.content);
-      if (payload.sections?.data) payload.sections = payload.sections.data;
-      if (!Array.isArray(payload.sections)) throw new Error("Bad shape");
-    } catch (e) {
-      console.error("GPT JSON parse error:", e);
-      return res.status(500).json({ error: "Bad AI JSON shape." });
+
+    while (attempt < MAX_TRIES) {
+      attempt++;
+      try {
+        const completion = await openai.chat.completions.create({
+          model,
+          temperature: 0.6,
+          response_format: { type: "json_object" },
+          max_tokens,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user",   content: userPrompt   }
+          ]
+        });
+
+        payload = JSON.parse(completion.choices[0].message.content);
+        if (payload.sections?.data) payload.sections = payload.sections.data;
+        if (!Array.isArray(payload.sections)) throw new Error("Bad shape");
+
+        /* extra L1 check */
+        if (!universal) {
+          const allHaveL1 = payload.sections.every(s => (s.l1 || "").trim().length > 9);
+          if (!allHaveL1) throw new Error("Missing L1 content");
+        }
+
+        // success 🎉
+        return res.status(200).json({ sections: payload.sections });
+      } catch (err) {
+        console.error(`GPT attempt ${attempt} failed:`, err?.message || err);
+        if (attempt >= MAX_TRIES) {
+          return res.status(500).json({ error: "AI feedback failed." });
+        }
+        await new Promise(r => setTimeout(r, 400 * attempt)); // tiny back-off
+      }
     }
-
-    return res.status(200).json({ sections: payload.sections });
-
   } catch (err) {
-    console.error("pronunciation-gpt error:", err);
+    console.error("pronunciation-gpt fatal error:", err);
     res.status(500).json({ error: "AI feedback failed." });
   }
 }
