@@ -10,18 +10,15 @@ import { OpenAI } from "openai";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* ---------- TOKEN GUARD (gpt-tokenizer) ---------- */
-import { encoding_for_model } from "gpt-tokenizer";
-
-const enc4  = encoding_for_model("gpt-4o");
-const enc40 = encoding_for_model("gpt-4o-mini");
+import { countTokens } from "gpt-tokenizer";
 
 const MODEL_LIMIT = { "gpt-4o": 8192, "gpt-4o-mini": 4096 };
 
 function safeMax(model, prompt) {
-  const tokensUsed =
-    (model === "gpt-4o" ? enc4 : enc40).encode(prompt).length;
-  // leave ~50-token breathing room
-  return Math.max(100, Math.min(900, MODEL_LIMIT[model] - tokensUsed - 50));
+  const tokensUsed = countTokens(prompt);
+  // leave a 50-token buffer to avoid hitting the model limit
+  const limit = MODEL_LIMIT[model] ?? 4096;
+  return Math.max(100, Math.min(900, limit - tokensUsed - 50));
 }
 
 /* ---------- pronunciation logic helpers ---------- */
