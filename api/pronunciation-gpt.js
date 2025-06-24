@@ -1,8 +1,6 @@
 // api/pronunciation-gpt.js
 // ------------------------------------------------------------
-//  Bilingual pronunciation coach
-//  1) GPT-4o-mini writes six English + (L1) sections
-//  2) If some L1s are blank, do a 2nd “translate-only” pass
+//  Bilingual pronunciation coach – stable L1 fallback
 // ------------------------------------------------------------
 
 export const config = { api: { bodyParser: true, externalResolver: true } };
@@ -11,26 +9,26 @@ import { OpenAI } from "openai";
 import { countTokens } from "gpt-tokenizer";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ---------- small helpers ---------- */
+/* ---------- helpers ---------- */
 const MODEL_LIMIT = { "gpt-4o": 8192, "gpt-4o-mini": 4096 };
 const safeMax = (m, ...txt) =>
   Math.max(100,
-    Math.min(900, MODEL_LIMIT[m] - txt.reduce((n, t) => n + countTokens(t, m), 0) - 50)
+    Math.min(900, MODEL_LIMIT[m] - txt.reduce((n,t)=>n + countTokens(t, m), 0) - 50)
   );
 
-const alias = { dh: "ð", th: "θ", r: "ɹ" };
-const norm  = s => alias[s] || s;
-function worstPhoneme(j) {
-  const tally = {};
+const alias = { dh:"ð", th:"θ", r:"ɹ" };
+const norm = s => alias[s] || s;
+function worstPhoneme(j){
+  const tally={};
   j?.NBest?.[0]?.Words?.forEach(w =>
-    w.Phonemes?.forEach(p => {
-      if (p.AccuracyScore < 85) {
-        const k = norm(p.Phoneme);
-        tally[k] = (tally[k] || 0) + 1;
+    w.Phonemes?.forEach(p=>{
+      if(p.AccuracyScore<85){
+        const k=norm(p.Phoneme);
+        tally[k]=(tally[k]||0)+1;
       }
     })
   );
-  return Object.entries(tally).sort((a,b)=>b[1]-a[1])[0]?.[0] || "";
+  return Object.entries(tally).sort((a,b)=>b[1]-a[1])[0]?.[0]||"";
 }
 function worstWords(j,n=3){
   return (j?.NBest?.[0]?.Words||[])
@@ -39,25 +37,23 @@ function worstWords(j,n=3){
     .slice(0,n).map(w=>w.Word);
 }
 
-/* ---------- language map ---------- */
-const langMap = {
+const langMap={
   es:"Spanish",fr:"French",pt:"Portuguese",zh:"Chinese",
   ja:"Japanese",ko:"Korean",ar:"Arabic",ru:"Russian",
   de:"German",hi:"Hindi",mr:"Marathi",
   universal:"Universal","":"Universal"
 };
 
-/* ---------- section meta ---------- */
-const sections = [
+const sections=[
   { emoji:"🎯", en:"Quick Coaching",   min:80, max:110 },
   { emoji:"🔬", en:"Phoneme Profile",  min:70, max:100 },
   { emoji:"🪜", en:"Common Pitfalls",  min:75, max:110 },
   { emoji:"⚖️", en:"Comparisons",      min:80, max:120 },
   { emoji:"🌍", en:"Did You Know?",    min:70, max:100 },
-  { emoji:"🤝", en:"Reassurance",      min:40, max:65 }  // shorter
+  { emoji:"🤝", en:"Reassurance",      min:40, max:65 }
 ];
 
-/* ============================================================ */
+/* ========================================================== */
 export default async function handler(req,res){
   res.setHeader("Access-Control-Allow-Origin","*");
   res.setHeader("Access-Control-Allow-Methods","POST,OPTIONS");
@@ -67,21 +63,19 @@ export default async function handler(req,res){
   if(req.method!=="POST")    return res.status(405).json({error:"Only POST"});
 
   try{
-    /* ---------- request vars ---------- */
-    const { referenceText, azureResult, firstLang="" } = req.body;
-    const code   = firstLang.trim().toLowerCase();
-    const label  = langMap[code] || "Universal";
-    const isUni  = (code==="universal"||code==="");
+    const { referenceText, azureResult, firstLang="" }=req.body;
+    const code  = firstLang.trim().toLowerCase();
+    const label = langMap[code] || "Universal";
+    const isUni = (code==="universal"||code==="");
 
-    const worst = worstPhoneme(azureResult);
-    const bad   = worstWords(azureResult);
+    const worst=worstPhoneme(azureResult);
+    const bad  =worstWords(azureResult);
 
-    /* ---------- build prompts ---------- */
     const rangeLine = sections.map(
       (s,i)=>`${i+1}. ${s.emoji} ${s.en} — ${s.min}-${s.max} EN words`
     ).join("\n");
 
-    const sys = `
+    const sys=`
 You are the world's top bilingual pronunciation coach.
 
 Return strict JSON:
@@ -101,23 +95,22 @@ Otherwise translate both.
 5 Did You Know?   – fun fact
 6 Reassurance     – brief encouragement (≤65 EN words)
 
-Respond **JSON only**. No markdown.
+Respond **JSON only**.
 `.trim();
 
-    const usr = JSON.stringify({ worstPhoneme:worst, worstWords:bad,
-                                 sampleText:referenceText,
-                                 firstLang:code, l1Label:label });
+    const usr=JSON.stringify({ worstPhoneme:worst,worstWords:bad,
+                               sampleText:referenceText,
+                               firstLang:code,l1Label:label });
 
-    /* ---------- main call ---------- */
     const model="gpt-4o-mini";
-    const mainRes = await openai.chat.completions.create({
-      model, temperature:0.6,
+    const main=await openai.chat.completions.create({
+      model,temperature:0.6,
       max_tokens:safeMax(model,sys,usr),
       response_format:{type:"json_object"},
       messages:[{role:"system",content:sys},{role:"user",content:usr}]
     });
 
-    let data = JSON.parse(mainRes.choices[0].message.content);
+    let data=JSON.parse(main.choices[0].message.content);
     if(data.sections?.data) data.sections=data.sections.data;
     if(!Array.isArray(data.sections)||data.sections.length!==6)
       throw new Error("Bad section count");
@@ -128,35 +121,38 @@ Respond **JSON only**. No markdown.
       return res.status(200).json({sections:data.sections});
     }
 
-    /* ---------- need to translate missing L1? ---------- */
-    const missing = data.sections
-      .map((s,idx)=>(!s.l1||s.l1.trim().length<8)?idx:-1)
+    /* ---------- fallback translate if blanks ---------- */
+    const missing=data.sections
+      .map((s,i)=>(!s.l1||s.l1.trim().length<8)?i:-1)
       .filter(i=>i>=0);
 
     if(missing.length){
-      // Gather English  translate
-      const toTranslate = missing.map(i=>data.sections[i].en);
-      const tPrompt = `
-Translate the following English chunks into ${label}.
-Return JSON array of strings in the same order.
-
-${JSON.stringify(toTranslate)}
+      const enChunks=missing.map(i=>data.sections[i].en);
+      const tPrompt=`
+Translate EACH of these English chunks into ${label}.
+Return JSON: {"translations":[ "...", "..." ]}
+Order must match.
+${JSON.stringify(enChunks)}
 `.trim();
 
-      const tRes = await openai.chat.completions.create({
-        model,
-        temperature:0.3,
+      const tRes=await openai.chat.completions.create({
+        model,temperature:0.3,
         max_tokens:safeMax(model,tPrompt),
-        response_format:{type:"json_array"},
-        messages:[{role:"system",content:"You are a translator."},
-                  {role:"user",content:tPrompt}]
+        response_format:{type:"json_object"},
+        messages:[
+          {role:"system",content:"You are a precise translator; JSON only."},
+          {role:"user",content:tPrompt}
+        ]
       });
 
-      const translations = JSON.parse(tRes.choices[0].message.content);
-      if(Array.isArray(translations) && translations.length===missing.length){
+      const transObj=JSON.parse(tRes.choices[0].message.content||"{}");
+      const translations=Array.isArray(transObj.translations)?
+                          transObj.translations:[];
+
+      if(translations.length===missing.length){
         missing.forEach((idx,i)=>{
-          data.sections[idx].l1 = translations[i];
-          data.sections[idx].titleL1 =
+          data.sections[idx].l1=translations[i];
+          data.sections[idx].titleL1=
             sections[idx].en ? translations[i].split(/[.!?]/)[0] : "";
         });
       }
