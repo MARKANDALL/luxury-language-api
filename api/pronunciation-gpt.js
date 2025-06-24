@@ -9,12 +9,13 @@ export const config = { api: { bodyParser: true, externalResolver: true } };
 import { OpenAI } from "openai";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+
 /* ---------- TOKEN GUARD (gpt-tokenizer) ---------- */
-import { GPTTokenizer } from "gpt-tokenizer";
+import { encoding_for_model } from "gpt-tokenizer";
 
 // initialise once per module
-const enc4   = new GPTTokenizer({ model: "gpt-4o" });
-const enc40  = new GPTTokenizer({ model: "gpt-4o-mini" });
+const enc4  = encoding_for_model("gpt-4o");
+const enc40 = encoding_for_model("gpt-4o-mini");
 const MODEL_LIMIT = { "gpt-4o": 8192, "gpt-4o-mini": 4096 };
 
 function safeMax(model, prompt) {
