@@ -6,19 +6,21 @@
 
 export const config = { api: { bodyParser: true, externalResolver: true } };
 
-import { OpenAI } from "openai";
+import { OpenAI }       from "openai";
+import { countTokens }  from "gpt-tokenizer";   // tiny, pure JS
+
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* ---------- TOKEN GUARD (gpt-tokenizer) ---------- */
-import { countTokens } from "gpt-tokenizer"; // tiny, pure-JS
-
-const MODEL_LIMIT = { "gpt-4o": 8192, "gpt-4o-mini": 4096 };
+/* ---------- TOKEN LIMIT ---------- */
+const MODEL_LIMIT = { "gpt-4o-mini": 4096, "gpt-4o": 8192 };
 function safeMax(model, prompt) {
   const used = countTokens(prompt, model);
-  return Math.max(100, Math.min(900, MODEL_LIMIT[model] - used - 50));
+  // allow up to 1 500 but never above model cap-50
+  const spare = MODEL_LIMIT[model] - used - 50;
+  return Math.max(200, Math.min(1500, spare));
 }
 
-/* ---------- pronunciation helpers ---------- */
+/* ---------- misc helpers ---------- */
 const universallyHard = new Set(["θ", "ð", "ɹ"]);
 const langMap = {
   es: "Spanish", fr: "French", pt: "Portuguese", zh: "Chinese",
@@ -31,8 +33,8 @@ const norm  = (sym) => alias[sym] || sym;
 
 function worstPhoneme(json) {
   const tally = {};
-  json?.NBest?.[0]?.Words?.forEach(w =>
-    w.Phonemes?.forEach(p => {
+  json?.NBest?.[0]?.Words?.forEach((w) =>
+    w.Phonemes?.forEach((p) => {
       if (p.AccuracyScore < 85) {
         const k = norm(p.Phoneme);
         tally[k] = (tally[k] || 0) + 1;
@@ -43,27 +45,25 @@ function worstPhoneme(json) {
 }
 function worstWords(json, n = 3) {
   return (json?.NBest?.[0]?.Words || [])
-    .filter(w => w.AccuracyScore < 70)
+    .filter((w) => w.AccuracyScore < 70)
     .sort((a, b) => a.AccuracyScore - b.AccuracyScore)
     .slice(0, n)
-    .map(w => w.Word);
+    .map((w) => w.Word);
 }
 
-/* ---------- section spec ---------- */
 const sectionMeta = [
-  { emoji: "🎯", en: "Quick Coaching",   min: 80, max: 120 },
-  { emoji: "🔬", en: "Phoneme Profile",  min: 70, max: 110 },
-  { emoji: "🪜", en: "Common Pitfalls",  min: 80, max: 120 },
-  { emoji: "⚖️", en: "Comparisons",      min: 90, max: 130 },
-  { emoji: "🌍", en: "Did You Know?",    min: 80, max: 130 },
-  { emoji: "🤝", en: "Reassurance",      min: 35, max: 55 }   // shortened
+  { emoji: "🎯", en: "Quick Coaching",   min: 80,  max: 120 },
+  { emoji: "🔬", en: "Phoneme Profile",  min: 70,  max: 110 },
+  { emoji: "🪜", en: "Common Pitfalls",  min: 80,  max: 120 },
+  { emoji: "⚖️", en: "Comparisons",      min: 90,  max: 130 },
+  { emoji: "🌍", en: "Did You Know?",    min: 80,  max: 130 },
+  // Reassurance already trimmed
+  { emoji: "🤝", en: "Reassurance",      min: 40,  max: 70  }
 ];
 
-/* ============================================================ */
-/*  Main handler                                                */
-/* ============================================================ */
+/* ========================================================== */
 export default async function handler(req, res) {
-  /* ---------- CORS ---------- */
+  /* ---- CORS ---- */
   res.setHeader("Access-Control-Allow-Origin",  "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -71,90 +71,88 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !==  "POST")   return res.status(405).json({ error: "Only POST allowed" });
 
-  const { referenceText, azureResult, firstLang = "" } = req.body || {};
-  const langCode = firstLang.trim().toLowerCase();
-  const l1Label  = langMap[langCode] || "Universal";
+  try {
+    /* ---- input ---- */
+    const { referenceText, azureResult, firstLang = "" } = req.body;
+    const targetCode = firstLang.trim().toLowerCase();
+    const l1Label    = langMap[targetCode] || "Universal";
 
-  const worst     = worstPhoneme(azureResult);
-  const badList   = worstWords(azureResult);
-  const universal = universallyHard.has(worst);
+    const worst      = worstPhoneme(azureResult);
+    const badList    = worstWords(azureResult);
+    const universal  = universallyHard.has(worst);
 
-  /* ---------- build prompts ---------- */
-  const rangesStr = sectionMeta
-    .map((s, i) => `${i + 1}. ${s.emoji} ${s.en} — ${s.min}-${s.max} EN words`)
-    .join("\n");
+    const rangesStr  = sectionMeta
+      .map((s,i)=>`${i+1}. ${s.emoji} ${s.en} — ${s.min}-${s.max} EN words`)
+      .join("\n");
 
-  const systemPrompt = `
+    const system = `
 You are the world's leading expert bilingual pronunciation coach.
 
-❏ Output exactly:
+Return EXACTLY:
 {
-  "sections": [
-    {"title":"", "titleL1":"", "en":"", "l1":""}
+  "sections":[
+    {"title":"","titleL1":"","en":"","l1":""}
   ]
 }
 
-❏ Provide exactly 6 sections, in this order:
-${rangesStr}
+❏ Provide 6 sections in this order (${sectionMeta.map(s=>s.en).join(", ")}).
+❏ Fill every "l1" unless firstLang = "Universal".
+❏ Word limits above (English count only).
+❏ Reassurance ≈40-70 EN words (already trimmed).
 
-• "title":   emoji + English title (fixed)
-• "titleL1": title translated to learner's L1 (no emoji)
-• "en":      English coaching (respect word limits)
-• "l1":      same text translated to learner's L1 — leave blank *only* if firstLang = "Universal"
-
-• If firstLang ≠ "Universal", EVERY "l1" string must be non-empty.
-  If you cannot translate, respond with the single word ERR.
-
-Respond in JSON format.
+Respond in JSON format. Do NOT wrap in markdown.
 `.trim();
 
-  const userPrompt = JSON.stringify({
-    worstPhoneme : worst,
-    worstWords   : badList,
-    sampleText   : referenceText,
-    universal,
-    firstLang    : langCode,
-    l1Label
-  });
-
-  /* ---------- ask OpenAI (retry once if L1 missing) ---------- */
-  async function ask(temp) {
-    const model      = "gpt-4o-mini";
-    const max_tokens = safeMax(model, systemPrompt + userPrompt);
-    return openai.chat.completions.create({
-      model,
-      temperature: temp,
-      response_format: { type: "json_object" },
-      max_tokens,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user",   content: userPrompt   }
-      ]
+    const user = JSON.stringify({
+      worstPhoneme : worst,
+      worstWords   : badList,
+      sampleText   : referenceText,
+      universal,
+      firstLang    : targetCode,
+      l1Label
     });
-  }
 
-  try {
-    let completion = await ask(0.6);
-
-    // quick retry if GPT replied with ERR
-    if (completion.choices[0].message.content.trim() === "ERR") {
-      completion = await ask(0.8);
+    const model = "gpt-4o-mini";
+    const result = await askGPT(model, system, user, 0.45);
+    if (!result.ok) {
+      // one retry with slightly higher temperature
+      const retry = await askGPT(model, system, user, 0.65);
+      if (!retry.ok) throw retry.err;
+      return res.status(200).json({ sections: retry.sections });
     }
-
-    /* ---------- parse & validate ---------- */
-    let payload = JSON.parse(completion.choices[0].message.content);
-    if (payload.sections?.data) payload.sections = payload.sections.data;
-    if (!Array.isArray(payload.sections)) throw new Error("sections missing");
-
-    if (langCode !== "universal") {
-      const missing = payload.sections.find(s => !s.l1?.trim());
-      if (missing) throw new Error("GPT dropped L1 text");
-    }
-
-    return res.status(200).json({ sections: payload.sections });
+    return res.status(200).json({ sections: result.sections });
 
   } catch (err) {
     console.error("pronunciation-gpt error:", err);
-    return res.status(500).json({ error: "Bad AI JSON shape." });
+    res.status(500).json({ error: "AI feedback failed." });
+  }
+}
+
+/* ---------- helper to call OpenAI & parse ---------- */
+async function askGPT(model, sysPrompt, usrPrompt, temperature) {
+  const max_tokens = safeMax(model, sysPrompt + usrPrompt);
+
+  const completion = await openai.chat.completions.create({
+    model,
+    temperature,
+    response_format: { type: "json_object" },
+    max_tokens,
+    messages: [
+      { role: "system", content: sysPrompt },
+      { role: "user",   content: usrPrompt }
+    ]
+  });
+
+  try {
+    let payload = JSON.parse(completion.choices[0].message.content);
+    if (payload.sections?.data) payload.sections = payload.sections.data;
+    if (!Array.isArray(payload.sections)) throw "bad shape";
+    const missingL1 = payload.sections.some(sec =>
+      (!sec.l1 || !sec.l1.trim()) && usrPrompt.includes('"firstLang":"') && !usrPrompt.includes('"universal"')
+    );
+    if (missingL1) throw "missing L1";
+    return { ok:true, sections: payload.sections };
+  } catch (err) {
+    return { ok:false, err };
   }
 }
