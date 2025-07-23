@@ -5,8 +5,8 @@
   "type": "module",
 
   "scripts": {
-    "dev": "vercel dev"      /* local testing (optional) */,
-    "start": "node server.js"/* if you ever need a local server */
+    "dev": "vercel dev",
+    "start": "node server.js"
   },
 
   "dependencies": {
