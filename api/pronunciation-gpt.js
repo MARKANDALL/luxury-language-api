@@ -74,8 +74,8 @@ function forceJson(str){
   str = str.trim()
            .replace(/^```json?\s*/i, "")   // ```json \n
            .replace(/^```\s*/i, "")        // ``` \n
-           .replace(/```$/, "")             // trailing ```
-           .replace(/[“”]/g,'"')             // smart quotes → plain
+           .replace(/```$/, "")            // trailing ```
+           .replace(/[“”]/g,'"')           // smart quotes → plain
            .replace(/[‘’]/g,"'");
   const first = str.indexOf("{");
   const last  = str.lastIndexOf("}");
@@ -117,14 +117,14 @@ export default async function handler(req, res){
   if (req.method !== "POST")    return res.status(405).json({ error:"Only POST allowed" });
 
   try{
-    /* Vercel already parsed JSON → req.body is an object */
+    /* req.body is already parsed JSON */
     const { referenceText = "", azureResult = {}, firstLang = "" } = req.body;
 
     /* language code normaliser */
-    const raw = firstLang.trim().toLowerCase();
-    const langCode = raw === "" ? "universal"
-                    : raw.startsWith("zh") ? "zh"  // zh, zh-cn, zh-hans → zh
-                    : raw;
+    const langRaw = firstLang.trim().toLowerCase();   // RENAME to avoid collision
+    const langCode = langRaw === "" ? "universal"
+                    : langRaw.startsWith("zh") ? "zh"  // zh, zh-cn, zh-hans → zh
+                    : langRaw;
     console.log("[AI] firstLang received:", `\"${langCode}\"`);
 
     /* analyse the Azure JSON */
@@ -135,7 +135,7 @@ export default async function handler(req, res){
     /* build GPT prompts */
     const ranges = sections.map((s,i)=>`${i+1}. ${s.emoji} ${s.en} — ${s.min}-${s.max} EN words`).join("\n");
 
-    const SYSTEM = `You are the world's leading bilingual pronunciation coach.\n\nReturn pure JSON exactly like:\n{ \\"sections\\":[ {\\"title\\":\\"\\",\\"titleL1\\":\\"\\",\\"en\\":\\"\\",\\"l1\\":\\"\\"} ] }\n\nFollow the 6 sections in order:\n${ranges}\n\nIf langCode === \"universal\" leave \"l1\" blank. No markdown.`.trim();
+    const SYSTEM = `You are the world's leading bilingual pronunciation coach.\n\nReturn pure JSON exactly like:\n{ \"sections\":[ {\"title\":\"\",\"titleL1\":\"\",\"en\":\"\",\"l1\":\"\"} ] }\n\nFollow the 6 sections in order:\n${ranges}\n\nIf langCode === \"universal\" leave \"l1\" blank. No markdown.`.trim();
 
     const USER = JSON.stringify({ worstPhoneme:worst, worstWords:badList, sampleText:referenceText, universal, langCode });
 
@@ -146,18 +146,18 @@ export default async function handler(req, res){
       messages:[ {role:"system",content:SYSTEM}, {role:"user",content:USER} ]
     });
 
-    let raw = draft.choices[0].message.content || "";
+    let gptReply = draft.choices[0].message.content || "";  // renamed variable
     let data;
 
-    try      { data = forceJson(raw); }
+    try      { data = forceJson(gptReply); }
     catch(_) {                      // repair once with 4o‑mini
       const fix = await openai.chat.completions.create({
         model:"gpt-4o-mini", temperature:0,
         response_format:{type:"json_object"},
-        max_tokens:safeMax("gpt-4o-mini", raw),
+        max_tokens:safeMax("gpt-4o-mini", gptReply),
         messages:[
           {role:"system",content:"Fix the JSON so it parses; do NOT change its meaning."},
-          {role:"user",  content:raw.slice(0,4000)}
+          {role:"user",  content:gptReply.slice(0,4000)}
         ]
       });
       data = forceJson(fix.choices[0].message.content || "");
@@ -173,6 +173,4 @@ export default async function handler(req, res){
 
   }catch(err){
     console.error("[pronunciation-gpt]", err.message || err);
-    return res.status(500).json({ error: err.message || "AI feedback failed." });
-  }
-}
+    return res.status(500
