@@ -6,65 +6,57 @@ import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { tmpdir } from "os";
 import path from "path";
 
-// Use the local ffmpeg binary
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
-  // -- CORS HEADERS FOR ALL REQUESTS --
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  // -- Handle preflight (OPTIONS) requests --
   if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Only POST allowed" });
-  }
+  const region = process.env.AZURE_SPEECH_REGION || "eastus";
+  const enableProsody = String(process.env.ENABLE_PROSODY || "").toLowerCase() === "true";
 
-  // -- Handle POST requests: parse incoming form data (audio + text) --
   const form = formidable({ multiples: false });
   form.parse(req, async (err, fields, files) => {
     try {
       if (err) throw err;
 
-      // Always ensure referenceText is a string (not an array)
+      // Normalize inputs
       let referenceText = fields.text;
       if (Array.isArray(referenceText)) referenceText = referenceText[0];
-
       const audioFile = files.audio?.[0] || files.audio;
       if (!referenceText || !audioFile) {
         return res.status(400).json({ error: "Missing text or audio" });
       }
 
-      // -- Convert audio to 16KHz mono WAV --
+      // Convert to 16 kHz mono WAV
       const inputPath = audioFile.filepath;
       const outputPath = path.join(tmpdir(), `converted_${Date.now()}.wav`);
-
       await new Promise((resolve, reject) => {
         ffmpeg(inputPath)
-          .outputOptions([
-            "-ar 16000",
-            "-ac 1",
-            "-f wav",
-            "-sample_fmt s16"
-          ])
+          .outputOptions(["-ar 16000", "-ac 1", "-f wav", "-sample_fmt s16"])
           .on("end", resolve)
           .on("error", reject)
           .save(outputPath);
       });
-
       const audioBuffer = await fs.readFile(outputPath);
+      fs.unlink(outputPath).catch(() => {}); // best-effort cleanup
 
-      // -- Azure Pronunciation Assessment Parameters --
+      // --- Pronunciation Assessment header (REST) ---
       const pronAssessmentParams = {
         ReferenceText: referenceText,
         GradingSystem: "HundredMark",
         Granularity: "Phoneme",
         Dimension: "Comprehensive",
         EnableMiscue: true,
+        // NEW: enable prosody (ProsodyScore appears in the response)
+        ...(enableProsody ? { EnableProsodyAssessment: true } : {}),
+        // Language is set in the query; keeping here is harmless if present.
         Language: "en-US",
       };
       const pronAssessmentHeader = Buffer.from(
@@ -72,10 +64,9 @@ export default async function handler(req, res) {
         "utf8"
       ).toString("base64");
 
-      const endpoint =
-        "https://eastus.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed";
+      const endpoint = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed`;
 
-      const result = await fetch(endpoint, {
+      const azureRes = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
@@ -86,28 +77,28 @@ export default async function handler(req, res) {
         body: audioBuffer,
       });
 
-      const text = await result.text();
+      const text = await azureRes.text();
 
       let json;
       try {
         json = JSON.parse(text);
       } catch {
-        return res.status(result.status).json({
+        return res.status(azureRes.status).json({
           error: "Azure returned non-JSON response",
-          status: result.status,
+          status: azureRes.status,
           raw: text,
         });
       }
 
-      if (result.status >= 400) {
-        return res.status(result.status).json({
+      if (azureRes.status >= 400) {
+        return res.status(azureRes.status).json({
           error: "Azure error",
-          status: result.status,
+          status: azureRes.status,
           json,
         });
       }
 
-      // -- Always return valid Azure assessment JSON --
+      // Success — Azure's JSON includes ProsodyScore when enabled
       return res.status(200).json(json);
     } catch (error) {
       res.status(500).json({ error: "Server error", details: error.message });
