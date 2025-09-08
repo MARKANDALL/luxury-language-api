@@ -20,6 +20,7 @@ export default async function handler(req, res) {
 
   const region = process.env.AZURE_SPEECH_REGION || "eastus";
   const enableProsody = String(process.env.ENABLE_PROSODY || "").toLowerCase() === "true";
+console.log("[FeatureFlag] ENABLE_PROSODY:", enableProsody);
 
   const form = formidable({ multiples: false });
   form.parse(req, async (err, fields, files) => {
