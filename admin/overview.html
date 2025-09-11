@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Overview (admin)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    body{font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial;padding:18px}
+    h1{margin:0 0 10px}
+    .bar{display:flex;gap:10px;align-items:center;margin:8px 0 16px;flex-wrap:wrap}
+    input[type="number"]{width:90px;padding:6px}
+    input[type="date"],input[type="text"]{padding:6px}
+    button,a.btn{padding:8px 12px;border-radius:8px;border:1px solid #ccc;background:#fff;text-decoration:none}
+    .cards{display:flex;gap:12px;margin:8px 0 16px;flex-wrap:wrap}
+    .card{border:1px solid #e3e6ee;border-radius:10px;padding:10px 14px;background:#fafbfd}
+    .card h3{margin:0 0 4px;font-size:12px;color:#666;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+    .card .num{font-size:20px;font-weight:700}
+    #wrap{height:360px;margin:10px 0 18px}
+    table{border-collapse:collapse;width:100%}
+    th,td{border:1px solid #ddd;padding:8px;vertical-align:top}
+    th{background:#f5f7fb;position:sticky;top:0}
+  </style>
+</head>
+<body>
+  <h1>Overview (admin)</h1>
+
+  <div class="bar">
+    <label>Limit <input id="limit" type="number" value="5000" min="1" max="50000"></label>
+    <label>From <input id="from" type="date"></label>
+    <label>To <input id="to" type="date"></label>
+    <label>Passage <input id="passage" type="text" placeholder="(all)"></label>
+    <button id="reload">Load</button>
+    <a id="csv" class="btn" download="lux_overview.csv">Download CSV</a>
+    <span style="color:#666">Token is stored in this tab’s session only.</span>
+  </div>
+
+  <div class="cards">
+    <div class="card"><h3>Total attempts</h3><div id="mAttempts" class="num">–</div></div>
+    <div class="card"><h3>Unique users</h3><div id="mUsers" class="num">–</div></div>
+    <div class="card"><h3>Avg Pron (all)</h3><div id="mPron" class="num">–</div></div>
+    <div class="card"><h3>Range</h3><div id="mRange" class="num">–</div></div>
+  </div>
+
+  <div id="wrap"><canvas id="chart"></canvas></div>
+
+  <table id="grid">
+    <thead>
+      <tr>
+        <th>Day</th><th>Attempts</th><th>Unique users</th><th>Avg Pron</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+<script type="module">
+let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || new URLSearchParams(location.search).get('token');
+if (!TOKEN) {
+  TOKEN = prompt('Enter ADMIN_TOKEN');
+  if (!TOKEN) throw new Error('No token');
+  sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
+}
+
+const els = {
+  limit: document.getElementById('limit'),
+  from: document.getElementById('from'),
+  to: document.getElementById('to'),
+  passage: document.getElementById('passage'),
+  csv: document.getElementById('csv'),
+  tbody: document.querySelector('#grid tbody'),
+  mAttempts: document.getElementById('mAttempts'),
+  mUsers: document.getElementById('mUsers'),
+  mPron: document.getElementById('mPron'),
+  mRange: document.getElementById('mRange'),
+};
+document.getElementById('reload').addEventListener('click', load);
+
+let chart;
+
+function dayKey(d){ return new Date(d).toISOString().slice(0,10); } // UTC day key "YYYY-MM-DD"
+function startOfDayLocal(d){ const x=new Date(d); x.setHours(0,0,0,0); return x; }
+function endOfDayLocal(d){ const x=new Date(d); x.setHours(23,59,59,999); return x; }
+
+async function load() {
+  const limit = Number(els.limit.value || 5000);
+  const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&limit=${limit}`;
+  const r = await fetch(url, { cache:'no-store' });
+  if (!r.ok) { alert('Error '+r.status); return; }
+  const { rows } = await r.json();
+
+  // optional client-side filters
+  const from = els.from.value ? startOfDayLocal(els.from.value) : null;
+  const to   = els.to.value ? endOfDayLocal(els.to.value) : null;
+  const passage = (els.passage.value || '').trim();
+
+  const filtered = rows.filter(row => {
+    const t = new Date(row.ts);
+    if (from && t < from) return false;
+    if (to && t > to) return false;
+    if (passage && row.passage_key !== passage) return false;
+    return true;
+  });
+
+  // metrics (overall)
+  els.mAttempts.textContent = filtered.length.toLocaleString();
+  els.mUsers.textContent = new Set(filtered.map(r => r.uid)).size.toLocaleString();
+  const pronVals = filtered.map(r => r.summary?.pron).filter(v => typeof v === 'number');
+  els.mPron.textContent = pronVals.length ? (pronVals.reduce((a,b)=>a+b,0)/pronVals.length).toFixed(1) : '–';
+
+  if (filtered.length) {
+    const first = new Date(filtered[filtered.length-1].ts);
+    const last  = new Date(filtered[0].ts);
+    els.mRange.textContent = first.toLocaleDateString()+' – '+last.toLocaleDateString();
+  } else {
+    els.mRange.textContent = '–';
+  }
+
+  // aggregate by day
+  const byDay = new Map(); // day => { attempts, users:Set, pronSum, pronCount }
+  for (const row of filtered) {
+    const key = dayKey(row.ts);
+    if (!byDay.has(key)) byDay.set(key, { attempts:0, users:new Set(), pronSum:0, pronCount:0 });
+    const d = byDay.get(key);
+    d.attempts++;
+    d.users.add(row.uid);
+    const p = row.summary?.pron;
+    if (typeof p === 'number') { d.pronSum += p; d.pronCount++; }
+  }
+
+  const labels = Array.from(byDay.keys()).sort(); // YYYY-MM-DD
+  const attempts = labels.map(k => byDay.get(k).attempts);
+  const users = labels.map(k => byDay.get(k).users.size);
+  const avgPron = labels.map(k => {
+    const d = byDay.get(k);
+    return d.pronCount ? +(d.pronSum/d.pronCount).toFixed(1) : null;
+  });
+
+  // table
+  els.tbody.innerHTML = labels.map(k => {
+    const d = byDay.get(k);
+    const dayLabel = new Date(k).toLocaleDateString();
+    const avg = d.pronCount ? (d.pronSum/d.pronCount).toFixed(1) : '';
+    return `<tr><td>${dayLabel}</td><td>${d.attempts}</td><td>${d.users.size}</td><td>${avg}</td></tr>`;
+  }).join('');
+
+  // chart
+  const ctx = document.getElementById('chart').getContext('2d');
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    data: {
+      labels: labels.map(k => new Date(k).toLocaleDateString()),
+      datasets: [
+        { type:'bar', label:'Attempts', data: attempts, yAxisID:'y', borderWidth:1 },
+        { type:'line', label:'Unique users', data: users, yAxisID:'y', tension:.25, borderWidth:2 },
+        { type:'line', label:'Avg Pron', data: avgPron, yAxisID:'y1', tension:.25, borderWidth:2 }
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      scales: {
+        y: { beginAtZero:true, title:{display:true, text:'Attempts / Users'} },
+        y1:{ beginAtZero:true, suggestedMax:100, position:'right', title:{display:true, text:'Avg Pron'} }
+      },
+      plugins:{ legend:{ position:'top' } }
+    }
+  });
+
+  // aggregated CSV download
+  const csvRows = [['day','attempts','unique_users','avg_pron']];
+  labels.forEach(k => {
+    const d = byDay.get(k);
+    const avg = d.pronCount ? (d.pronSum/d.pronCount).toFixed(1) : '';
+    csvRows.push([k, d.attempts, d.users.size, avg]);
+  });
+  const blob = new Blob([csvRows.map(r=>r.join(',')).join('\n')], {type:'text/csv'});
+  els.csv.href = URL.createObjectURL(blob);
+}
+
+load();
+</script>
+</body>
+</html>
