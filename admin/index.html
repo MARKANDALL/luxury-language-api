@@ -4,18 +4,20 @@
   <meta charset="utf-8" />
   <title>LUX Attempts (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="robots" content="noindex, nofollow" />
   <style>
-    body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
+    body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; color:#111; }
     h1 { margin: 0 0 10px; }
-    .bar { display:flex; gap:10px; align-items:center; margin: 8px 0 16px; }
-    input[type="number"]{ width:90px; padding:6px; }
-    button, a.btn{ padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#fff; text-decoration:none; }
+    .bar { display:flex; gap:10px; align-items:center; margin: 8px 0 16px; flex-wrap: wrap; }
+    input[type="number"]{ width:100px; padding:6px; }
+    button, a.btn{ padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#fff; text-decoration:none; cursor:pointer; }
+    button:hover, a.btn:hover { background:#f6f6f6; }
+    .muted{ color:#666 }
     table{ border-collapse: collapse; width:100%; }
     th, td{ border:1px solid #ddd; padding:8px; vertical-align: top; }
-    th{ background:#f5f7fb; position:sticky; top:0; }
+    th{ background:#f5f7fb; position:sticky; top:0; z-index:1; }
     td.text{ max-width: 520px; }
-    .muted{ color:#666 }
+    a { color:#0b66d0; }
+    a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -31,9 +33,15 @@
   <table id="grid">
     <thead>
       <tr>
-        <th>Time (local)</th><th>UID</th><th>Passage</th><th>Part</th>
+        <th>Time (local)</th>
+        <th>UID</th>
+        <th>Passage</th>
+        <th>Part</th>
         <th class="text">Text</th>
-        <th>Acc</th><th>Flu</th><th>Comp</th><th>Pron</th>
+        <th>Acc</th>
+        <th>Flu</th>
+        <th>Comp</th>
+        <th>Pron</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -44,7 +52,7 @@ const qs = new URLSearchParams(location.search);
 let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
 if (!TOKEN) {
   TOKEN = prompt('Enter ADMIN_TOKEN');
-  if (!TOKEN) throw new Error('No token');
+  if (!TOKEN) throw new Error('No token provided');
   sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
 }
 
@@ -52,37 +60,57 @@ const limitEl = document.getElementById('limit');
 const csvEl   = document.getElementById('csv');
 const tbody   = document.querySelector('#grid tbody');
 
-function esc(s=''){ return s.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
+const escapeHTML = (s='') =>
+  String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 async function load() {
-  const limit = Math.min(Math.max(Number(limitEl.value)||200,1),1000);
-  const tokenQ = encodeURIComponent(TOKEN);
-  csvEl.href = `/api/admin-resend?token=${tokenQ}&format=csv&limit=${limit}`;
+  const limit = Math.max(1, Math.min(1000, Number(limitEl.value) || 200));
 
-  const r = await fetch(`/api/admin-recent?token=${tokenQ}&limit=${limit}`, { cache: 'no-store' });
-  if (!r.ok) {
-    tbody.innerHTML = `<tr><td colspan="9">Error: ${r.status}</td></tr>`;
+  // CSV link mirrors current limit
+  csvEl.href = `/api/admin-resend?token=${encodeURIComponent(TOKEN)}&format=csv&limit=${limit}`;
+
+  const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&limit=${limit}`;
+  let r;
+  try {
+    r = await fetch(url, { cache: 'no-store' });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="9">Network error: ${escapeHTML(e.message)}</td></tr>`;
     return;
   }
-  const { rows=[] } = await r.json();
+  if (!r.ok) {
+    tbody.innerHTML = `<tr><td colspan="9">Error: ${r.status} ${escapeHTML(r.statusText)}</td></tr>`;
+    return;
+  }
+  const { rows = [] } = await r.json();
   tbody.innerHTML = '';
+
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="9" class="muted">No rows.</td></tr>`;
+    return;
+  }
+
   for (const row of rows) {
     const s = row.summary || {};
+    const when = row.ts ? new Date(row.ts).toLocaleString() : '';
+    const uidLink = `<a href="/admin/user.html?uid=${encodeURIComponent(row.uid)}">${escapeHTML(row.uid || '')}</a>`;
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${new Date(row.ts).toLocaleString()}</td>
-      <td>${esc(row.uid||'')}</td>
-      <td>${esc(row.passage_key||'')}</td>
+      <td>${escapeHTML(when)}</td>
+      <td>${uidLink}</td>
+      <td>${escapeHTML(row.passage_key || '')}</td>
       <td>${row.part_index ?? ''}</td>
-      <td class="text">${esc(row.text||'')}</td>
+      <td class="text">${escapeHTML(row.text || '')}</td>
       <td>${s.acc ?? ''}</td>
       <td>${s.flu ?? ''}</td>
       <td>${s.comp ?? ''}</td>
-      <td>${s.pron ?? ''}</td>`;
+      <td>${s.pron ?? ''}</td>
+    `;
     tbody.appendChild(tr);
   }
 }
+
 document.getElementById('reload').addEventListener('click', load);
+limitEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
 load();
 </script>
 </body>
