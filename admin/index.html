@@ -5,17 +5,19 @@
   <title>LUX Attempts (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
-    h1 { margin: 0 0 10px; }
-    .bar { display:flex; gap:10px; align-items:center; margin: 8px 0 16px; }
-    input[type="number"]{ width:90px; padding:6px; }
-    button, a.btn{ padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#fff; text-decoration:none; }
-    table{ border-collapse: collapse; width:100%; }
-    th, td{ border:1px solid #ddd; padding:8px; vertical-align: top; }
-    th{ background:#f5f7fb; position:sticky; top:0; }
-    td.text{ max-width: 520px; }
-    .muted{ color:#666 }
-    .tiny { font-size: 12px; color:#555; }
+    body{font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial;padding:18px}
+    h1{margin:0 0 10px}
+    .bar{display:flex;gap:10px;align-items:center;margin:8px 0 16px}
+    input[type="number"]{width:90px;padding:6px}
+    button,a.btn{padding:8px 12px;border-radius:8px;border:1px solid #ccc;background:#fff;text-decoration:none;cursor:pointer}
+    table{border-collapse:collapse;width:100%}
+    th,td{border:1px solid #ddd;padding:8px;vertical-align:top}
+    th{background:#f5f7fb;position:sticky;top:0}
+    td.text{max-width:520px}
+    .muted{color:#666}
+    .mini{padding:4px 8px;font-size:12px}
+    .name-cell{white-space:nowrap}
+    .name-cell .tag{display:inline-block;min-width:2ch}
   </style>
 </head>
 <body>
@@ -30,15 +32,15 @@
 
   <table id="grid">
     <thead>
-    <tr>
-      <th>Time (local)</th>
-      <th>UID</th>
-      <th>Name</th>
-      <th>Passage</th>
-      <th>Part</th>
-      <th class="text">Text</th>
-      <th>Acc</th><th>Flu</th><th>Comp</th><th>Pron</th>
-    </tr>
+      <tr>
+        <th>Time (local)</th>
+        <th>UID</th>
+        <th>Name</th>
+        <th>Passage</th>
+        <th>Part</th>
+        <th class="text">Text</th>
+        <th>Acc</th><th>Flu</th><th>Comp</th><th>Pron</th>
+      </tr>
     </thead>
     <tbody></tbody>
   </table>
@@ -56,49 +58,87 @@ const limitEl = document.getElementById('limit');
 const csvEl   = document.getElementById('csv');
 const tbody   = document.querySelector('#grid tbody');
 
-function esc(s=''){ return s.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
+document.getElementById('reload').addEventListener('click', load);
 
-async function rename(uid, currentLabel='') {
-  const label = prompt('Set name for this UID:', currentLabel || '');
-  if (label == null) return; // cancelled
-  const r = await fetch('/api/admin-label-user', {
+async function fetchRows(limit) {
+  const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&limit=${limit}`;
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error('admin-recent failed');
+  return (await r.json()).rows || [];
+}
+
+async function fetchLabels(uids) {
+  if (!uids.length) return {};
+  const url = `/api/admin-label-user?token=${encodeURIComponent(TOKEN)}&uids=${encodeURIComponent(uids.join(','))}`;
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) return {};
+  const { rows } = await r.json();
+  const map = {};
+  for (const x of rows || []) map[x.uid] = x;
+  return map;
+}
+
+async function saveLabel(uid, label) {
+  const r = await fetch(`/api/admin-label-user?token=${encodeURIComponent(TOKEN)}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-admin-token': TOKEN },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ uid, label })
   });
-  if (!r.ok) { alert('Save failed'); return; }
-  await load();
+  if (!r.ok) throw new Error('save label failed');
+  return r.json();
 }
+
+function esc(s){return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}
 
 async function load() {
   const limit = Number(limitEl.value) || 200;
   csvEl.href = `/api/admin-resend?token=${encodeURIComponent(TOKEN)}&format=csv&limit=${limit}`;
-  const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&limit=${limit}`;
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) { tbody.innerHTML = `<tr><td colspan="10">Error: ${r.status}</td></tr>`; return; }
-  const { rows } = await r.json();
 
+  tbody.innerHTML = `<tr><td colspan="10">Loading…</td></tr>`;
+  const rows = await fetchRows(limit);
+
+  // draw table
   tbody.innerHTML = '';
+  const uids = [];
   for (const row of rows) {
+    uids.push(row.uid);
     const s = row.summary || {};
-    const when = new Date(row.ts).toLocaleString();
-    const uidLink = `<a href="/admin/user.html?uid=${encodeURIComponent(row.uid)}">${esc(row.uid)}</a>`;
-    const name = row.label || '—';
     const tr = document.createElement('tr');
+    const when = new Date(row.ts).toLocaleString();
     tr.innerHTML = `
       <td>${when}</td>
-      <td>${uidLink}<div class="tiny"><a href="javascript:void(0)" onclick="rename('${row.uid}','${esc(row.label||'')}')">✎ rename</a></div></td>
-      <td>${esc(name)}</td>
-      <td>${esc(row.passage_key)}</td>
+      <td><a href="/admin/user.html?uid=${encodeURIComponent(row.uid)}">${row.uid}</a></td>
+      <td class="name-cell">
+        <span class="tag" data-uid="${esc(row.uid)}">—</span>
+        <button class="mini edit" data-uid="${esc(row.uid)}">Label…</button>
+      </td>
+      <td>${row.passage_key}</td>
       <td>${row.part_index}</td>
-      <td class="text">${esc(row.text || '')}</td>
+      <td class="text">${esc(row.text)}</td>
       <td>${s.acc ?? ''}</td><td>${s.flu ?? ''}</td><td>${s.comp ?? ''}</td><td>${s.pron ?? ''}</td>`;
     tbody.appendChild(tr);
   }
+
+  // populate names
+  const labelMap = await fetchLabels([...new Set(uids)]);
+  for (const el of document.querySelectorAll('.name-cell .tag')) {
+    const uid = el.dataset.uid;
+    const label = labelMap[uid]?.label || '—';
+    el.textContent = label;
+  }
+
+  // edit handlers
+  tbody.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.edit');
+    if (!btn) return;
+    const uid = btn.dataset.uid;
+    const current = (document.querySelector(`.name-cell .tag[data-uid="${CSS.escape(uid)}"]`)?.textContent || '').trim();
+    const next = prompt('Enter label for this UID (blank to remove):', current === '—' ? '' : current);
+    if (next === null) return; // cancelled
+    await saveLabel(uid, next);
+    await load();
+  }, { once: true });
 }
-document.getElementById('reload').addEventListener('click', load);
-// expose rename to inline onclick
-window.rename = rename;
 
 load();
 </script>
