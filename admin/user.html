@@ -4,294 +4,409 @@
   <meta charset="utf-8" />
   <title>User Progress (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Chart.js (CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
-    body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
-    h1 { margin: 0 0 10px; }
-    .bar, .filters { display:flex; gap:10px; align-items:center; margin: 8px 0 12px; flex-wrap: wrap; }
-    input[type="number"] { width:90px; padding:6px; }
-    input[type="date"] { padding:6px; }
-    button, a.btn { padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#fff; text-decoration:none; cursor:pointer; }
+    :root{ --gap:10px; }
+    *{ box-sizing:border-box }
+    body{ font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; color:#111 }
+    h1{ margin:0 0 14px }
+    .bar{ display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:10px }
+    .bar small{ color:#666; margin-left:auto }
+    input[type="text"], input[type="number"], input[type="date"]{
+      padding:8px; border:1px solid #ccc; border-radius:8px; height:36px;
+    }
+    button, a.btn{
+      padding:8px 12px; border:1px solid #ccc; border-radius:8px; background:#fff; cursor:pointer;
+      text-decoration:none; display:inline-flex; align-items:center; height:36px;
+    }
+    button:disabled{ opacity:.6; cursor:default }
+    .pill{ display:inline-block; min-width:92px; padding:8px 10px; border:1px solid #ddd; border-radius:10px; background:#fafafa }
+    .pill b{ display:block; font-size:18px; }
+    #chartWrap{ margin:16px 0 8px }
+    #chart{ width:100%; max-width:1100px; height:360px }
+    table{ border-collapse:collapse; width:100%; margin-top:10px; font-size:13px }
+    th,td{ border:1px solid #e7e7e7; padding:8px; vertical-align:top }
+    th{ background:#f7f9fc; position:sticky; top:0; z-index:1 }
+    td.text{ max-width:600px }
     .muted{ color:#666 }
-    .pill { display:inline-block; padding:2px 6px; border-radius:999px; border:1px solid #ddd; margin-right:6px; font-size:12px; }
-    .pill.bad { background:#fff0f0; border-color:#ffb3b3; }
-    .stats { display:flex; gap:12px; margin: 8px 0 12px; }
-    .card { border:1px solid #e5e7eb; border-radius:10px; padding:10px 12px; background:#fff; }
-    .card b { font-size:18px; }
-    table{ border-collapse: collapse; width:100%; margin-top:12px; }
-    th, td{ border:1px solid #ddd; padding:8px; vertical-align: top; }
-    th{ background:#f5f7fb; position:sticky; top:0; }
-    td.text{ max-width: 520px; }
-    .passages { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-    .right { margin-left:auto }
+    .ok{ color:#0a7; }
+    .err{ color:#c00; }
+    .spacer{ flex:1 }
+    .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
+    .row{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 }
   </style>
 </head>
 <body>
   <h1>User Progress (admin)</h1>
 
   <div class="bar">
-    <label>UID <input id="uid" style="width:420px" /></label>
-    <label>Limit <input id="limit" type="number" value="500" min="1" max="2000"></label>
-    <button id="load">Load</button>
-    <a id="csv" class="btn" target="_blank">Download CSV</a>
-    <button id="copyLink">Copy link</button>
-    <span class="muted">Token is stored in this tab’s session only.</span>
+    <label>UID <input id="uid" type="text" placeholder="user id" style="width:380px"></label>
+    <label>Limit <input id="limit" type="number" value="500" min="1" max="2000" style="width:96px"></label>
+    <button id="loadBtn">Load</button>
+    <a id="csvBtn" class="btn" target="_blank" rel="noopener">Download CSV</a>
+    <button id="copyBtn">Copy link</button>
+    <small>Token is stored in this tab’s session only.</small>
   </div>
 
-  <div class="bar">
-    <label>Display name <input id="label" style="width:420px" placeholder="e.g., Mark H."></label>
-    <button id="saveLabel">Save name</button>
-    <span id="labelSaved" class="muted"></span>
+  <div class="row">
+    <label style="flex:1; min-width:320px">Display name
+      <input id="labelInput" type="text" placeholder="e.g., Mark H." style="width:100%">
+    </label>
+    <button id="saveNameBtn">Save name</button>
+    <span id="saveMsg" class="muted"></span>
   </div>
 
-  <div class="filters">
+  <div class="row">
     <label>From <input id="from" type="date"></label>
     <label>To <input id="to" type="date"></label>
     <label>Smoothing
       <select id="smooth">
-        <option value="0">None</option>
+        <option value="7">7-day</option>
         <option value="3">3-day</option>
-        <option value="7" selected>7-day</option>
-        <option value="14">14-day</option>
+        <option value="0">None</option>
       </select>
     </label>
-    <div class="passages" id="passageFilter"></div>
-    <button id="apply">Apply</button>
-    <button id="clear">Clear</button>
+
+    <div class="checks">
+      <span>Passages:</span>
+      <label><input class="pass" type="checkbox" value="grandfather" checked> grandfather</label>
+      <label><input class="pass" type="checkbox" value="rainbow" checked> rainbow</label>
+      <label><input class="pass" type="checkbox" value="sentences" checked> sentences</label>
+      <label><input class="pass" type="checkbox" value="wordList" checked> wordList</label>
+    </div>
+
+    <button id="applyBtn">Apply</button>
+    <button id="clearBtn">Clear</button>
   </div>
 
-  <div class="stats">
-    <div class="card"><div>Attempts</div><b id="statAttempts">0</b></div>
-    <div class="card"><div>Avg Pron</div><b id="statAvgPron">–</b></div>
+  <div class="row" style="gap:16px">
+    <div class="pill"><div class="muted">Attempts</div><b id="statAttempts">0</b></div>
+    <div class="pill"><div class="muted">Avg Pron</div><b id="statAvg">–</b></div>
   </div>
 
-  <canvas id="chart" height="110"></canvas>
+  <div id="chartWrap">
+    <canvas id="chart"></canvas>
+  </div>
 
   <table id="grid">
     <thead>
       <tr>
-        <th>Time (local)</th><th>Passage</th><th>Part</th>
-        <th>Acc</th><th>Flu</th><th>Comp</th><th>Pron</th><th>Lows</th>
+        <th style="width:170px">Time (local)</th>
+        <th>Passage</th>
+        <th>Part</th>
+        <th>Acc</th>
+        <th>Flu</th>
+        <th>Comp</th>
+        <th>Pron</th>
         <th class="text">Text</th>
       </tr>
     </thead>
     <tbody></tbody>
   </table>
 
-<script type="module">
-const qs = new URLSearchParams(location.search);
-let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
-if (!TOKEN) {
-  TOKEN = prompt('Enter ADMIN_TOKEN');
-  if (!TOKEN) throw new Error('No token');
-  sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
-}
-
-const uidEl    = document.getElementById('uid');
-const limEl    = document.getElementById('limit');
-const csvEl    = document.getElementById('csv');
-const copyEl   = document.getElementById('copyLink');
-const fromEl   = document.getElementById('from');
-const toEl     = document.getElementById('to');
-const smoothEl = document.getElementById('smooth');
-const applyEl  = document.getElementById('apply');
-const clearEl  = document.getElementById('clear');
-const labelEl  = document.getElementById('label');
-const saveLabelEl = document.getElementById('saveLabel');
-const labelSavedEl = document.getElementById('labelSaved');
-const tbody   = document.querySelector('#grid tbody');
-const passageFilterEl = document.getElementById('passageFilter');
-
-uidEl.value = qs.get('uid') || '';
-
-let RAW_ROWS = [];
-let chart;
-function parseSummary(s) {
-  try { return (typeof s === 'string') ? JSON.parse(s) : (s || {}); }
-  catch { return {}; }
-}
-
-function fmtDateISO(d) { return d.toISOString().slice(0,10); }
-
-function buildPassageFilter(rows) {
-  passageFilterEl.innerHTML = '<b>Passages:</b>';
-  const set = new Set(rows.map(r => r.passage_key).filter(Boolean));
-  if (!set.size) return;
-  for (const key of [...set].sort()) {
-    const id = 'p_' + key;
-    const wrap = document.createElement('label');
-    wrap.innerHTML = `<input type="checkbox" id="${id}" checked> ${key}`;
-    passageFilterEl.appendChild(wrap);
+<script>
+(function () {
+  // -------------------- TOKEN --------------------
+  const qs = new URLSearchParams(location.search);
+  let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
+  if (!TOKEN) {
+    TOKEN = prompt('Enter ADMIN_TOKEN');
+    if (TOKEN) sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
   }
-}
 
-function selectedPassages() {
-  const boxes = passageFilterEl.querySelectorAll('input[type="checkbox"]');
-  const out = [];
-  boxes.forEach(b => { if (b.checked) out.push(b.id.slice(2)); });
-  return out.length ? new Set(out) : null;
-}
+  // -------------------- Elements --------------------
+  const uidEl   = document.getElementById('uid');
+  const limitEl = document.getElementById('limit');
+  const fromEl  = document.getElementById('from');
+  const toEl    = document.getElementById('to');
+  const smoothEl= document.getElementById('smooth');
+  const passEls = Array.from(document.querySelectorAll('.pass'));
+  const csvBtn  = document.getElementById('csvBtn');
+  const loadBtn = document.getElementById('loadBtn');
+  const applyBtn= document.getElementById('applyBtn');
+  const clearBtn= document.getElementById('clearBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  const labelInput = document.getElementById('labelInput');
+  const saveBtn = document.getElementById('saveNameBtn');
+  const saveMsg = document.getElementById('saveMsg');
+  const statAttempts = document.getElementById('statAttempts');
+  const statAvg = document.getElementById('statAvg');
+  const tbody  = document.querySelector('#grid tbody');
+  const chartCanvas = document.getElementById('chart');
 
-function withinRange(ts) {
-  const t = new Date(ts);
-  const f = fromEl.value ? new Date(fromEl.value + 'T00:00:00') : null;
-  const tto = toEl.value ? new Date(toEl.value   + 'T23:59:59') : null;
-  if (f && t < f) return false;
-  if (tto && t > tto) return false;
-  return true;
-}
+  // Defaults from URL or sensible values
+  uidEl.value = qs.get('uid') || '';
+  limitEl.value = Number(qs.get('limit') || 500);
+  (function initDates(){
+    const today = new Date();
+    const pad = (n)=>String(n).padStart(2,'0');
+    const toStr = (d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const to = qs.get('to') || toStr(today);
+    const d = new Date(); d.setDate(d.getDate() - 14);
+    const from = qs.get('from') || toStr(d);
+    fromEl.value = from;
+    toEl.value = to;
+  })();
+  (function initPassages(){
+    const p = qs.get('passages');
+    if (!p) return;
+    const set = new Set(p.split(',').map(s=>s.trim()));
+    passEls.forEach(el => el.checked = set.has(el.value));
+  })();
+  smoothEl.value = qs.get('smooth') ?? '7';
 
-function movingAvg(points, days) {
-  if (!days || days<=0) return Array(points.length).fill(null);
-  const windowMs = days * 86400 * 1000;
-  const out = [];
-  for (let i=0;i<points.length;i++) {
-    const ti = +points[i].x;
-    let sum=0, n=0;
-    for (let j=i;j>=0;j--) {
-      const tj = +points[j].x;
-      if (ti - tj <= windowMs) { sum += points[j].y; n++; } else break;
+  // Chart instance
+  let lineChart = null;
+
+  // -------------------- Helpers --------------------
+  const dateOnly = (iso)=>iso.slice(0,10);
+  const toLocal  = (iso)=> new Date(iso).toLocaleString();
+
+  function buildPassagesParam() {
+    const vals = passEls.filter(e => e.checked).map(e => e.value);
+    return vals.join(',');
+  }
+
+  function updateCsvHref() {
+    const uid = uidEl.value.trim();
+    const limit = Number(limitEl.value||500);
+    const passages = buildPassagesParam();
+    const from = fromEl.value; const to = toEl.value;
+    let url = `/api/admin-resend?format=csv&limit=${encodeURIComponent(limit)}&token=${encodeURIComponent(TOKEN)}`;
+    if (uid) url += `&uid=${encodeURIComponent(uid)}`;
+    if (from) url += `&from=${encodeURIComponent(from)}`;
+    if (to) url += `&to=${encodeURIComponent(to)}`;
+    if (passages) url += `&passages=${encodeURIComponent(passages)}`;
+    csvBtn.href = url;
+  }
+
+  function copyLinkToClipboard() {
+    const url = new URL(location.href);
+    // Keep filters but DO NOT include the token in the sharable link
+    const params = new URLSearchParams();
+    if (uidEl.value) params.set('uid', uidEl.value);
+    if (fromEl.value) params.set('from', fromEl.value);
+    if (toEl.value) params.set('to', toEl.value);
+    if (smoothEl.value) params.set('smooth', smoothEl.value);
+    const passages = buildPassagesParam();
+    if (passages) params.set('passages', passages);
+    if (limitEl.value) params.set('limit', limitEl.value);
+    url.search = params.toString();
+    navigator.clipboard.writeText(url.toString())
+      .then(()=>{ copyBtn.textContent='Copied!'; setTimeout(()=>copyBtn.textContent='Copy link',1000); })
+      .catch(()=>{ copyBtn.textContent='Copy failed'; setTimeout(()=>copyBtn.textContent='Copy link',1200); });
+  }
+
+  function setQueryStringForState() {
+    const params = new URLSearchParams();
+    if (uidEl.value) params.set('uid', uidEl.value);
+    if (fromEl.value) params.set('from', fromEl.value);
+    if (toEl.value) params.set('to', toEl.value);
+    if (smoothEl.value) params.set('smooth', smoothEl.value);
+    const passages = buildPassagesParam();
+    if (passages) params.set('passages', passages);
+    if (limitEl.value) params.set('limit', limitEl.value);
+    history.replaceState(null,'', `${location.pathname}?${params.toString()}`);
+  }
+
+  function computeDailyAndSMA(rows, windowDays) {
+    // rows are newest->oldest from API; sort ascending by ts
+    const sorted = rows.slice().sort((a,b)=> new Date(a.ts) - new Date(b.ts));
+    // daily average of pron
+    const byDay = new Map();
+    for (const r of sorted) {
+      const s = r.summary || {};
+      const p = Number(s.pron);
+      if (!Number.isFinite(p)) continue;
+      const d = dateOnly(r.ts);
+      const arr = byDay.get(d) || [];
+      arr.push(p);
+      byDay.set(d, arr);
     }
-    out.push(n ? +(sum/n).toFixed(2) : null);
-  }
-  return out;
-}
+    const days = Array.from(byDay.keys()).sort();
+    const daily = days.map(d => ({
+      date: d,
+      value: byDay.get(d).reduce((a,b)=>a+b,0)/byDay.get(d).length
+    }));
+    if (!windowDays || windowDays <= 0) return {daily, sma:[]};
 
-function setStats(rows) {
-  document.getElementById('statAttempts').textContent = rows.length;
-  const avg = rows.length ? (rows.reduce((a,r)=>a+(parseSummary(r.summary).pron||0),0)/rows.length).toFixed(1) : '–';
-  document.getElementById('statAvgPron').textContent = avg;
-}
-
-function render(rows) {
-  // table
-  tbody.innerHTML = '';
-  for (const r of rows) {
-    const s = parseSummary(r.summary);
-    const lows = Array.isArray(s.lows) ? s.lows.slice(0,3) : [];
-    const when = new Date(r.ts).toLocaleString();
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${when}</td>
-      <td>${r.passage_key ?? ''}</td>
-      <td>${r.part_index ?? ''}</td>
-      <td>${s.acc ?? ''}</td>
-      <td>${s.flu ?? ''}</td>
-      <td>${s.comp ?? ''}</td>
-      <td>${s.pron ?? ''}</td>
-      <td>${
-        lows.map(l => `<span class="pill bad" title="word: ${l.word || ''} | phoneme: ${l.phoneme || ''} | score: ${l.score || ''} | err: ${l.err || ''}">
-          ${(l.word || '')}/${(l.phoneme || '')} ${l.score ?? ''}
-        </span>`).join('')
-      }</td>
-      <td class="text">${(r.text || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</td>`;
-    tbody.appendChild(tr);
+    // simple moving average over the daily values
+    const sma = [];
+    for (let i=0;i<daily.length;i++){
+      const start = Math.max(0, i - (windowDays - 1));
+      let sum = 0, count = 0;
+      for (let j=start;j<=i;j++){ sum += daily[j].value; count++; }
+      sma.push({ date: daily[i].date, value: sum / count });
+    }
+    return {daily, sma};
   }
 
-  // chart
-  const pts = rows
-    .filter(r => parseSummary(r.summary).pron != null)
-    .map(r => ({ x: new Date(r.ts), y: parseFloat(parseSummary(r.summary).pron) }))
-    .sort((a,b)=>a.x-b.x);
+  function renderChart(rows) {
+    // Build datasets
+    const smoothDays = Number(smoothEl.value||0);
+    const {daily, sma} = computeDailyAndSMA(rows, smoothDays);
 
-  const smoothDays = parseInt(smoothEl.value, 10);
-  const ma = movingAvg(pts, smoothDays);
+    const labels = daily.map(d => d.date);
+    const pronSeries = daily.map(d => Number(d.value.toFixed(1)));
+    const smaLabels = sma.map(d => d.date);
+    const smaSeries = sma.map(d => Number(d.value.toFixed(1)));
 
-  const data = {
-    datasets: [
-      {
-        label: 'Pron score',
-        data: pts,
-        parsing:false,
-        borderWidth: 2,
-        tension: 0.25,
-        pointRadius: 3
+    const data = {
+      labels,
+      datasets: [
+        {
+          label: 'Pron score (daily avg)',
+          data: pronSeries,
+          borderWidth: 2,
+          pointRadius: 3,
+          tension: 0.2
+        },
+        {
+          label: smoothDays ? `${smoothDays}-day avg` : 'moving avg (off)',
+          data: smaSeries,
+          borderWidth: 2,
+          pointRadius: 0,
+          borderDash: smoothDays ? [] : [4,4],
+          tension: 0.2
+        }
+      ]
+    };
+
+    const options = {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        y: { min: 0, max: 100, ticks: { stepSize: 10 } }
       },
-      ...(smoothDays>0 ? [{
-        label: `${smoothDays}-day avg`,
-        data: pts.map((p,i)=>ma[i]==null?null:{x:p.x, y:ma[i]}),
-        parsing:false,
-        borderWidth: 2,
-        borderDash: [6,4],
-        pointRadius: 0
-      }] : [])
-    ]
-  };
-  const options = {
-    responsive: true,
-    scales: {
-      y: { suggestedMin: 0, suggestedMax: 100, title: { display:true, text:'Score' } },
-      x: { type: 'time', time: { unit: 'day' } }
-    },
-    plugins: { legend: { display: true } }
-  };
+      plugins: {
+        legend: { display: true, position: 'top' },
+        tooltip: { intersect: false, mode: 'index' }
+      }
+    };
 
-  if (chart) chart.destroy();
-  const ctx = document.getElementById('chart');
-  chart = new Chart(ctx, { type:'line', data, options });
-
-  setStats(rows);
-}
-
-function applyFilters() {
-  const chosen = selectedPassages();
-  const filtered = RAW_ROWS.filter(r =>
-    withinRange(r.ts) &&
-    (!chosen || chosen.has(r.passage_key))
-  );
-  render(filtered);
-}
-
-async function load() {
-  const uid = uidEl.value.trim();
-  if (!uid) { alert('Enter a UID'); return; }
-  const limit = Number(limEl.value)||500;
-  csvEl.href = `/api/admin-resend?token=${encodeURIComponent(TOKEN)}&format=csv&uid=${encodeURIComponent(uid)}&limit=${limit}`;
-
-  const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&uid=${encodeURIComponent(uid)}&limit=${limit}`;
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) {
-    tbody.innerHTML = `<tr><td colspan="9">Error: ${r.status}</td></tr>`;
-    return;
+    if (lineChart) lineChart.destroy();
+    lineChart = new Chart(chartCanvas.getContext('2d'), {
+      type: 'line',
+      data, options
+    });
   }
-  const { rows, label } = await r.json();
-  RAW_ROWS = rows || [];
-  buildPassageFilter(RAW_ROWS);
-  // date defaults
-  if (!fromEl.value && RAW_ROWS.length) {
-    const earliest = new Date(RAW_ROWS[RAW_ROWS.length-1].ts);
-    fromEl.value = fmtDateISO(earliest);
+
+  function renderTable(rows) {
+    tbody.innerHTML = '';
+    for (const r of rows) {
+      const s = r.summary || {};
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${toLocal(r.ts)}</td>
+        <td>${r.passage_key || ''}</td>
+        <td>${r.part_index ?? ''}</td>
+        <td>${s.acc ?? ''}</td>
+        <td>${s.flu ?? ''}</td>
+        <td>${s.comp ?? ''}</td>
+        <td>${s.pron ?? ''}</td>
+        <td class="text">${String(r.text||'').replace(/[<>&]/g,c=>({ '<':'&lt;', '>':'&gt;', '&':'&amp;' }[c]))}</td>
+      `;
+      tbody.appendChild(tr);
+    }
   }
-  if (!toEl.value) toEl.value = fmtDateISO(new Date());
-  // label
-  labelEl.value = label || '';
-  render(RAW_ROWS);
-}
 
-document.getElementById('load').addEventListener('click', load);
-applyEl.addEventListener('click', applyFilters);
-clearEl.addEventListener('click', () => { fromEl.value=''; toEl.value=''; passageFilterEl.querySelectorAll('input[type="checkbox"]').forEach(b=>b.checked=true); applyFilters(); });
-smoothEl.addEventListener('change', applyFilters);
+  function renderStats(rows) {
+    statAttempts.textContent = rows.length;
+    const vals = rows.map(r => Number(r?.summary?.pron)).filter(Number.isFinite);
+    statAvg.textContent = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) : '–';
+  }
 
-copyEl.addEventListener('click', async () => {
-  const url = `${location.origin}/admin/user.html?uid=${encodeURIComponent(uidEl.value.trim())}`;
-  await navigator.clipboard.writeText(url);
-  copyEl.textContent = 'Link copied';
-  setTimeout(()=>copyEl.textContent='Copy link', 1200);
-});
+  async function saveLabel() {
+    const uid = uidEl.value.trim();
+    const label = labelInput.value.trim();
+    if (!uid) return;
+    saveMsg.textContent = 'Saving...';
+    try {
+      const res = await fetch('/api/admin-label-user', {
+        method:'POST',
+        headers: {
+          'Content-Type':'application/json',
+          'x-admin-token': TOKEN
+        },
+        body: JSON.stringify({ uid, label })
+      });
+      if (!res.ok) throw new Error('save failed');
+      saveMsg.textContent = 'Saved';
+      saveMsg.className = 'ok';
+      setTimeout(()=>saveMsg.textContent='', 1200);
+    } catch(e){
+      saveMsg.textContent = 'Error saving';
+      saveMsg.className = 'err';
+    }
+  }
 
-saveLabelEl.addEventListener('click', async () => {
-  const uid = uidEl.value.trim();
-  const body = { uid, label: labelEl.value.trim() };
-  const r = await fetch('/api/admin-label-user?token='+encodeURIComponent(TOKEN), {
-    method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)
-  });
-  if (r.ok) { labelSavedEl.textContent = 'Saved ✓'; setTimeout(()=>labelSavedEl.textContent='', 1500); }
-  else { labelSavedEl.textContent = 'Error saving'; }
-});
+  async function loadData() {
+    const uid = uidEl.value.trim();
+    if (!uid) { alert('Enter a UID (or click from /admin/)'); return; }
 
-// auto-load if uid is in URL
-if (uidEl.value) load();
+    const limit = Number(limitEl.value || 500);
+    const passages = buildPassagesParam();
+
+    let url = `/api/admin-recent?limit=${encodeURIComponent(limit)}&token=${encodeURIComponent(TOKEN)}&uid=${encodeURIComponent(uid)}`;
+    if (fromEl.value) url += `&from=${encodeURIComponent(fromEl.value)}`;
+    if (toEl.value)   url += `&to=${encodeURIComponent(toEl.value)}`;
+    if (passages)     url += `&passages=${encodeURIComponent(passages)}`;
+
+    loadBtn.disabled = true;
+    try {
+      const r = await fetch(url, { cache:'no-store' });
+      const json = await r.json();
+      const rows = Array.isArray(json?.rows) ? json.rows : [];
+
+      // pick up server-provided label (if any)
+      const first = rows[0];
+      if (first && first.label && !labelInput.value) labelInput.value = first.label;
+
+      renderStats(rows);
+      renderChart(rows);
+      renderTable(rows);
+
+      // update CSV link + URL params
+      updateCsvHref();
+      setQueryStringForState();
+    } catch(e) {
+      alert('Load failed. (Check token / URL / network)');
+      console.error(e);
+    } finally {
+      loadBtn.disabled = false;
+    }
+  }
+
+  function clearFilters() {
+    const today = new Date();
+    const pad = (n)=>String(n).padStart(2,'0');
+    const toStr = (d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const d = new Date(); d.setDate(d.getDate()-14);
+    fromEl.value = toStr(d);
+    toEl.value   = toStr(today);
+    smoothEl.value = '7';
+    passEls.forEach(el => el.checked = true);
+  }
+
+  // Events
+  loadBtn.addEventListener('click', loadData);
+  applyBtn.addEventListener('click', loadData);
+  clearBtn.addEventListener('click', () => { clearFilters(); loadData(); });
+  saveBtn.addEventListener('click', saveLabel);
+  copyBtn.addEventListener('click', copyLinkToClipboard);
+
+  // Also update CSV link any time inputs change
+  [uidEl, limitEl, fromEl, toEl, smoothEl, ...passEls].forEach(el => el.addEventListener('change', updateCsvHref));
+
+  // If we were navigated from /admin/ with a uid, load immediately
+  if (uidEl.value) {
+    updateCsvHref();
+    loadData();
+  } else {
+    updateCsvHref();
+  }
+})();
 </script>
 </body>
 </html>
