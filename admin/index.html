@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>LUX Attempts (admin)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <style>
+    body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
+    h1 { margin: 0 0 10px; }
+    .bar { display:flex; gap:10px; align-items:center; margin: 8px 0 16px; }
+    input[type="number"]{ width:90px; padding:6px; }
+    button, a.btn{ padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#fff; text-decoration:none; }
+    table{ border-collapse: collapse; width:100%; }
+    th, td{ border:1px solid #ddd; padding:8px; vertical-align: top; }
+    th{ background:#f5f7fb; position:sticky; top:0; }
+    td.text{ max-width: 520px; }
+    .muted{ color:#666 }
+  </style>
+</head>
+<body>
+  <h1>Attempts (admin)</h1>
+
+  <div class="bar">
+    <label>Limit <input id="limit" type="number" value="200" min="1" max="1000"></label>
+    <button id="reload">Reload</button>
+    <a id="csv" class="btn" target="_blank" rel="noopener">Download CSV</a>
+    <span class="muted">Token is stored in this tab’s session only.</span>
+  </div>
+
+  <table id="grid">
+    <thead>
+      <tr>
+        <th>Time (local)</th><th>UID</th><th>Passage</th><th>Part</th>
+        <th class="text">Text</th>
+        <th>Acc</th><th>Flu</th><th>Comp</th><th>Pron</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+<script type="module">
+const qs = new URLSearchParams(location.search);
+let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
+if (!TOKEN) {
+  TOKEN = prompt('Enter ADMIN_TOKEN');
+  if (!TOKEN) throw new Error('No token');
+  sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
+}
+
+const limitEl = document.getElementById('limit');
+const csvEl   = document.getElementById('csv');
+const tbody   = document.querySelector('#grid tbody');
+
+function esc(s=''){ return s.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
+
+async function load() {
+  const limit = Math.min(Math.max(Number(limitEl.value)||200,1),1000);
+  const tokenQ = encodeURIComponent(TOKEN);
+  csvEl.href = `/api/admin-resend?token=${tokenQ}&format=csv&limit=${limit}`;
+
+  const r = await fetch(`/api/admin-recent?token=${tokenQ}&limit=${limit}`, { cache: 'no-store' });
+  if (!r.ok) {
+    tbody.innerHTML = `<tr><td colspan="9">Error: ${r.status}</td></tr>`;
+    return;
+  }
+  const { rows=[] } = await r.json();
+  tbody.innerHTML = '';
+  for (const row of rows) {
+    const s = row.summary || {};
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${new Date(row.ts).toLocaleString()}</td>
+      <td>${esc(row.uid||'')}</td>
+      <td>${esc(row.passage_key||'')}</td>
+      <td>${row.part_index ?? ''}</td>
+      <td class="text">${esc(row.text||'')}</td>
+      <td>${s.acc ?? ''}</td>
+      <td>${s.flu ?? ''}</td>
+      <td>${s.comp ?? ''}</td>
+      <td>${s.pron ?? ''}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+document.getElementById('reload').addEventListener('click', load);
+load();
+</script>
+</body>
+</html>
