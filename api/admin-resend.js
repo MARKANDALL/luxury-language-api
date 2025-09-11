@@ -1,71 +1,43 @@
-// /api/admin-resend.js  (ESM; Vercel Node runtime)
+// /api/admin-resend.js  (ESM; CSV/JSON export with filters)
 import { createClient } from '@supabase/supabase-js';
 
-function rowsToCSV(rows = []) {
-  // flatten summary -> separate columns (acc, flu, comp, pron)
-  const flat = rows.map(r => {
+function getQS(req) {
+  try { return new URL(req.url, 'http://localhost').searchParams; }
+  catch { return new URLSearchParams(); }
+}
+function toISOStart(s){ if(!s) return null; const d=new Date(s); if(Number.isNaN(+d)) return null; if(/^\d{4}-\d{2}-\d{2}$/.test(s)) d.setHours(0,0,0,0); return d.toISOString(); }
+function toISOEnd(s){ if(!s) return null; const d=new Date(s); if(Number.isNaN(+d)) return null; if(/^\d{4}-\d{2}-\d{2}$/.test(s)) d.setHours(23,59,59,999); return d.toISOString(); }
+function toCSV(rows) {
+  if (!rows?.length) return 'id,uid,label,ts,passage_key,part_index,text,acc,flu,comp,pron\n';
+  const out = ['id,uid,label,ts,passage_key,part_index,text,acc,flu,comp,pron'];
+  for (const r of rows) {
     const s = r.summary || {};
-    return {
-      id: r.id,
-      uid: r.uid,
-      ts: r.ts,
-      passage_key: r.passage_key,
-      part_index: r.part_index,
-      text: r.text,
-      acc: s.acc ?? '',
-      flu: s.flu ?? '',
-      comp: s.comp ?? '',
-      pron: s.pron ?? '',
-    };
-  });
-
-  const headers = flat.length
-    ? Object.keys(flat[0])
-    : ['id','uid','ts','passage_key','part_index','text','acc','flu','comp','pron'];
-
-  const esc = v => {
-    if (v == null) return '';
-    const s = String(v).replace(/"/g, '""').replace(/\r?\n/g, ' ');
-    return /[",\n\r]/.test(s) ? `"${s}"` : s;
-  };
-
-  const lines = [headers.join(','), ...flat.map(r => headers.map(h => esc(r[h])).join(','))];
-  return lines.join('\n');
+    const esc = (v)=> (v==null? '' : `"${String(v).replace(/"/g,'""').replace(/\r?\n/g,' ')}"`);
+    out.push([r.id, r.uid, r.label ?? '', r.ts, r.passage_key, r.part_index, esc(r.text), s.acc ?? '', s.flu ?? '', s.comp ?? '', s.pron ?? ''].join(','));
+  }
+  return out.join('\n');
 }
 
 export default async function handler(req, res) {
   try {
-    if (req.method === 'OPTIONS') {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Headers', 'x-admin-token, content-type');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-      return res.status(204).end();
-    }
-    if (req.method !== 'GET') return res.status(405).json({ error: 'method_not_allowed' });
+    const qs = getQS(req);
+    const token =
+      req.headers['x-admin-token'] ||
+      req.headers['x-admin-token'.toLowerCase()] ||
+      qs.get('token');
 
-    let qs;
-    try { qs = new URL(req.url, 'http://localhost'); } catch {}
-    const tokenFromQS = qs?.searchParams.get('token');
-    const token = req.headers['x-admin-token'] || tokenFromQS;
+    if (!process.env.ADMIN_TOKEN) return res.status(500).json({ error: 'missing ADMIN_TOKEN' });
+    if (token !== process.env.ADMIN_TOKEN) return res.status(401).json({ error: 'unauthorized' });
 
-    if (!process.env.ADMIN_TOKEN) {
-      console.error('[admin-resend] Missing ADMIN_TOKEN');
-      return res.status(500).json({ error: 'missing ADMIN_TOKEN' });
-    }
-    if (token !== process.env.ADMIN_TOKEN) {
-      return res.status(401).json({ error: 'unauthorized' });
-    }
+    const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE, {
+      auth: { autoRefreshToken: false, persistSession: false }
+    });
 
-    let limit = parseInt(qs?.searchParams.get('limit') || '200', 10);
-    if (!Number.isFinite(limit) || limit < 1 || limit > 5000) limit = 200;
-    const uid = (qs?.searchParams.get('uid') || '').trim();
-    const format = (qs?.searchParams.get('format') || 'json').toLowerCase();
-
-    const supa = createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_SERVICE_ROLE,
-      { auth: { autoRefreshToken: false, persistSession: false } }
-    );
+    const limit = Math.min(Math.max(parseInt(qs.get('limit') || '1000', 10), 1), 50000);
+    const uid = (qs.get('uid') || '').trim();
+    const passage = (qs.get('passage') || '').trim();
+    const fromISO = toISOStart(qs.get('from'));
+    const toISO   = toISOEnd(qs.get('to'));
 
     let q = supa
       .from('lux_attempts')
@@ -74,23 +46,29 @@ export default async function handler(req, res) {
       .limit(limit);
 
     if (uid) q = q.eq('uid', uid);
+    if (passage) q = q.eq('passage_key', passage);
+    if (fromISO) q = q.gte('ts', fromISO);
+    if (toISO)   q = q.lte('ts', toISO);
 
     const { data, error } = await q;
-    if (error) {
-      console.error('[admin-resend] Supabase error:', error);
-      return res.status(500).json({ error: error.message });
+    if (error) return res.status(500).json({ error: error.message });
+
+    // labels
+    const uids = [...new Set((data || []).map(r => r.uid))];
+    if (uids.length) {
+      const { data: labels } = await supa.from('lux_users').select('uid,label').in('uid', uids);
+      const map = Object.fromEntries((labels||[]).map(x => [x.uid, x.label]));
+      (data||[]).forEach(r => (r.label = map[r.uid] || null));
     }
 
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const format = (qs.get('format') || 'json').toLowerCase();
+    res.setHeader('Cache-Control','no-store');
 
     if (format === 'csv') {
-      const csv = rowsToCSV(data || []);
       res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', 'attachment; filename="lux_attempts.csv"');
-      return res.status(200).end(csv);
+      return res.status(200).end(toCSV(data || []));
     }
-
     return res.status(200).json({ rows: data });
   } catch (err) {
     console.error('[admin-resend] Crash:', err);
