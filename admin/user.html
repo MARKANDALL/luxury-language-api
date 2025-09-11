@@ -4,24 +4,24 @@
   <meta charset="utf-8" />
   <title>User Progress (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
-    body{font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial;padding:18px}
-    h1{margin:0 0 10px}
-    .bar{display:flex;gap:10px;align-items:center;margin:8px 0 16px}
-    input[type="text"]{width:460px;max-width:80vw;padding:6px}
-    input[type="number"]{width:90px;padding:6px}
-    button,a.btn{padding:8px 12px;border-radius:8px;border:1px solid #ccc;background:#fff;text-decoration:none;cursor:pointer}
-    table{border-collapse:collapse;width:100%;margin-top:10px}
-    th,td{border:1px solid #ddd;padding:8px;vertical-align:top}
-    th{background:#f5f7fb;position:sticky;top:0}
-    td.text{max-width:560px}
-    .muted{color:#666}
-    #chartWrap{margin:8px 0 12px}
+    body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
+    h1 { margin: 0 0 10px; }
+    .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin: 8px 0 16px; }
+    input[type="text"]{ width:420px; padding:6px; }
+    input[type="number"]{ width:90px; padding:6px; }
+    button, a.btn{ padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#fff; text-decoration:none; }
+    table{ border-collapse: collapse; width:100%; margin-top: 10px; }
+    th, td{ border:1px solid #ddd; padding:8px; vertical-align: top; }
+    th{ background:#f5f7fb; position:sticky; top:0; }
+    td.text{ max-width: 520px; }
+    .muted{ color:#666 }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   </style>
 </head>
 <body>
-  <h1 id="title">User Progress (admin)</h1>
+  <h1>User Progress (admin)</h1>
 
   <div class="bar">
     <label>UID <input id="uid" type="text" /></label>
@@ -31,8 +31,14 @@
     <span class="muted">Token is stored in this tab’s session only.</span>
   </div>
 
-  <div id="chartWrap">
-    <canvas id="chart" height="100"></canvas>
+  <div class="bar">
+    <label>Display name <input id="label" type="text" placeholder="e.g., Mark H." /></label>
+    <button id="saveLabel">Save name</button>
+    <span id="saveMsg" class="muted"></span>
+  </div>
+
+  <div style="max-width: 1100px;">
+    <canvas id="chart" height="110"></canvas>
   </div>
 
   <table id="grid">
@@ -57,88 +63,137 @@ if (!TOKEN) {
 
 const uidEl   = document.getElementById('uid');
 const limitEl = document.getElementById('limit');
+const labelEl = document.getElementById('label');
+const saveMsg = document.getElementById('saveMsg');
 const csvEl   = document.getElementById('csv');
 const tbody   = document.querySelector('#grid tbody');
-const titleEl = document.getElementById('title');
+const chartEl = document.getElementById('chart');
 
-uidEl.value = qs.get('uid') || '';
+uidEl.value = qs.get('uid') || uidEl.value;
 
-document.getElementById('load').addEventListener('click', load);
+const esc = (s) => (s || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 
 let chart;
-function drawChart(labels, dailyPron, ma7) {
+
+function movingAverage7d(rows) {
+  // rows are newest-first; make ascending for window math
+  const asc = [...rows].sort((a,b) => new Date(a.ts) - new Date(b.ts));
+  const times = asc.map(r => new Date(r.ts).getTime());
+  const values = asc.map(r => r.summary?.pron ?? null);
+
+  const win = 7 * 24 * 3600 * 1000; // 7 days
+  let start = 0, sum = 0, count = 0;
+  const maAsc = asc.map((_, i) => {
+    const v = values[i];
+    if (typeof v === 'number') { sum += v; count += 1; }
+    while (times[i] - times[start] > win) {
+      const vs = values[start];
+      if (typeof vs === 'number') { sum -= vs; count -= 1; }
+      start++;
+    }
+    return count ? +(sum / count).toFixed(1) : null;
+  });
+
+  // Convert back to newest-first to match labels
+  const newestFirstMA = maAsc.reverse();
+  return newestFirstMA;
+}
+
+function buildChart(rows) {
+  const labels = rows.map(r => new Date(r.ts).toLocaleString());
+  const pron   = rows.map(r => r.summary?.pron ?? null);
+  const ma7    = movingAverage7d(rows);
+
   if (chart) chart.destroy();
-  const ctx = document.getElementById('chart').getContext('2d');
-  chart = new Chart(ctx, {
+  chart = new Chart(chartEl, {
     type: 'line',
     data: {
       labels,
       datasets: [
-        { label: 'Daily avg', data: dailyPron, tension: 0.2, fill: false },
-        { label: '7-day avg', data: ma7, borderDash: [6, 6], pointRadius: 0, tension: 0.2 }
-      ]
+        {
+          label: 'Pron score',
+          data: pron,
+          spanGaps: true,
+          pointRadius: 3,
+          borderWidth: 0,
+        },
+        {
+          label: '7-day avg',
+          data: ma7,
+          spanGaps: true,
+          pointRadius: 0,
+          borderWidth: 2,
+          tension: 0.25,
+        },
+      ],
     },
     options: {
       responsive: true,
+      plugins: { legend: { display: true } },
       scales: {
-        y: { min: 0, max: 100, title: { display: true, text: 'Pron' } }
+        y: { min: 0, max: 100, title: { display: true, text: 'Score' } }
       }
     }
   });
 }
 
-async function fetchRows(uid, limit) {
-  const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&uid=${encodeURIComponent(uid)}&limit=${limit}`;
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) throw new Error('admin-recent failed');
-  return (await r.json()).rows || [];
-}
-
-async function fetchLabel(uid) {
-  const url = `/api/admin-label-user?token=${encodeURIComponent(TOKEN)}&uid=${encodeURIComponent(uid)}`;
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) return null;
-  const { rows } = await r.json();
-  return rows?.[0]?.label || null;
-}
-
-// group by day and compute daily averages
-function dailySeries(rows) {
-  const byDay = new Map(); // YYYY-MM-DD -> {sum,count}
-  for (const r of rows) {
-    const p = r?.summary?.pron;
-    if (typeof p !== 'number') continue;
-    const d = new Date(r.ts);
-    const day = d.toISOString().slice(0, 10);
-    const obj = byDay.get(day) || { sum: 0, count: 0 };
-    obj.sum += p; obj.count += 1;
-    byDay.set(day, obj);
-  }
-  const labels = Array.from(byDay.keys()).sort();
-  const daily = labels.map(k => byDay.get(k).sum / byDay.get(k).count);
-  return { labels, daily };
-}
-
-function movingAvg(values, window = 7) {
-  const out = [];
-  for (let i = 0; i < values.length; i++) {
-    const a = Math.max(0, i - (window - 1));
-    const slice = values.slice(a, i + 1);
-    out.push(slice.reduce((s, v) => s + v, 0) / slice.length);
-  }
-  return out;
-}
-
-function esc(s){return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}
-
 async function load() {
-  const uid = uidEl.value.trim();
-  if (!uid) return alert('Enter a UID');
-  const limit = Number(limitEl.value) || 500;
+  const uid = (uidEl.value || '').trim();
+  if (!uid) { alert('Enter a UID'); return; }
 
+  const limit = Number(limitEl.value) || 500;
   csvEl.href = `/api/admin-resend?token=${encodeURIComponent(TOKEN)}&format=csv&uid=${encodeURIComponent(uid)}&limit=${limit}`;
 
-  const [rows, label] = await Promise.all([fetchRows(uid, limit), fetchLabel(uid)]);
-  titleEl.textContent = label ? `User Progress – ${label} (${uid})` : `User Progress – ${uid}`;
+  const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&uid=${encodeURIComponent(uid)}&limit=${limit}`;
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) { alert('Load failed: ' + r.status); return; }
+  const { rows } = await r.json();
 
-  // table
+  // If the API attached a label, show it in the input
+  const firstWithLabel = rows.find(r => r.label);
+  if (firstWithLabel) labelEl.value = firstWithLabel.label;
+
+  buildChart(rows);
+
+  // Table
+  tbody.innerHTML = '';
+  for (const row of rows) {
+    const s = row.summary || {};
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${new Date(row.ts).toLocaleString()}</td>
+      <td>${esc(row.passage_key)}</td>
+      <td>${row.part_index}</td>
+      <td>${s.acc ?? ''}</td>
+      <td>${s.flu ?? ''}</td>
+      <td>${s.comp ?? ''}</td>
+      <td>${s.pron ?? ''}</td>
+      <td class="text">${esc(row.text)}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function saveLabel() {
+  const uid = (uidEl.value || '').trim();
+  const label = (labelEl.value || '').trim();
+  if (!uid || !label) { alert('Enter UID and a display name'); return; }
+
+  saveMsg.textContent = 'Saving…';
+  const r = await fetch(`/api/admin-label-user?token=${encodeURIComponent(TOKEN)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uid, label })
+  });
+  if (!r.ok) { saveMsg.textContent = 'Failed'; return; }
+  saveMsg.textContent = 'Saved';
+  setTimeout(() => (saveMsg.textContent = ''), 1200);
+}
+
+document.getElementById('load').addEventListener('click', load);
+document.getElementById('saveLabel').addEventListener('click', saveLabel);
+
+// Auto-load if uid came from /admin/ index link
+if (uidEl.value) load();
+</script>
+</body>
+</html>
