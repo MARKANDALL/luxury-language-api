@@ -8,44 +8,70 @@
   <style>
     body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
     h1 { margin: 0 0 10px; }
-    .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin: 8px 0 16px; }
-    input[type="text"]{ width:420px; padding:6px; }
-    input[type="number"]{ width:90px; padding:6px; }
-    button, a.btn{ padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#fff; text-decoration:none; }
-    table{ border-collapse: collapse; width:100%; margin-top: 10px; }
+    .bar, .filters { display:flex; gap:10px; align-items:center; margin: 8px 0 12px; flex-wrap: wrap; }
+    input[type="number"] { width:90px; padding:6px; }
+    input[type="date"] { padding:6px; }
+    button, a.btn { padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#fff; text-decoration:none; cursor:pointer; }
+    .muted{ color:#666 }
+    .pill { display:inline-block; padding:2px 6px; border-radius:999px; border:1px solid #ddd; margin-right:6px; font-size:12px; }
+    .pill.bad { background:#fff0f0; border-color:#ffb3b3; }
+    .stats { display:flex; gap:12px; margin: 8px 0 12px; }
+    .card { border:1px solid #e5e7eb; border-radius:10px; padding:10px 12px; background:#fff; }
+    .card b { font-size:18px; }
+    table{ border-collapse: collapse; width:100%; margin-top:12px; }
     th, td{ border:1px solid #ddd; padding:8px; vertical-align: top; }
     th{ background:#f5f7fb; position:sticky; top:0; }
     td.text{ max-width: 520px; }
-    .muted{ color:#666 }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .passages { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .right { margin-left:auto }
   </style>
 </head>
 <body>
   <h1>User Progress (admin)</h1>
 
   <div class="bar">
-    <label>UID <input id="uid" type="text" /></label>
-    <label>Limit <input id="limit" type="number" value="500" min="1" max="1000"></label>
+    <label>UID <input id="uid" style="width:420px" /></label>
+    <label>Limit <input id="limit" type="number" value="500" min="1" max="2000"></label>
     <button id="load">Load</button>
     <a id="csv" class="btn" target="_blank">Download CSV</a>
+    <button id="copyLink">Copy link</button>
     <span class="muted">Token is stored in this tab’s session only.</span>
   </div>
 
   <div class="bar">
-    <label>Display name <input id="label" type="text" placeholder="e.g., Mark H." /></label>
+    <label>Display name <input id="label" style="width:420px" placeholder="e.g., Mark H."></label>
     <button id="saveLabel">Save name</button>
-    <span id="saveMsg" class="muted"></span>
+    <span id="labelSaved" class="muted"></span>
   </div>
 
-  <div style="max-width: 1100px;">
-    <canvas id="chart" height="110"></canvas>
+  <div class="filters">
+    <label>From <input id="from" type="date"></label>
+    <label>To <input id="to" type="date"></label>
+    <label>Smoothing
+      <select id="smooth">
+        <option value="0">None</option>
+        <option value="3">3-day</option>
+        <option value="7" selected>7-day</option>
+        <option value="14">14-day</option>
+      </select>
+    </label>
+    <div class="passages" id="passageFilter"></div>
+    <button id="apply">Apply</button>
+    <button id="clear">Clear</button>
   </div>
+
+  <div class="stats">
+    <div class="card"><div>Attempts</div><b id="statAttempts">0</b></div>
+    <div class="card"><div>Avg Pron</div><b id="statAvgPron">–</b></div>
+  </div>
+
+  <canvas id="chart" height="110"></canvas>
 
   <table id="grid">
     <thead>
       <tr>
         <th>Time (local)</th><th>Passage</th><th>Part</th>
-        <th>Acc</th><th>Flu</th><th>Comp</th><th>Pron</th>
+        <th>Acc</th><th>Flu</th><th>Comp</th><th>Pron</th><th>Lows</th>
         <th class="text">Text</th>
       </tr>
     </thead>
@@ -61,138 +87,210 @@ if (!TOKEN) {
   sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
 }
 
-const uidEl   = document.getElementById('uid');
-const limitEl = document.getElementById('limit');
-const labelEl = document.getElementById('label');
-const saveMsg = document.getElementById('saveMsg');
-const csvEl   = document.getElementById('csv');
+const uidEl    = document.getElementById('uid');
+const limEl    = document.getElementById('limit');
+const csvEl    = document.getElementById('csv');
+const copyEl   = document.getElementById('copyLink');
+const fromEl   = document.getElementById('from');
+const toEl     = document.getElementById('to');
+const smoothEl = document.getElementById('smooth');
+const applyEl  = document.getElementById('apply');
+const clearEl  = document.getElementById('clear');
+const labelEl  = document.getElementById('label');
+const saveLabelEl = document.getElementById('saveLabel');
+const labelSavedEl = document.getElementById('labelSaved');
 const tbody   = document.querySelector('#grid tbody');
-const chartEl = document.getElementById('chart');
+const passageFilterEl = document.getElementById('passageFilter');
 
-uidEl.value = qs.get('uid') || uidEl.value;
+uidEl.value = qs.get('uid') || '';
 
-const esc = (s) => (s || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-
+let RAW_ROWS = [];
 let chart;
-
-function movingAverage7d(rows) {
-  // rows are newest-first; make ascending for window math
-  const asc = [...rows].sort((a,b) => new Date(a.ts) - new Date(b.ts));
-  const times = asc.map(r => new Date(r.ts).getTime());
-  const values = asc.map(r => r.summary?.pron ?? null);
-
-  const win = 7 * 24 * 3600 * 1000; // 7 days
-  let start = 0, sum = 0, count = 0;
-  const maAsc = asc.map((_, i) => {
-    const v = values[i];
-    if (typeof v === 'number') { sum += v; count += 1; }
-    while (times[i] - times[start] > win) {
-      const vs = values[start];
-      if (typeof vs === 'number') { sum -= vs; count -= 1; }
-      start++;
-    }
-    return count ? +(sum / count).toFixed(1) : null;
-  });
-
-  // Convert back to newest-first to match labels
-  const newestFirstMA = maAsc.reverse();
-  return newestFirstMA;
+function parseSummary(s) {
+  try { return (typeof s === 'string') ? JSON.parse(s) : (s || {}); }
+  catch { return {}; }
 }
 
-function buildChart(rows) {
-  const labels = rows.map(r => new Date(r.ts).toLocaleString());
-  const pron   = rows.map(r => r.summary?.pron ?? null);
-  const ma7    = movingAverage7d(rows);
+function fmtDateISO(d) { return d.toISOString().slice(0,10); }
 
-  if (chart) chart.destroy();
-  chart = new Chart(chartEl, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'Pron score',
-          data: pron,
-          spanGaps: true,
-          pointRadius: 3,
-          borderWidth: 0,
-        },
-        {
-          label: '7-day avg',
-          data: ma7,
-          spanGaps: true,
-          pointRadius: 0,
-          borderWidth: 2,
-          tension: 0.25,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { display: true } },
-      scales: {
-        y: { min: 0, max: 100, title: { display: true, text: 'Score' } }
-      }
-    }
-  });
+function buildPassageFilter(rows) {
+  passageFilterEl.innerHTML = '<b>Passages:</b>';
+  const set = new Set(rows.map(r => r.passage_key).filter(Boolean));
+  if (!set.size) return;
+  for (const key of [...set].sort()) {
+    const id = 'p_' + key;
+    const wrap = document.createElement('label');
+    wrap.innerHTML = `<input type="checkbox" id="${id}" checked> ${key}`;
+    passageFilterEl.appendChild(wrap);
+  }
 }
 
-async function load() {
-  const uid = (uidEl.value || '').trim();
-  if (!uid) { alert('Enter a UID'); return; }
+function selectedPassages() {
+  const boxes = passageFilterEl.querySelectorAll('input[type="checkbox"]');
+  const out = [];
+  boxes.forEach(b => { if (b.checked) out.push(b.id.slice(2)); });
+  return out.length ? new Set(out) : null;
+}
 
-  const limit = Number(limitEl.value) || 500;
-  csvEl.href = `/api/admin-resend?token=${encodeURIComponent(TOKEN)}&format=csv&uid=${encodeURIComponent(uid)}&limit=${limit}`;
+function withinRange(ts) {
+  const t = new Date(ts);
+  const f = fromEl.value ? new Date(fromEl.value + 'T00:00:00') : null;
+  const tto = toEl.value ? new Date(toEl.value   + 'T23:59:59') : null;
+  if (f && t < f) return false;
+  if (tto && t > tto) return false;
+  return true;
+}
 
-  const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&uid=${encodeURIComponent(uid)}&limit=${limit}`;
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) { alert('Load failed: ' + r.status); return; }
-  const { rows } = await r.json();
+function movingAvg(points, days) {
+  if (!days || days<=0) return Array(points.length).fill(null);
+  const windowMs = days * 86400 * 1000;
+  const out = [];
+  for (let i=0;i<points.length;i++) {
+    const ti = +points[i].x;
+    let sum=0, n=0;
+    for (let j=i;j>=0;j--) {
+      const tj = +points[j].x;
+      if (ti - tj <= windowMs) { sum += points[j].y; n++; } else break;
+    }
+    out.push(n ? +(sum/n).toFixed(2) : null);
+  }
+  return out;
+}
 
-  // If the API attached a label, show it in the input
-  const firstWithLabel = rows.find(r => r.label);
-  if (firstWithLabel) labelEl.value = firstWithLabel.label;
+function setStats(rows) {
+  document.getElementById('statAttempts').textContent = rows.length;
+  const avg = rows.length ? (rows.reduce((a,r)=>a+(parseSummary(r.summary).pron||0),0)/rows.length).toFixed(1) : '–';
+  document.getElementById('statAvgPron').textContent = avg;
+}
 
-  buildChart(rows);
-
-  // Table
+function render(rows) {
+  // table
   tbody.innerHTML = '';
-  for (const row of rows) {
-    const s = row.summary || {};
+  for (const r of rows) {
+    const s = parseSummary(r.summary);
+    const lows = Array.isArray(s.lows) ? s.lows.slice(0,3) : [];
+    const when = new Date(r.ts).toLocaleString();
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td>${new Date(row.ts).toLocaleString()}</td>
-      <td>${esc(row.passage_key)}</td>
-      <td>${row.part_index}</td>
+      <td>${when}</td>
+      <td>${r.passage_key ?? ''}</td>
+      <td>${r.part_index ?? ''}</td>
       <td>${s.acc ?? ''}</td>
       <td>${s.flu ?? ''}</td>
       <td>${s.comp ?? ''}</td>
       <td>${s.pron ?? ''}</td>
-      <td class="text">${esc(row.text)}</td>`;
+      <td>${
+        lows.map(l => `<span class="pill bad" title="word: ${l.word || ''} | phoneme: ${l.phoneme || ''} | score: ${l.score || ''} | err: ${l.err || ''}">
+          ${(l.word || '')}/${(l.phoneme || '')} ${l.score ?? ''}
+        </span>`).join('')
+      }</td>
+      <td class="text">${(r.text || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</td>`;
     tbody.appendChild(tr);
   }
+
+  // chart
+  const pts = rows
+    .filter(r => parseSummary(r.summary).pron != null)
+    .map(r => ({ x: new Date(r.ts), y: parseFloat(parseSummary(r.summary).pron) }))
+    .sort((a,b)=>a.x-b.x);
+
+  const smoothDays = parseInt(smoothEl.value, 10);
+  const ma = movingAvg(pts, smoothDays);
+
+  const data = {
+    datasets: [
+      {
+        label: 'Pron score',
+        data: pts,
+        parsing:false,
+        borderWidth: 2,
+        tension: 0.25,
+        pointRadius: 3
+      },
+      ...(smoothDays>0 ? [{
+        label: `${smoothDays}-day avg`,
+        data: pts.map((p,i)=>ma[i]==null?null:{x:p.x, y:ma[i]}),
+        parsing:false,
+        borderWidth: 2,
+        borderDash: [6,4],
+        pointRadius: 0
+      }] : [])
+    ]
+  };
+  const options = {
+    responsive: true,
+    scales: {
+      y: { suggestedMin: 0, suggestedMax: 100, title: { display:true, text:'Score' } },
+      x: { type: 'time', time: { unit: 'day' } }
+    },
+    plugins: { legend: { display: true } }
+  };
+
+  if (chart) chart.destroy();
+  const ctx = document.getElementById('chart');
+  chart = new Chart(ctx, { type:'line', data, options });
+
+  setStats(rows);
 }
 
-async function saveLabel() {
-  const uid = (uidEl.value || '').trim();
-  const label = (labelEl.value || '').trim();
-  if (!uid || !label) { alert('Enter UID and a display name'); return; }
+function applyFilters() {
+  const chosen = selectedPassages();
+  const filtered = RAW_ROWS.filter(r =>
+    withinRange(r.ts) &&
+    (!chosen || chosen.has(r.passage_key))
+  );
+  render(filtered);
+}
 
-  saveMsg.textContent = 'Saving…';
-  const r = await fetch(`/api/admin-label-user?token=${encodeURIComponent(TOKEN)}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uid, label })
-  });
-  if (!r.ok) { saveMsg.textContent = 'Failed'; return; }
-  saveMsg.textContent = 'Saved';
-  setTimeout(() => (saveMsg.textContent = ''), 1200);
+async function load() {
+  const uid = uidEl.value.trim();
+  if (!uid) { alert('Enter a UID'); return; }
+  const limit = Number(limEl.value)||500;
+  csvEl.href = `/api/admin-resend?token=${encodeURIComponent(TOKEN)}&format=csv&uid=${encodeURIComponent(uid)}&limit=${limit}`;
+
+  const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&uid=${encodeURIComponent(uid)}&limit=${limit}`;
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) {
+    tbody.innerHTML = `<tr><td colspan="9">Error: ${r.status}</td></tr>`;
+    return;
+  }
+  const { rows, label } = await r.json();
+  RAW_ROWS = rows || [];
+  buildPassageFilter(RAW_ROWS);
+  // date defaults
+  if (!fromEl.value && RAW_ROWS.length) {
+    const earliest = new Date(RAW_ROWS[RAW_ROWS.length-1].ts);
+    fromEl.value = fmtDateISO(earliest);
+  }
+  if (!toEl.value) toEl.value = fmtDateISO(new Date());
+  // label
+  labelEl.value = label || '';
+  render(RAW_ROWS);
 }
 
 document.getElementById('load').addEventListener('click', load);
-document.getElementById('saveLabel').addEventListener('click', saveLabel);
+applyEl.addEventListener('click', applyFilters);
+clearEl.addEventListener('click', () => { fromEl.value=''; toEl.value=''; passageFilterEl.querySelectorAll('input[type="checkbox"]').forEach(b=>b.checked=true); applyFilters(); });
+smoothEl.addEventListener('change', applyFilters);
 
-// Auto-load if uid came from /admin/ index link
+copyEl.addEventListener('click', async () => {
+  const url = `${location.origin}/admin/user.html?uid=${encodeURIComponent(uidEl.value.trim())}`;
+  await navigator.clipboard.writeText(url);
+  copyEl.textContent = 'Link copied';
+  setTimeout(()=>copyEl.textContent='Copy link', 1200);
+});
+
+saveLabelEl.addEventListener('click', async () => {
+  const uid = uidEl.value.trim();
+  const body = { uid, label: labelEl.value.trim() };
+  const r = await fetch('/api/admin-label-user?token='+encodeURIComponent(TOKEN), {
+    method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)
+  });
+  if (r.ok) { labelSavedEl.textContent = 'Saved ✓'; setTimeout(()=>labelSavedEl.textContent='', 1500); }
+  else { labelSavedEl.textContent = 'Error saving'; }
+});
+
+// auto-load if uid is in URL
 if (uidEl.value) load();
 </script>
 </body>
