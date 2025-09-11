@@ -1,0 +1,121 @@
+<!-- /admin/user.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>User Progress (admin)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
+    h1 { margin: 0 0 12px; }
+    .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin: 8px 0 16px; }
+    input, button, a.btn { padding:8px 10px; border-radius:8px; border:1px solid #ccc; background:#fff; text-decoration:none; }
+    input[type="number"] { width: 90px; }
+    table { border-collapse: collapse; width:100%; margin-top:14px; }
+    th, td { border:1px solid #ddd; padding:8px; vertical-align:top; }
+    th { background:#f5f7fb; position:sticky; top:0; }
+    .muted { color:#666 }
+    #chartWrap { margin: 8px 0 12px; }
+  </style>
+</head>
+<body>
+  <h1>User Progress (admin)</h1>
+
+  <div class="bar">
+    <label>UID <input id="uid" size="40" placeholder="paste a UID from /admin"></label>
+    <label>Limit <input id="limit" type="number" value="500" min="1" max="1000"></label>
+    <button id="loadBtn">Load</button>
+    <a id="csv" class="btn" target="_blank">Download CSV</a>
+    <span class="muted">Token is stored in this tab’s session only.</span>
+  </div>
+
+  <div id="chartWrap">
+    <canvas id="chart" height="120"></canvas>
+  </div>
+
+  <table id="grid">
+    <thead>
+      <tr>
+        <th>Time (local)</th><th>Passage</th><th>Part</th><th>Acc</th><th>Flu</th><th>Comp</th><th>Pron</th><th>Text</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+<script type="module">
+const qs = new URLSearchParams(location.search);
+let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
+if (!TOKEN) {
+  TOKEN = prompt('Enter ADMIN_TOKEN');
+  if (!TOKEN) throw new Error('No token');
+  sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
+}
+
+const uidEl = document.getElementById('uid');
+const limitEl = document.getElementById('limit');
+const csvEl = document.getElementById('csv');
+const tbody = document.querySelector('#grid tbody');
+const chartCtx = document.getElementById('chart');
+
+uidEl.value = qs.get('uid') || '';
+
+let chart;
+function drawChart(points) {
+  const labels = points.map(p => new Date(p.ts).toLocaleString());
+  const data = points.map(p => p.summary?.pron ?? null);
+  if (chart) chart.destroy();
+  chart = new Chart(chartCtx, {
+    type: 'line',
+    data: { labels, datasets: [{ label: 'Pron score', data }] },
+    options: {
+      responsive: true,
+      scales: { y: { suggestedMin: 0, suggestedMax: 100 } }
+    }
+  });
+}
+
+function esc(s){ return (s || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
+
+async function load() {
+  const uid = uidEl.value.trim();
+  if (!uid) { alert('Paste a UID first. Copy one from /admin.'); return; }
+  const limit = Number(limitEl.value) || 500;
+
+  const url = `/api/admin-resend?token=${encodeURIComponent(TOKEN)}&format=json&uid=${encodeURIComponent(uid)}&limit=${limit}`;
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) { tbody.innerHTML = `<tr><td colspan="8">Error: ${r.status}</td></tr>`; return; }
+  const { rows } = await r.json();
+
+  // Chart (reverse chronological → chronological for lines)
+  const chron = [...rows].reverse();
+  drawChart(chron);
+
+  // Table (latest first)
+  tbody.innerHTML = '';
+  for (const row of rows) {
+    const s = row.summary || {};
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${new Date(row.ts).toLocaleString()}</td>
+      <td>${row.passage_key}</td>
+      <td>${row.part_index}</td>
+      <td>${s.acc ?? ''}</td>
+      <td>${s.flu ?? ''}</td>
+      <td>${s.comp ?? ''}</td>
+      <td>${s.pron ?? ''}</td>
+      <td>${esc(row.text)}</td>`;
+    tbody.appendChild(tr);
+  }
+
+  // CSV link for this UID
+  csvEl.href = `/api/admin-resend?token=${encodeURIComponent(TOKEN)}&format=csv&uid=${encodeURIComponent(uid)}&limit=${limit}`;
+}
+
+document.getElementById('loadBtn').addEventListener('click', load);
+
+// Auto-load if uid provided in query string
+if (uidEl.value) load();
+</script>
+</body>
+</html>
