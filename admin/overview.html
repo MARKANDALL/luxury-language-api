@@ -1,50 +1,85 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<title>Overview (admin)</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<style>
-  body{font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial;padding:16px}
-  h1{margin:0 0 12px}
-  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:8px 0 12px}
-  input,select,button,a.btn{height:36px;padding:8px;border:1px solid #ccc;border-radius:8px;background:#fff}
-  a.btn{text-decoration:none;display:inline-flex;align-items:center}
-  table{border-collapse:collapse;width:100%}
-  th,td{border:1px solid #e7e7e7;padding:8px;vertical-align:top}
-  th{background:#f7f9fc;position:sticky;top:0}
-  .muted{color:#666}
-</style>
+  <meta charset="utf-8" />
+  <title>Cohort Overview (admin)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{ --gap:10px }
+    *{ box-sizing:border-box }
+    body{ font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; color:#111 }
+    h1{ margin:0 0 14px }
+    .bar,.row{ display:flex; flex-wrap:wrap; align-items:center; gap:10px }
+    input[type="text"], input[type="number"], input[type="date"], select{
+      padding:8px; border:1px solid #ccc; border-radius:8px; height:36px;
+    }
+    button, a.btn{
+      padding:8px 12px; border:1px solid #ccc; border-radius:8px; background:#fff; cursor:pointer;
+      text-decoration:none; display:inline-flex; align-items:center; height:36px;
+    }
+    .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
+    small{ color:#666; margin-left:auto }
+
+    .grid{
+      display:grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap:12px; margin-top:12px;
+    }
+    .card{
+      border:1px solid #e7e7e7; border-radius:12px; padding:12px; background:#fff;
+      display:flex; flex-direction:column; gap:8px;
+    }
+    .uid{ font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12px; color:#444 }
+    .rowmeta{ display:flex; gap:10px; flex-wrap:wrap }
+    .pill{ padding:4px 8px; border-radius:999px; background:#f4f6fb; font-weight:600 }
+    .muted{ color:#666 }
+    .pos{ color:#0a7; } .neg{ color:#c00; }
+  </style>
 </head>
 <body>
-<h1>Overview (admin)</h1>
+  <h1>Cohort Overview (admin)</h1>
 
-<div class="bar">
-  <label>Limit <input id="limit" type="number" value="2000" min="1" max="20000" style="width:100px"></label>
-  <label>From <input id="from" type="date"></label>
-  <label>To <input id="to" type="date"></label>
-  <button id="loadBtn">Load</button>
-  <a id="csvAll" class="btn" target="_blank">Download CSV (all)</a>
-  <span class="muted">Token stored in this tab only.</span>
-</div>
+  <div class="row">
+    <label>From <input id="from" type="date"></label>
+    <label>To <input id="to" type="date"></label>
+    <label>Window
+      <select id="window">
+        <option value="7">7-day delta</option>
+        <option value="14">14-day delta</option>
+      </select>
+    </label>
 
-<table id="grid">
-  <thead>
-    <tr>
-      <th style="width:220px">User (label)</th>
-      <th>UID</th>
-      <th>Attempts</th>
-      <th>Avg Pron</th>
-      <th>Last Pron</th>
-      <th>Last time (local)</th>
-      <th>Open</th>
-    </tr>
-  </thead>
-  <tbody></tbody>
-</table>
+    <div class="checks">
+      <span>Passages:</span>
+      <label><input class="pass" type="checkbox" value="grandfather" checked> grandfather</label>
+      <label><input class="pass" type="checkbox" value="rainbow" checked> rainbow</label>
+      <label><input class="pass" type="checkbox" value="sentences" checked> sentences</label>
+      <label><input class="pass" type="checkbox" value="wordList" checked> wordList</label>
+    </div>
+
+    <label>Sort
+      <select id="sort">
+        <option value="last">Last seen</option>
+        <option value="attempts">Attempts</option>
+        <option value="avg">Avg pron</option>
+        <option value="delta">Delta (recent-prev)</option>
+      </select>
+    </label>
+
+    <button id="reloadBtn">Reload</button>
+    <button id="copyBtn">Copy link</button>
+    <a class="btn" href="/admin/">Attempts</a>
+    <small>Token is stored in this tab’s session only.</small>
+  </div>
+
+  <div class="row" style="margin:8px 0 0; gap:16px">
+    <div class="muted">Users: <b id="count">0</b></div>
+  </div>
+
+  <div id="grid" class="grid"></div>
 
 <script>
-(async function(){
+(function(){
   const qs = new URLSearchParams(location.search);
   let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
   if (!TOKEN) {
@@ -52,83 +87,124 @@
     if (TOKEN) sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
   }
 
-  const limitEl = document.getElementById('limit');
-  const fromEl = document.getElementById('from');
-  const toEl = document.getElementById('to');
-  const loadBtn = document.getElementById('loadBtn');
-  const csvAll = document.getElementById('csvAll');
-  const tbody = document.querySelector('#grid tbody');
+  const fromEl   = document.getElementById('from');
+  const toEl     = document.getElementById('to');
+  const windowEl = document.getElementById('window');
+  const sortEl   = document.getElementById('sort');
+  const passEls  = Array.from(document.querySelectorAll('.pass'));
+  const reloadBtn= document.getElementById('reloadBtn');
+  const copyBtn  = document.getElementById('copyBtn');
+  const gridEl   = document.getElementById('grid');
+  const countEl  = document.getElementById('count');
 
-  // default dates (past 14 days)
-  const pad = n=>String(n).padStart(2,'0');
-  const toStr = d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-  const today = new Date(); const fromD = new Date(); fromD.setDate(fromD.getDate()-14);
-  fromEl.value = qs.get('from') || toStr(fromD);
-  toEl.value = qs.get('to') || toStr(today);
-
-  function updateCsvLink(){
-    const u = `/api/admin-resend?format=csv&limit=${encodeURIComponent(limitEl.value)}&token=${encodeURIComponent(TOKEN)}`
-            + `&from=${encodeURIComponent(fromEl.value)}&to=${encodeURIComponent(toEl.value)}`;
-    csvAll.href = u;
-  }
-
-  function group(rows){
-    const map = new Map();
-    for (const r of rows){
-      const uid = r.uid;
-      const s = r.summary||{};
-      const pron = Number(s.pron);
-      let g = map.get(uid);
-      if (!g) g = {uid, label:r.label||'', rows:[], lastTs:r.ts};
-      g.rows.push(r);
-      if (!g.label && r.label) g.label = r.label;
-      if (!g.lastTs || new Date(r.ts) > new Date(g.lastTs)) g.lastTs = r.ts;
-      map.set(uid, g);
+  // defaults
+  (function init(){
+    const pad = n => String(n).padStart(2,'0');
+    const toStr = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const today = new Date();
+    const start = new Date(); start.setDate(start.getDate()-14);
+    fromEl.value    = qs.get('from')    || toStr(start);
+    toEl.value      = qs.get('to')      || toStr(today);
+    windowEl.value  = qs.get('window')  || '7';
+    sortEl.value    = qs.get('sort')    || 'last';
+    const p = qs.get('passages');
+    if (p) {
+      const set = new Set(p.split(',').map(s=>s.trim()));
+      passEls.forEach(el => el.checked = set.has(el.value));
     }
-    return [...map.values()];
+  })();
+
+  function buildPassagesParam(){ return passEls.filter(e=>e.checked).map(e=>e.value).join(','); }
+
+  function setQS(){
+    const sp = new URLSearchParams();
+    if (fromEl.value) sp.set('from', fromEl.value);
+    if (toEl.value)   sp.set('to', toEl.value);
+    sp.set('window', windowEl.value);
+    sp.set('sort', sortEl.value);
+    const passages = buildPassagesParam(); if (passages) sp.set('passages', passages);
+    history.replaceState(null,'', `${location.pathname}?${sp.toString()}`);
   }
 
-  function render(groups){
-    tbody.innerHTML = '';
-    groups.sort((a,b)=> new Date(b.lastTs) - new Date(a.lastTs));
-    for (const g of groups){
-      const vals = g.rows.map(x=>Number(x?.summary?.pron)).filter(Number.isFinite);
-      const avg = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) : '–';
-      const last = (()=>{
-        const latest = g.rows.slice().sort((a,b)=>new Date(b.ts)-new Date(a.ts))[0];
-        return latest?.summary?.pron ?? '';
-      })();
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${g.label || '—'}</td>
-        <td>${g.uid}</td>
-        <td>${g.rows.length}</td>
-        <td>${avg}</td>
-        <td>${last}</td>
-        <td>${new Date(g.lastTs).toLocaleString()}</td>
-        <td><a href="/admin/user.html?uid=${encodeURIComponent(g.uid)}&from=${encodeURIComponent(fromEl.value)}&to=${encodeURIComponent(toEl.value)}" target="_blank">Open</a></td>`;
-      tbody.appendChild(tr);
+  function fmt(n){ return (n==null || Number.isNaN(n)) ? '–' : Number(n).toFixed(1); }
+  function rel(iso){
+    const d=new Date(iso), s=(Date.now()-d.getTime())/1000, day=86400;
+    if (s < 60)   return `${Math.floor(s)}s ago`;
+    if (s < 3600) return `${Math.floor(s/60)}m ago`;
+    if (s < day)  return `${Math.floor(s/3600)}h ago`;
+    return `${Math.floor(s/day)}d ago`;
+  }
+
+  function userUrl(uid){
+    const u = new URL('/admin/user.html', location.origin);
+    const p = new URLSearchParams();
+    p.set('uid', uid);
+    if (fromEl.value) p.set('from', fromEl.value);
+    if (toEl.value)   p.set('to', toEl.value);
+    const passages = buildPassagesParam(); if (passages) p.set('passages', passages);
+    u.search = p.toString();
+    return u.toString();
+  }
+
+  function render(rows){
+    const mode = sortEl.value;
+    rows = rows.slice();
+    if (mode === 'attempts') rows.sort((a,b)=> (b.attempts||0)-(a.attempts||0));
+    else if (mode === 'avg') rows.sort((a,b)=> (b.avg_pron??-1)-(a.avg_pron??-1));
+    else if (mode === 'delta') rows.sort((a,b)=> (b.delta??-1)-(a.delta??-1));
+    else rows.sort((a,b)=> new Date(b.last_ts)-new Date(a.last_ts));
+
+    countEl.textContent = rows.length;
+    gridEl.innerHTML = '';
+
+    for (const r of rows){
+      const card = document.createElement('div');
+      card.className = 'card';
+      const deltaClass = r.delta == null ? '' : (r.delta >= 0 ? 'pos' : 'neg');
+      const label = r.label || '(unlabeled)';
+      card.innerHTML = `
+        <div><b>${label}</b></div>
+        <div class="uid">${r.uid}</div>
+        <div class="rowmeta">
+          <span class="pill">Avg ${fmt(r.avg_pron)}</span>
+          <span class="pill">${r.attempts || 0} attempts</span>
+          <span class="pill ${deltaClass}">${r.delta == null ? '–' : (r.delta>0?'+':'')+fmt(r.delta)} Δ</span>
+        </div>
+        <div class="muted">Last seen ${r.last_ts ? rel(r.last_ts) : '–'}</div>
+        <div><a class="btn" href="${userUrl(r.uid)}">Open user →</a></div>
+      `;
+      gridEl.appendChild(card);
     }
   }
 
   async function load(){
-    const limit = Number(limitEl.value||2000);
-    const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&limit=${limit}`
-              + `&from=${encodeURIComponent(fromEl.value)}&to=${encodeURIComponent(toEl.value)}`;
-    loadBtn.disabled = true;
+    reloadBtn.disabled = true;
     try{
-      const r = await fetch(url, {cache:'no-store'});
-      const {rows=[]} = await r.json();
-      render(group(rows));
-      updateCsvLink();
-    } finally {
-      loadBtn.disabled = false;
+      let url = `/api/admin-user-stats?token=${encodeURIComponent(TOKEN)}&window=${encodeURIComponent(windowEl.value)}`;
+      if (fromEl.value) url += `&from=${encodeURIComponent(fromEl.value)}`;
+      if (toEl.value)   url += `&to=${encodeURIComponent(toEl.value)}`;
+      const passages = buildPassagesParam(); if (passages) url += `&passages=${encodeURIComponent(passages)}`;
+      const r = await fetch(url, { cache: 'no-store' });
+      const json = await r.json();
+      render(Array.isArray(json?.rows) ? json.rows : []);
+      setQS();
+    }catch(e){
+      alert('Load failed (check token / network).');
+      console.error(e);
+    }finally{
+      reloadBtn.disabled = false;
     }
   }
 
-  loadBtn.addEventListener('click', load);
-  [limitEl, fromEl, toEl].forEach(el=>el.addEventListener('change', updateCsvLink));
-  updateCsvLink();
+  document.getElementById('reloadBtn').addEventListener('click', load);
+  document.getElementById('copyBtn').addEventListener('click', ()=>{
+    setQS();
+    navigator.clipboard.writeText(location.href)
+      .then(()=>{ copyBtn.textContent='Copied!'; setTimeout(()=>copyBtn.textContent='Copy link',1000); })
+      .catch(()=>{ copyBtn.textContent='Copy failed'; setTimeout(()=>copyBtn.textContent='Copy link',1200); });
+  });
+  [fromEl,toEl,windowEl,sortEl,...passEls].forEach(el=>el.addEventListener('change', setQS));
+
   load();
 })();
 </script>
