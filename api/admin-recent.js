@@ -1,104 +1,147 @@
-// api/admin-recent.js
-// Returns recent attempts for admin dashboards (JSON or CSV).
-//
-// Query params:
-//   token        - admin token (or header x-admin-token)
-//   uid          - optional: filter by single user id
-//   from         - optional: YYYY-MM-DD (inclusive, at 00:00)
-//   to           - optional: YYYY-MM-DD (inclusive, +1 day boundary)
-//   passages     - optional: comma list, e.g. "rainbow,grandfather"
-//   limit        - optional: default 500 (server hard cap 10000)
-//   format=csv   - optional: return CSV (with UTF-8 BOM)
-//
+// file: /api/admin-recent.js
 import { Pool } from "pg";
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+// --- Connection pooling (re-use across invocations)
+const pool =
+  globalThis.__lux_pool ||
+  new Pool({
+    connectionString:
+      process.env.POSTGRES_URL ||
+      process.env.POSTGRES_CONNECTION ||
+      process.env.DATABASE_URL,
+    // Works on most hosted Postgres; adjust if you use a self-managed instance
+    ssl:
+      process.env.PGSSLMODE === "disable"
+        ? false
+        : { rejectUnauthorized: false },
+  });
+globalThis.__lux_pool = pool;
 
-function bad(res, code, msg) {
-  res.status(code).json({ error: msg });
+const ALLOWED_PASSAGES = new Set([
+  "rainbow",
+  "grandfather",
+  "sentences",
+  "wordList",
+]);
+
+function parseISO(d) {
+  if (!d) return null;
+  const t = Date.parse(d);
+  return Number.isNaN(t) ? null : new Date(t).toISOString();
+}
+
+function clampInt(v, min, max, fallback) {
+  const n = parseInt(v, 10);
+  if (Number.isFinite(n)) return Math.min(Math.max(n, min), max);
+  return fallback;
 }
 
 function csvEscape(v) {
-  if (v === null || v === undefined) return "";
-  const s = String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  let s = v == null ? "" : String(v);
+  // Excel friendliness: remove newlines inside fields and escape quotes
+  if (/["\n,]/.test(s)) s = `"${s.replace(/"/g, '""').replace(/\r?\n/g, " ")}"`;
+  return s;
 }
 
-function parseDate(d) {
-  // Accept YYYY-MM-DD only
-  if (!d) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
-  return d;
+function rowsToCsv(rows) {
+  const header = [
+    "id",
+    "uid",
+    "label",
+    "ts",
+    "passage_key",
+    "part_index",
+    "text",
+    "acc",
+    "flu",
+    "comp",
+    "pron",
+  ];
+  const lines = [header.join(",")];
+
+  for (const r of rows) {
+    const s = r.summary || {};
+    lines.push(
+      [
+        r.id,
+        r.uid,
+        r.label || "",
+        r.ts,
+        r.passage_key || "",
+        r.part_index ?? "",
+        r.text || "",
+        s.acc ?? "",
+        s.flu ?? "",
+        s.comp ?? "",
+        s.pron ?? "",
+      ]
+        .map(csvEscape)
+        .join(",")
+    );
+  }
+
+  // Prepend BOM for Excel
+  return "\ufeff" + lines.join("\r\n");
 }
 
 export default async function handler(req, res) {
-  try {
-    // ---- Auth -------------------------------------------------------------
-    const token =
-      req.query.token ||
-      req.headers["x-admin-token"] ||
-      (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  res.setHeader("Cache-Control", "no-store");
 
-    if (!token || token !== process.env.ADMIN_TOKEN) {
-      return bad(res, 401, "unauthorized");
+  try {
+    const q = req.method === "GET" ? req.query : req.body;
+
+    // --- Token: header first, then query (URL)
+    const token =
+      (req.headers["x-admin-token"] || "").toString().trim() ||
+      (q.token || "").toString().trim();
+    const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
+
+    if (!expected || token !== expected) {
+      return res.status(401).json({ error: "unauthorized" });
     }
 
-    // ---- Inputs -----------------------------------------------------------
-    const uid = (req.query.uid || "").trim();
-    const from = parseDate(req.query.from);
-    const to = parseDate(req.query.to);
-    const limit = Math.max(
-      1,
-      Math.min(10000, parseInt(req.query.limit || "500", 10) || 500)
-    );
+    // --- Inputs
+    const uid = q.uid ? String(q.uid) : null;
+    const limit = clampInt(q.limit, 1, 2000, 500);
+    const fromIso = parseISO(q.from);
+    // make "to" exclusive end-of-day if date supplied
+    const toIso = q.to
+      ? new Date(new Date(q.to).getTime() + 24 * 3600 * 1000).toISOString()
+      : null;
 
-    let passages = [];
-    if (req.query.passages) {
-      passages = String(req.query.passages)
+    // passages filter
+    let passages = null;
+    if (q.passages) {
+      const list = String(q.passages)
         .split(",")
         .map((s) => s.trim())
-        .filter(Boolean);
+        .filter(Boolean)
+        .filter((p) => ALLOWED_PASSAGES.has(p));
+      if (list.length) passages = list;
     }
 
-    // ---- Build SQL --------------------------------------------------------
-    const where = [];
+    // --- Build SQL safely
     const params = [];
+    const where = [];
 
     if (uid) {
       params.push(uid);
       where.push(`a.uid = $${params.length}`);
     }
-    if (from) {
-      params.push(from);
-      where.push(`a.ts >= $${params.length}::date`);
+    if (fromIso) {
+      params.push(fromIso);
+      where.push(`a.ts >= $${params.length}`);
     }
-    if (to) {
-      // inclusive end-of-day: < (to + 1 day)
-      params.push(to);
-      where.push(`a.ts < ($${params.length}::date + interval '1 day')`);
+    if (toIso) {
+      params.push(toIso);
+      where.push(`a.ts < $${params.length}`);
     }
-    if (passages.length) {
+    if (passages) {
       params.push(passages);
-      where.push(`a.passage_key = ANY($${params.length}::text[])`);
+      where.push(`a.passage_key = ANY($${params.length})`);
     }
 
-    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-    // Optional label table (don't fail if it doesn't exist)
-    const hasLabels =
-      (
-        await pool.query(
-          "select to_regclass('public.lux_user_labels') as reg"
-        )
-      ).rows?.[0]?.reg !== null;
-
-    params.push(limit);
-    const limitPlaceholder = `$${params.length}`;
-
-    const baseSelect = `
+    let sql = `
       SELECT
         a.id,
         a.uid,
@@ -106,59 +149,35 @@ export default async function handler(req, res) {
         a.passage_key,
         a.part_index,
         a.text,
-        a.summary
-        ${hasLabels ? ", l.label" : ""}
+        a.summary,
+        COALESCE(l.label, '') AS label
       FROM public.lux_attempts a
-      ${hasLabels ? "LEFT JOIN public.lux_user_labels l ON l.uid = a.uid" : ""}
-      ${whereSql}
-      ORDER BY a.ts DESC
-      LIMIT ${limitPlaceholder}
+      LEFT JOIN public.lux_user_labels l ON l.uid = a.uid
     `;
+    if (where.length) sql += ` WHERE ${where.join(" AND ")} `;
+    params.push(limit);
+    sql += ` ORDER BY a.ts DESC LIMIT $${params.length}`;
 
-    const { rows } = await pool.query(baseSelect, params);
+    // --- Query
+    const { rows } = await pool.query(sql, params);
 
-    // ---- CSV or JSON ------------------------------------------------------
-    if (String(req.query.format).toLowerCase() === "csv") {
-      // Shape: id,uid,label,ts,passage_key,part_index,text,acc,flu,comp,pron
-      const header =
-        "id,uid,label,ts,passage_key,part_index,text,acc,flu,comp,pron\n";
-
-      const body = rows
-        .map((r) => {
-          const s = r.summary || {};
-          const line = [
-            csvEscape(r.id),
-            csvEscape(r.uid),
-            csvEscape(r.label || ""),
-            csvEscape(r.ts instanceof Date ? r.ts.toISOString() : r.ts),
-            csvEscape(r.passage_key),
-            csvEscape(r.part_index),
-            csvEscape(r.text),
-            csvEscape(s.acc),
-            csvEscape(s.flu),
-            csvEscape(s.comp),
-            csvEscape(s.pron),
-          ].join(",");
-          return line;
-        })
-        .join("\n");
-
-      // UTF-8 BOM to make Excel happy
-      const csv = "\uFEFF" + header + body;
-
+    // --- CSV or JSON
+    if (String(q.format).toLowerCase() === "csv") {
+      const csv = rowsToCsv(rows);
       res.setHeader("Content-Type", "text/csv; charset=utf-8");
       res.setHeader(
         "Content-Disposition",
-        "attachment; filename=\"lux_attempts.csv\""
+        'attachment; filename="lux_attempts.csv"'
       );
-      res.status(200).send(csv);
-      return;
+      return res.status(200).send(csv);
     }
 
-    // JSON (default)
-    res.status(200).json({ rows });
+    return res.status(200).json({ rows });
   } catch (err) {
     console.error("admin-recent error:", err);
-    bad(res, 500, "server_error");
+    // Never crash the function—always return JSON
+    return res
+      .status(500)
+      .json({ error: "server_error", detail: String(err?.message || err) });
   }
 }
