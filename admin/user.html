@@ -521,6 +521,16 @@
   updateCsvHref();
   if (uidEl.value) loadData();
 })();
+  <script>
+  // --- Token bootstrap: prefer ?token=... when present, store in session
+  (function () {
+    const qs = new URLSearchParams(location.search);
+    const t = qs.get('token');
+    if (t) sessionStorage.setItem('ADMIN_TOKEN', t);
+  })();
+  // ...rest of the existing script follows...
+</script>
+
 </script>
 </body>
 </html>
