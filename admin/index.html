@@ -2,97 +2,235 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>LUX Attempts (admin)</title>
+  <title>Attempts (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 18px; }
-    h1 { margin: 0 0 10px; }
-    .bar { display:flex; gap:10px; align-items:center; margin: 8px 0 16px; }
-    input[type="number"]{ width:90px; padding:6px; }
-    button, a.btn{ padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#fff; text-decoration:none; }
-    table{ border-collapse: collapse; width:100%; }
-    th, td{ border:1px solid #ddd; padding:8px; vertical-align: top; }
-    th{ background:#f5f7fb; position:sticky; top:0; }
-    td.text{ max-width: 520px; }
+    :root{ --gap:10px; }
+    *{ box-sizing:border-box }
+    body{ font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; color:#111 }
+    h1{ margin:0 0 14px }
+    .bar,.row{ display:flex; flex-wrap:wrap; align-items:center; gap:10px }
+    .bar{ margin-bottom:10px }
+    input[type="text"], input[type="number"], input[type="date"]{
+      padding:8px; border:1px solid #ccc; border-radius:8px; height:36px;
+    }
+    button, a.btn{
+      padding:8px 12px; border:1px solid #ccc; border-radius:8px; background:#fff; cursor:pointer;
+      text-decoration:none; display:inline-flex; align-items:center; height:36px;
+    }
+    small{ color:#666; margin-left:auto }
+    .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
+    .pill{ display:inline-block; min-width:92px; padding:8px 10px; border:1px solid #ddd; border-radius:10px; background:#fafafa }
+    .pill b{ display:block; font-size:18px; }
+
+    table{ border-collapse:collapse; width:100%; margin-top:10px; font-size:13px }
+    th,td{ border:1px solid #e7e7e7; padding:8px; vertical-align:top }
+    th{ background:#f7f9fc; position:sticky; top:0; z-index:1 }
+    td.text{ max-width:600px }
     .muted{ color:#666 }
-    small.mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .uid{ font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px }
   </style>
 </head>
 <body>
   <h1>Attempts (admin)</h1>
 
   <div class="bar">
-    <label>Limit <input id="limit" type="number" value="200" min="1" max="1000"></label>
-    <button id="reload">Reload</button>
-    <a id="csv" class="btn" target="_blank">Download CSV</a>
-    <span class="muted">Token is stored in this tab’s session only.</span>
+    <label>Limit <input id="limit" type="number" value="200" min="1" max="20000" style="width:96px"></label>
+    <button id="reloadBtn">Reload</button>
+    <a id="csvBtn" class="btn" target="_blank" rel="noopener">Download CSV</a>
+    <button id="copyBtn">Copy link</button>
+    <small>Token is stored in this tab’s session only.</small>
+  </div>
+
+  <div class="row">
+    <label>From <input id="from" type="date"></label>
+    <label>To <input id="to" type="date"></label>
+
+    <div class="checks">
+      <span>Passages:</span>
+      <label><input class="pass" type="checkbox" value="grandfather" checked> grandfather</label>
+      <label><input class="pass" type="checkbox" value="rainbow" checked> rainbow</label>
+      <label><input class="pass" type="checkbox" value="sentences" checked> sentences</label>
+      <label><input class="pass" type="checkbox" value="wordList" checked> wordList</label>
+    </div>
+
+    <label style="margin-left:auto">UID filter
+      <input id="uidFilter" type="text" placeholder="full or partial UID" style="width:280px">
+    </label>
+  </div>
+
+  <div class="row" style="gap:16px; margin:6px 0 2px">
+    <div class="pill"><div class="muted">Attempts</div><b id="statCount">0</b></div>
   </div>
 
   <table id="grid">
     <thead>
       <tr>
-        <th>Time (local)</th>
-        <th>User</th>
+        <th style="width:170px">Time (local)</th>
+        <th style="width:240px">User</th>
         <th>Passage</th>
         <th>Part</th>
+        <th>Acc</th>
+        <th>Flu</th>
+        <th>Comp</th>
+        <th>Pron</th>
         <th class="text">Text</th>
-        <th>Acc</th><th>Flu</th><th>Comp</th><th>Pron</th>
       </tr>
     </thead>
     <tbody></tbody>
   </table>
 
-<script type="module">
-const qs = new URLSearchParams(location.search);
-let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
-if (!TOKEN) {
-  TOKEN = prompt('Enter ADMIN_TOKEN');
-  if (!TOKEN) throw new Error('No token');
-  sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
-}
-
-const limitEl = document.getElementById('limit');
-const csvEl   = document.getElementById('csv');
-const tbody   = document.querySelector('#grid tbody');
-
-const esc = (s) => (s || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-
-async function load() {
-  const limit = Number(limitEl.value) || 200;
-  csvEl.href = `/api/admin-resend?token=${encodeURIComponent(TOKEN)}&format=csv&limit=${limit}`;
-
-  const url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&limit=${limit}`;
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) {
-    tbody.innerHTML = `<tr><td colspan="9">Error: ${r.status}</td></tr>`;
-    return;
+<script>
+(function(){
+  // ----- token handling -----
+  const qs = new URLSearchParams(location.search);
+  let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
+  if (!TOKEN) {
+    TOKEN = prompt('Enter ADMIN_TOKEN');
+    if (TOKEN) sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
   }
-  const { rows } = await r.json();
-  tbody.innerHTML = '';
-  for (const row of rows) {
-    const when = new Date(row.ts).toLocaleString();
-    const uidLink = `<a href="/admin/user.html?uid=${encodeURIComponent(row.uid)}">${esc(row.uid)}</a>`;
-    const userCell = row.label
-      ? `<strong>${esc(row.label)}</strong><br><small class="muted mono">${uidLink}</small>`
-      : uidLink;
 
-    const s = row.summary || {};
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${when}</td>
-      <td>${userCell}</td>
-      <td>${esc(row.passage_key)}</td>
-      <td>${row.part_index}</td>
-      <td class="text">${esc(row.text)}</td>
-      <td>${s.acc ?? ''}</td>
-      <td>${s.flu ?? ''}</td>
-      <td>${s.comp ?? ''}</td>
-      <td>${s.pron ?? ''}</td>`;
-    tbody.appendChild(tr);
+  // ----- els -----
+  const limitEl = document.getElementById('limit');
+  const fromEl  = document.getElementById('from');
+  const toEl    = document.getElementById('to');
+  const passEls = Array.from(document.querySelectorAll('.pass'));
+  const uidFilterEl = document.getElementById('uidFilter');
+  const reloadBtn = document.getElementById('reloadBtn');
+  const csvBtn  = document.getElementById('csvBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  const statCount = document.getElementById('statCount');
+  const tbody = document.querySelector('#grid tbody');
+
+  // defaults
+  (function init(){
+    limitEl.value = Number(qs.get('limit') || 200);
+    const pad = n=>String(n).padStart(2,'0');
+    const toStr = d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const today = new Date();
+    const fromDefault = new Date(); fromDefault.setDate(fromDefault.getDate()-14);
+    fromEl.value = qs.get('from') || toStr(fromDefault);
+    toEl.value   = qs.get('to')   || toStr(today);
+    uidFilterEl.value = qs.get('uid') || '';
+    const p = qs.get('passages');
+    if (p) {
+      const set = new Set(p.split(',').map(s=>s.trim()));
+      passEls.forEach(el => el.checked = set.has(el.value));
+    }
+    updateCsvHref();
+  })();
+
+  function buildPassagesParam(){ return passEls.filter(e=>e.checked).map(e=>e.value).join(','); }
+  function isLikelyFullUid(s){ return /^[0-9a-f-]{30,}$/i.test(s.trim()); }
+
+  function setQueryString(){
+    const params = new URLSearchParams();
+    params.set('limit', limitEl.value || '200');
+    if (fromEl.value) params.set('from', fromEl.value);
+    if (toEl.value) params.set('to', toEl.value);
+    const passages = buildPassagesParam(); if (passages) params.set('passages', passages);
+    if (uidFilterEl.value) params.set('uid', uidFilterEl.value.trim());
+    history.replaceState(null,'', `${location.pathname}?${params.toString()}`);
   }
-}
-document.getElementById('reload').addEventListener('click', load);
-load();
+
+  function updateCsvHref(){
+    const passages = buildPassagesParam();
+    const uid = uidFilterEl.value.trim();
+    let url = `/api/admin-resend?format=csv&token=${encodeURIComponent(TOKEN)}&limit=${encodeURIComponent(limitEl.value||200)}`;
+    if (fromEl.value) url += `&from=${encodeURIComponent(fromEl.value)}`;
+    if (toEl.value) url += `&to=${encodeURIComponent(toEl.value)}`;
+    if (passages) url += `&passages=${encodeURIComponent(passages)}`;
+    if (isLikelyFullUid(uid)) url += `&uid=${encodeURIComponent(uid)}`;
+    csvBtn.href = url;
+  }
+
+  function copyLink(){
+    setQueryString();
+    navigator.clipboard.writeText(location.href)
+      .then(()=>{ copyBtn.textContent='Copied!'; setTimeout(()=>copyBtn.textContent='Copy link',1000); })
+      .catch(()=>{ copyBtn.textContent='Copy failed'; setTimeout(()=>copyBtn.textContent='Copy link',1200); });
+  }
+
+  function toLocal(iso){ return new Date(iso).toLocaleString(); }
+
+  function render(rows){
+    const filter = uidFilterEl.value.trim().toLowerCase();
+    const filtered = filter && !isLikelyFullUid(filter)
+      ? rows.filter(r => (r.uid||'').toLowerCase().includes(filter))
+      : rows;
+
+    statCount.textContent = filtered.length;
+    tbody.innerHTML = '';
+
+    const passages = buildPassagesParam();
+    const paramsForUser = (uid) => {
+      const u = new URL('/admin/user.html', location.origin);
+      const sp = new URLSearchParams();
+      sp.set('uid', uid);
+      if (fromEl.value) sp.set('from', fromEl.value);
+      if (toEl.value) sp.set('to', toEl.value);
+      if (passages) sp.set('passages', passages);
+      u.search = sp.toString();
+      return u.toString();
+    };
+
+    for (const r of filtered){
+      const s = r.summary || {};
+      const label = r.label ? `${r.label}` : '';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${toLocal(r.ts)}</td>
+        <td>
+          <div>${label ? `<b>${label}</b>` : ''}</div>
+          <div class="uid"><a href="${paramsForUser(r.uid)}">${r.uid}</a></div>
+        </td>
+        <td>${r.passage_key||''}</td>
+        <td>${r.part_index ?? ''}</td>
+        <td>${s.acc ?? ''}</td>
+        <td>${s.flu ?? ''}</td>
+        <td>${s.comp ?? ''}</td>
+        <td>${s.pron ?? ''}</td>
+        <td class="text">${String(r.text||'').replace(/[<>&]/g,c=>({ '<':'&lt;', '>':'&gt;', '&':'&amp;' }[c]))}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function load(){
+    const passages = buildPassagesParam();
+    const uid = uidFilterEl.value.trim();
+
+    let url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&limit=${encodeURIComponent(limitEl.value||200)}`;
+    if (fromEl.value) url += `&from=${encodeURIComponent(fromEl.value)}`;
+    if (toEl.value) url += `&to=${encodeURIComponent(toEl.value)}`;
+    if (passages) url += `&passages=${encodeURIComponent(passages)}`;
+    if (isLikelyFullUid(uid)) url += `&uid=${encodeURIComponent(uid)}`;
+
+    reloadBtn.disabled = true;
+    try{
+      const res = await fetch(url, { cache:'no-store' });
+      const json = await res.json();
+      render(Array.isArray(json?.rows) ? json.rows : []);
+      updateCsvHref();
+      setQueryString();
+    }catch(e){
+      alert('Load failed (check token / network).');
+      console.error(e);
+    }finally{
+      reloadBtn.disabled = false;
+    }
+  }
+
+  // events
+  reloadBtn.addEventListener('click', load);
+  copyBtn.addEventListener('click', copyLink);
+  [limitEl, fromEl, toEl, uidFilterEl, ...passEls].forEach(el=>{
+    el.addEventListener('change', ()=>{ updateCsvHref(); setQueryString(); });
+  });
+
+  // initial load
+  load();
+})();
 </script>
 </body>
 </html>
