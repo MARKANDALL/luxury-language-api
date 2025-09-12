@@ -152,8 +152,7 @@ export default async function handler(req, res) {
         a.summary,
         COALESCE(l.label, '') AS label
       FROM public.lux_attempts a
-      LEFT JOIN public.lux_user_labels l ON l.uid = a.uid
-    `;
+ LEFT JOIN public.lux_user_labels l ON l.uid::text = a.uid    `;
     if (where.length) sql += ` WHERE ${where.join(" AND ")} `;
     params.push(limit);
     sql += ` ORDER BY a.ts DESC LIMIT $${params.length}`;
