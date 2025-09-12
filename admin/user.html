@@ -1,18 +1,21 @@
-<!-- must be first script on the page -->
-<script>
-  (function () {
-    const t = new URLSearchParams(location.search).get('token');
-    if (t) sessionStorage.setItem('ADMIN_TOKEN', t);
-  })();
-</script>
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <title>User Progress (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- 1) Token bootstrap: store ?token=... into sessionStorage (must run before other app code) -->
+  <script>
+    (function () {
+      const t = new URLSearchParams(location.search).get('token');
+      if (t) sessionStorage.setItem('ADMIN_TOKEN', t);
+    })();
+  </script>
+
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
   <style>
     :root{ --gap:10px; }
     *{ box-sizing:border-box }
@@ -203,7 +206,8 @@
     const limit = Number(limitEl.value||500);
     const passages = buildPassagesParam();
     const from = fromEl.value; const to = toEl.value;
-    let url = `/api/admin-resend?format=csv&limit=${encodeURIComponent(limit)}&token=${encodeURIComponent(TOKEN)}`;
+    // ✅ fixed: correct endpoint + proper query string
+    let url = `/api/admin-recent?format=csv&limit=${encodeURIComponent(limit)}&token=${encodeURIComponent(TOKEN)}`;
     if (uid) url += `&uid=${encodeURIComponent(uid)}`;
     if (from) url += `&from=${encodeURIComponent(from)}`;
     if (to) url += `&to=${encodeURIComponent(to)}`;
@@ -242,7 +246,6 @@
   function computeDailyAndSMA(rows, windowDays) {
     // rows are newest->oldest from API; sort ascending by ts
     const sorted = rows.slice().sort((a,b)=> new Date(a.ts) - new Date(b.ts));
-    // daily average of pron
     const byDay = new Map();
     for (const r of sorted) {
       const p = Number(r?.summary?.pron);
@@ -258,8 +261,6 @@
       value: byDay.get(d).reduce((a,b)=>a+b,0)/byDay.get(d).length
     }));
     if (!windowDays || windowDays <= 0) return {daily, sma:[]};
-
-    // simple moving average over the daily values
     const sma = [];
     for (let i=0;i<daily.length;i++){
       const start = Math.max(0, i - (windowDays - 1));
@@ -271,52 +272,25 @@
   }
 
   function renderChart(rows) {
-    // Build datasets
     const smoothDays = Number(smoothEl.value||0);
     const {daily, sma} = computeDailyAndSMA(rows, smoothDays);
-
     const labels = daily.map(d => d.date);
     const pronSeries = daily.map(d => Number(d.value.toFixed(1)));
     const smaSeries = sma.map(d => Number(d.value.toFixed(1)));
-
     const data = {
       labels,
       datasets: [
-        {
-          label: 'Pron score (daily avg)',
-          data: pronSeries,
-          borderWidth: 2,
-          pointRadius: 3,
-          tension: 0.2
-        },
-        {
-          label: smoothDays ? `${smoothDays}-day avg` : 'moving avg (off)',
-          data: smaSeries,
-          borderWidth: 2,
-          pointRadius: 0,
-          borderDash: smoothDays ? [] : [4,4],
-          tension: 0.2
-        }
+        { label: 'Pron score (daily avg)', data: pronSeries, borderWidth: 2, pointRadius: 3, tension: 0.2 },
+        { label: smoothDays ? `${smoothDays}-day avg` : 'moving avg (off)', data: smaSeries, borderWidth: 2, pointRadius: 0, borderDash: smoothDays ? [] : [4,4], tension: 0.2 }
       ]
     };
-
     const options = {
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {
-        y: { min: 0, max: 100, ticks: { stepSize: 10 } }
-      },
-      plugins: {
-        legend: { display: true, position: 'top' },
-        tooltip: { intersect: false, mode: 'index' }
-      }
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { min: 0, max: 100, ticks: { stepSize: 10 } } },
+      plugins: { legend: { display: true, position: 'top' }, tooltip: { intersect: false, mode: 'index' } }
     };
-
     if (lineChart) lineChart.destroy();
-    lineChart = new Chart(chartCanvas.getContext('2d'), {
-      type: 'line',
-      data, options
-    });
+    lineChart = new Chart(chartCanvas.getContext('2d'), { type: 'line', data, options });
   }
 
   function renderTable(rows) {
@@ -365,14 +339,13 @@
     }
     const top = (m) => [...m.entries()].map(([k,v])=>({k, n:v.n, avg:v.sum/v.n}))
                  .sort((a,b)=>b.n-a.n).slice(0,10);
-
-    const phBody = document.querySelector('#troublePh tbody');
-    const wdBody = document.querySelector('#troubleWord tbody');
-    phBody.innerHTML = top(ph).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
-    wdBody.innerHTML = top(wd).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
+    document.querySelector('#troublePh tbody').innerHTML =
+      top(ph).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
+    document.querySelector('#troubleWord tbody').innerHTML =
+      top(wd).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
   }
 
-  // CSV export of trouble items (phoneme+word, counts, avg, min, last_seen, example)
+  // CSV export of trouble items; include BOM for Excel
   function downloadTroubleCsv(rows, uid) {
     const agg = new Map();
     for (const row of rows) {
@@ -396,35 +369,28 @@
       }
     }
 
-    const items = [...agg.values()].map(x => ({
-      ...x,
-      avg: x.count ? x.sum / x.count : NaN
-    })).sort((a,b)=>{
-      const aa = (Number.isFinite(a.avg) ? a.avg : 9999);
-      const bb = (Number.isFinite(b.avg) ? b.avg : 9999);
-      if (aa !== bb) return aa - bb;
-      return (b.count||0) - (a.count||0);
-    });
+    const items = [...agg.values()].map(x => ({ ...x, avg: x.count ? x.sum / x.count : NaN }))
+      .sort((a,b)=>{
+        const aa = (Number.isFinite(a.avg) ? a.avg : 9999);
+        const bb = (Number.isFinite(b.avg) ? b.avg : 9999);
+        if (aa !== bb) return aa - bb;
+        return (b.count||0) - (a.count||0);
+      });
 
     const esc = s => {
       const str = String(s ?? '');
       return /[",\n]/.test(str) ? `"${str.replace(/"/g,'""')}"` : str;
     };
 
-    const header = [
-      'phoneme','word','err','times','avg_score','min_score','last_seen_local','example_text'
-    ];
+    const header = ['phoneme','word','err','times','avg_score','min_score','last_seen_local','example_text'];
     const lines = [header.join(',')];
     for (const x of items) {
-      lines.push([
-        esc(x.phoneme), esc(x.word), esc(x.err),
+      lines.push([ esc(x.phoneme), esc(x.word), esc(x.err),
         x.count, (Number.isFinite(x.avg)? x.avg.toFixed(1):''), (Number.isFinite(x.min)? x.min.toFixed(0):''),
-        esc(new Date(x.last_ts).toLocaleString()),
-        esc(x.example)
-      ].join(','));
+        esc(new Date(x.last_ts).toLocaleString()), esc(x.example) ].join(','));
     }
 
-    const csv = lines.join('\n');
+    const csv = '\ufeff' + lines.join('\n'); // BOM
     const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     const dt = new Date(); const pad=n=>String(n).padStart(2,'0');
@@ -476,9 +442,8 @@
       const r = await fetch(url, { cache:'no-store' });
       const json = await r.json();
       const rows = Array.isArray(json?.rows) ? json.rows : [];
-      currentRows = rows; // for trouble CSV
+      currentRows = rows;
 
-      // pick up server-provided label (if any)
       const first = rows[0];
       if (first && first.label && !labelInput.value) labelInput.value = first.label;
 
@@ -487,7 +452,6 @@
       renderTrouble(rows);
       renderTable(rows);
 
-      // update CSV link + URL params
       updateCsvHref();
       setQueryStringForState();
     } catch(e) {
@@ -528,16 +492,6 @@
   updateCsvHref();
   if (uidEl.value) loadData();
 })();
-  <script>
-  // --- Token bootstrap: prefer ?token=... when present, store in session
-  (function () {
-    const qs = new URLSearchParams(location.search);
-    const t = qs.get('token');
-    if (t) sessionStorage.setItem('ADMIN_TOKEN', t);
-  })();
-  // ...rest of the existing script follows...
-</script>
-
 </script>
 </body>
 </html>
