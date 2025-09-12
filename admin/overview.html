@@ -1,3 +1,10 @@
+<!-- must be first script on the page -->
+<script>
+  (function () {
+    const t = new URLSearchParams(location.search).get('token');
+    if (t) sessionStorage.setItem('ADMIN_TOKEN', t);
+  })();
+</script>
 <!doctype html>
 <html lang="en">
 <head>
