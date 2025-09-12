@@ -46,6 +46,7 @@
     <label>Limit <input id="limit" type="number" value="500" min="1" max="20000" style="width:96px"></label>
     <button id="loadBtn">Load</button>
     <a id="csvBtn" class="btn" target="_blank" rel="noopener">Download CSV</a>
+    <button id="troubleCsvBtn">Download trouble CSV</button>
     <button id="copyBtn">Copy link</button>
     <small>Token is stored in this tab’s session only.</small>
   </div>
@@ -156,7 +157,9 @@
   const statAvg = document.getElementById('statAvg');
   const tbody  = document.querySelector('#grid tbody');
   const chartCanvas = document.getElementById('chart');
+  const troubleBtn = document.getElementById('troubleCsvBtn');
 
+  // Defaults from URL or sensible values
   uidEl.value = qs.get('uid') || '';
   limitEl.value = Number(qs.get('limit') || 500);
   (function initDates(){
@@ -169,13 +172,16 @@
   })();
   (function initPassages(){
     const p = qs.get('passages');
-    if (!p) return;
-    const set = new Set(p.split(',').map(s=>s.trim()));
-    passEls.forEach(el => el.checked = set.has(el.value));
+    if (p) {
+      const set = new Set(p.split(',').map(s=>s.trim()));
+      passEls.forEach(el => el.checked = set.has(el.value));
+    }
   })();
   smoothEl.value = qs.get('smooth') ?? '7';
 
+  // State
   let lineChart = null;
+  let currentRows = [];
 
   // -------- Helpers ----------
   const dateOnly = (iso)=>iso.slice(0,10);
@@ -227,7 +233,9 @@
   }
 
   function computeDailyAndSMA(rows, windowDays) {
+    // rows are newest->oldest from API; sort ascending by ts
     const sorted = rows.slice().sort((a,b)=> new Date(a.ts) - new Date(b.ts));
+    // daily average of pron
     const byDay = new Map();
     for (const r of sorted) {
       const p = Number(r?.summary?.pron);
@@ -244,19 +252,22 @@
     }));
     if (!windowDays || windowDays <= 0) return {daily, sma:[]};
 
+    // simple moving average over the daily values
     const sma = [];
     for (let i=0;i<daily.length;i++){
       const start = Math.max(0, i - (windowDays - 1));
-      let sum = 0, cnt = 0;
-      for (let j=start;j<=i;j++){ sum += daily[j].value; cnt++; }
-      sma.push({ date: daily[i].date, value: sum / cnt });
+      let sum = 0, count = 0;
+      for (let j=start;j<=i;j++){ sum += daily[j].value; count++; }
+      sma.push({ date: daily[i].date, value: sum / count });
     }
     return {daily, sma};
   }
 
   function renderChart(rows) {
+    // Build datasets
     const smoothDays = Number(smoothEl.value||0);
     const {daily, sma} = computeDailyAndSMA(rows, smoothDays);
+
     const labels = daily.map(d => d.date);
     const pronSeries = daily.map(d => Number(d.value.toFixed(1)));
     const smaSeries = sma.map(d => Number(d.value.toFixed(1)));
@@ -264,18 +275,41 @@
     const data = {
       labels,
       datasets: [
-        { label:'Pron score (daily avg)', data: pronSeries, borderWidth:2, pointRadius:3, tension:0.2 },
-        { label: smoothDays ? `${smoothDays}-day avg` : 'moving avg (off)', data: smaSeries, borderWidth:2, pointRadius:0, borderDash: smoothDays?[]:[4,4], tension:0.2 }
+        {
+          label: 'Pron score (daily avg)',
+          data: pronSeries,
+          borderWidth: 2,
+          pointRadius: 3,
+          tension: 0.2
+        },
+        {
+          label: smoothDays ? `${smoothDays}-day avg` : 'moving avg (off)',
+          data: smaSeries,
+          borderWidth: 2,
+          pointRadius: 0,
+          borderDash: smoothDays ? [] : [4,4],
+          tension: 0.2
+        }
       ]
     };
+
     const options = {
-      responsive:true, maintainAspectRatio:false,
-      scales:{ y:{ min:0, max:100, ticks:{ stepSize:10 } } },
-      plugins:{ legend:{ display:true, position:'top' }, tooltip:{ intersect:false, mode:'index' } }
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        y: { min: 0, max: 100, ticks: { stepSize: 10 } }
+      },
+      plugins: {
+        legend: { display: true, position: 'top' },
+        tooltip: { intersect: false, mode: 'index' }
+      }
     };
 
     if (lineChart) lineChart.destroy();
-    lineChart = new Chart(chartCanvas.getContext('2d'), { type:'line', data, options });
+    lineChart = new Chart(chartCanvas.getContext('2d'), {
+      type: 'line',
+      data, options
+    });
   }
 
   function renderTable(rows) {
@@ -331,6 +365,71 @@
     wdBody.innerHTML = top(wd).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
   }
 
+  // CSV export of trouble items (phoneme+word, counts, avg, min, last_seen, example)
+  function downloadTroubleCsv(rows, uid) {
+    const agg = new Map();
+    for (const row of rows) {
+      const lows = row?.summary?.lows;
+      if (!Array.isArray(lows)) continue;
+      for (const L of lows) {
+        const phoneme = (L.phoneme || '').trim();
+        const word    = (L.word || '').trim();
+        const score   = Number(L.score);
+        const err     = (L.err || '').trim();
+        const key = `${phoneme}::${word}::${err}`;
+        let a = agg.get(key);
+        if (!a) a = { phoneme, word, err, count:0, sum:0, min:Infinity, last_ts:null, example:'' };
+        a.count++;
+        if (Number.isFinite(score)) { a.sum += score; if (score < a.min) a.min = score; }
+        if (!a.last_ts || new Date(row.ts) > new Date(a.last_ts)) {
+          a.last_ts = row.ts;
+          a.example = row.text || '';
+        }
+        agg.set(key, a);
+      }
+    }
+
+    const items = [...agg.values()].map(x => ({
+      ...x,
+      avg: x.count ? x.sum / x.count : NaN
+    })).sort((a,b)=>{
+      const aa = (Number.isFinite(a.avg) ? a.avg : 9999);
+      const bb = (Number.isFinite(b.avg) ? b.avg : 9999);
+      if (aa !== bb) return aa - bb;
+      return (b.count||0) - (a.count||0);
+    });
+
+    const esc = s => {
+      const str = String(s ?? '');
+      return /[",\n]/.test(str) ? `"${str.replace(/"/g,'""')}"` : str;
+    };
+
+    const header = [
+      'phoneme','word','err','times','avg_score','min_score','last_seen_local','example_text'
+    ];
+    const lines = [header.join(',')];
+    for (const x of items) {
+      lines.push([
+        esc(x.phoneme), esc(x.word), esc(x.err),
+        x.count, (Number.isFinite(x.avg)? x.avg.toFixed(1):''), (Number.isFinite(x.min)? x.min.toFixed(0):''),
+        esc(new Date(x.last_ts).toLocaleString()),
+        esc(x.example)
+      ].join(','));
+    }
+
+    const csv = lines.join('\n');
+    const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    const dt = new Date(); const pad=n=>String(n).padStart(2,'0');
+    const stamp = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
+    a.href = URL.createObjectURL(blob);
+    a.download = `trouble_${uid || 'user'}_${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }
+
   async function saveLabel() {
     const uid = uidEl.value.trim();
     const label = labelInput.value.trim();
@@ -370,8 +469,9 @@
       const r = await fetch(url, { cache:'no-store' });
       const json = await r.json();
       const rows = Array.isArray(json?.rows) ? json.rows : [];
+      currentRows = rows; // for trouble CSV
 
-      // Grab server label (if present) the first time
+      // pick up server-provided label (if any)
       const first = rows[0];
       if (first && first.label && !labelInput.value) labelInput.value = first.label;
 
@@ -380,6 +480,7 @@
       renderTrouble(rows);
       renderTable(rows);
 
+      // update CSV link + URL params
       updateCsvHref();
       setQueryStringForState();
     } catch(e) {
@@ -407,9 +508,16 @@
   clearBtn.addEventListener('click', () => { clearFilters(); loadData(); });
   saveBtn.addEventListener('click', saveLabel);
   copyBtn.addEventListener('click', copyLinkToClipboard);
+  troubleBtn.addEventListener('click', ()=>{
+    const uid = uidEl.value.trim();
+    if (!currentRows.length) { alert('Load the user first.'); return; }
+    downloadTroubleCsv(currentRows, uid);
+  });
+
+  // Also update CSV link any time inputs change
   [uidEl, limitEl, fromEl, toEl, smoothEl, ...passEls].forEach(el => el.addEventListener('change', updateCsvHref));
 
-  // Auto-load if a uid is present
+  // If we were navigated from /admin/ with a uid, load immediately
   updateCsvHref();
   if (uidEl.value) loadData();
 })();
