@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <title>User Progress (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Chart.js (CDN) -->
+  <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
     :root{ --gap:10px; }
@@ -23,8 +23,11 @@
     button:disabled{ opacity:.6; cursor:default }
     .pill{ display:inline-block; min-width:92px; padding:8px 10px; border:1px solid #ddd; border-radius:10px; background:#fafafa }
     .pill b{ display:block; font-size:18px; }
-    #chartWrap{ margin:16px 0 8px }
+    #chartWrap{ margin:16px 0 12px }
     #chart{ width:100%; max-width:1100px; height:360px }
+    .row{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 }
+    .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
+
     table{ border-collapse:collapse; width:100%; margin-top:10px; font-size:13px }
     th,td{ border:1px solid #e7e7e7; padding:8px; vertical-align:top }
     th{ background:#f7f9fc; position:sticky; top:0; z-index:1 }
@@ -32,17 +35,15 @@
     .muted{ color:#666 }
     .ok{ color:#0a7; }
     .err{ color:#c00; }
-    .spacer{ flex:1 }
-    .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
-    .row{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 }
   </style>
 </head>
 <body>
   <h1>User Progress (admin)</h1>
 
+  <!-- Top controls -->
   <div class="bar">
     <label>UID <input id="uid" type="text" placeholder="user id" style="width:380px"></label>
-    <label>Limit <input id="limit" type="number" value="500" min="1" max="2000" style="width:96px"></label>
+    <label>Limit <input id="limit" type="number" value="500" min="1" max="20000" style="width:96px"></label>
     <button id="loadBtn">Load</button>
     <a id="csvBtn" class="btn" target="_blank" rel="noopener">Download CSV</a>
     <button id="copyBtn">Copy link</button>
@@ -80,15 +81,36 @@
     <button id="clearBtn">Clear</button>
   </div>
 
+  <!-- Quick stats -->
   <div class="row" style="gap:16px">
     <div class="pill"><div class="muted">Attempts</div><b id="statAttempts">0</b></div>
     <div class="pill"><div class="muted">Avg Pron</div><b id="statAvg">–</b></div>
   </div>
 
+  <!-- Chart -->
   <div id="chartWrap">
     <canvas id="chart"></canvas>
   </div>
 
+  <!-- Trouble tables -->
+  <div class="row" style="gap:16px; margin-top:8px">
+    <div style="max-width:520px; flex:1">
+      <h3 style="margin:8px 0 6px">Trouble sounds</h3>
+      <table id="troublePh">
+        <thead><tr><th>Phoneme</th><th>Count</th><th>Avg score</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div style="max-width:520px; flex:1">
+      <h3 style="margin:8px 0 6px">Trouble words</h3>
+      <table id="troubleWord">
+        <thead><tr><th>Word</th><th>Count</th><th>Avg score</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Attempts grid -->
   <table id="grid">
     <thead>
       <tr>
@@ -107,7 +129,7 @@
 
 <script>
 (function () {
-  // -------------------- TOKEN --------------------
+  // -------- TOKEN ----------
   const qs = new URLSearchParams(location.search);
   let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
   if (!TOKEN) {
@@ -115,7 +137,7 @@
     if (TOKEN) sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
   }
 
-  // -------------------- Elements --------------------
+  // -------- Elements ----------
   const uidEl   = document.getElementById('uid');
   const limitEl = document.getElementById('limit');
   const fromEl  = document.getElementById('from');
@@ -135,18 +157,15 @@
   const tbody  = document.querySelector('#grid tbody');
   const chartCanvas = document.getElementById('chart');
 
-  // Defaults from URL or sensible values
   uidEl.value = qs.get('uid') || '';
   limitEl.value = Number(qs.get('limit') || 500);
   (function initDates(){
-    const today = new Date();
     const pad = (n)=>String(n).padStart(2,'0');
     const toStr = (d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-    const to = qs.get('to') || toStr(today);
-    const d = new Date(); d.setDate(d.getDate() - 14);
-    const from = qs.get('from') || toStr(d);
-    fromEl.value = from;
-    toEl.value = to;
+    const today = new Date();
+    const fromDefault = new Date(); fromDefault.setDate(fromDefault.getDate()-14);
+    fromEl.value = qs.get('from') || toStr(fromDefault);
+    toEl.value   = qs.get('to')   || toStr(today);
   })();
   (function initPassages(){
     const p = qs.get('passages');
@@ -156,16 +175,14 @@
   })();
   smoothEl.value = qs.get('smooth') ?? '7';
 
-  // Chart instance
   let lineChart = null;
 
-  // -------------------- Helpers --------------------
+  // -------- Helpers ----------
   const dateOnly = (iso)=>iso.slice(0,10);
   const toLocal  = (iso)=> new Date(iso).toLocaleString();
 
   function buildPassagesParam() {
-    const vals = passEls.filter(e => e.checked).map(e => e.value);
-    return vals.join(',');
+    return passEls.filter(e => e.checked).map(e => e.value).join(',');
   }
 
   function updateCsvHref() {
@@ -183,7 +200,6 @@
 
   function copyLinkToClipboard() {
     const url = new URL(location.href);
-    // Keep filters but DO NOT include the token in the sharable link
     const params = new URLSearchParams();
     if (uidEl.value) params.set('uid', uidEl.value);
     if (fromEl.value) params.set('from', fromEl.value);
@@ -211,13 +227,10 @@
   }
 
   function computeDailyAndSMA(rows, windowDays) {
-    // rows are newest->oldest from API; sort ascending by ts
     const sorted = rows.slice().sort((a,b)=> new Date(a.ts) - new Date(b.ts));
-    // daily average of pron
     const byDay = new Map();
     for (const r of sorted) {
-      const s = r.summary || {};
-      const p = Number(s.pron);
+      const p = Number(r?.summary?.pron);
       if (!Number.isFinite(p)) continue;
       const d = dateOnly(r.ts);
       const arr = byDay.get(d) || [];
@@ -231,65 +244,38 @@
     }));
     if (!windowDays || windowDays <= 0) return {daily, sma:[]};
 
-    // simple moving average over the daily values
     const sma = [];
     for (let i=0;i<daily.length;i++){
       const start = Math.max(0, i - (windowDays - 1));
-      let sum = 0, count = 0;
-      for (let j=start;j<=i;j++){ sum += daily[j].value; count++; }
-      sma.push({ date: daily[i].date, value: sum / count });
+      let sum = 0, cnt = 0;
+      for (let j=start;j<=i;j++){ sum += daily[j].value; cnt++; }
+      sma.push({ date: daily[i].date, value: sum / cnt });
     }
     return {daily, sma};
   }
 
   function renderChart(rows) {
-    // Build datasets
     const smoothDays = Number(smoothEl.value||0);
     const {daily, sma} = computeDailyAndSMA(rows, smoothDays);
-
     const labels = daily.map(d => d.date);
     const pronSeries = daily.map(d => Number(d.value.toFixed(1)));
-    const smaLabels = sma.map(d => d.date);
     const smaSeries = sma.map(d => Number(d.value.toFixed(1)));
 
     const data = {
       labels,
       datasets: [
-        {
-          label: 'Pron score (daily avg)',
-          data: pronSeries,
-          borderWidth: 2,
-          pointRadius: 3,
-          tension: 0.2
-        },
-        {
-          label: smoothDays ? `${smoothDays}-day avg` : 'moving avg (off)',
-          data: smaSeries,
-          borderWidth: 2,
-          pointRadius: 0,
-          borderDash: smoothDays ? [] : [4,4],
-          tension: 0.2
-        }
+        { label:'Pron score (daily avg)', data: pronSeries, borderWidth:2, pointRadius:3, tension:0.2 },
+        { label: smoothDays ? `${smoothDays}-day avg` : 'moving avg (off)', data: smaSeries, borderWidth:2, pointRadius:0, borderDash: smoothDays?[]:[4,4], tension:0.2 }
       ]
     };
-
     const options = {
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {
-        y: { min: 0, max: 100, ticks: { stepSize: 10 } }
-      },
-      plugins: {
-        legend: { display: true, position: 'top' },
-        tooltip: { intersect: false, mode: 'index' }
-      }
+      responsive:true, maintainAspectRatio:false,
+      scales:{ y:{ min:0, max:100, ticks:{ stepSize:10 } } },
+      plugins:{ legend:{ display:true, position:'top' }, tooltip:{ intersect:false, mode:'index' } }
     };
 
     if (lineChart) lineChart.destroy();
-    lineChart = new Chart(chartCanvas.getContext('2d'), {
-      type: 'line',
-      data, options
-    });
+    lineChart = new Chart(chartCanvas.getContext('2d'), { type:'line', data, options });
   }
 
   function renderTable(rows) {
@@ -317,18 +303,44 @@
     statAvg.textContent = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) : '–';
   }
 
+  // Trouble aggregations
+  function renderTrouble(rows){
+    const ph = new Map(), wd = new Map();
+    for (const r of rows){
+      const lows = r?.summary?.lows;
+      if (!Array.isArray(lows)) continue;
+      for (const L of lows){
+        const score = Number(L.score);
+        if (!Number.isFinite(score)) continue;
+        if (L.phoneme){
+          const a = ph.get(L.phoneme) || {sum:0, n:0};
+          a.sum += score; a.n++; ph.set(L.phoneme, a);
+        }
+        if (L.word){
+          const a = wd.get(L.word) || {sum:0, n:0};
+          a.sum += score; a.n++; wd.set(L.word, a);
+        }
+      }
+    }
+    const top = (m) => [...m.entries()].map(([k,v])=>({k, n:v.n, avg:v.sum/v.n}))
+                 .sort((a,b)=>b.n-a.n).slice(0,10);
+
+    const phBody = document.querySelector('#troublePh tbody');
+    const wdBody = document.querySelector('#troubleWord tbody');
+    phBody.innerHTML = top(ph).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
+    wdBody.innerHTML = top(wd).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
+  }
+
   async function saveLabel() {
     const uid = uidEl.value.trim();
     const label = labelInput.value.trim();
     if (!uid) return;
     saveMsg.textContent = 'Saving...';
+    saveMsg.className = 'muted';
     try {
       const res = await fetch('/api/admin-label-user', {
         method:'POST',
-        headers: {
-          'Content-Type':'application/json',
-          'x-admin-token': TOKEN
-        },
+        headers: { 'Content-Type':'application/json', 'x-admin-token': TOKEN },
         body: JSON.stringify({ uid, label })
       });
       if (!res.ok) throw new Error('save failed');
@@ -359,15 +371,15 @@
       const json = await r.json();
       const rows = Array.isArray(json?.rows) ? json.rows : [];
 
-      // pick up server-provided label (if any)
+      // Grab server label (if present) the first time
       const first = rows[0];
       if (first && first.label && !labelInput.value) labelInput.value = first.label;
 
       renderStats(rows);
       renderChart(rows);
+      renderTrouble(rows);
       renderTable(rows);
 
-      // update CSV link + URL params
       updateCsvHref();
       setQueryStringForState();
     } catch(e) {
@@ -379,9 +391,9 @@
   }
 
   function clearFilters() {
-    const today = new Date();
     const pad = (n)=>String(n).padStart(2,'0');
     const toStr = (d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const today = new Date();
     const d = new Date(); d.setDate(d.getDate()-14);
     fromEl.value = toStr(d);
     toEl.value   = toStr(today);
@@ -395,17 +407,11 @@
   clearBtn.addEventListener('click', () => { clearFilters(); loadData(); });
   saveBtn.addEventListener('click', saveLabel);
   copyBtn.addEventListener('click', copyLinkToClipboard);
-
-  // Also update CSV link any time inputs change
   [uidEl, limitEl, fromEl, toEl, smoothEl, ...passEls].forEach(el => el.addEventListener('change', updateCsvHref));
 
-  // If we were navigated from /admin/ with a uid, load immediately
-  if (uidEl.value) {
-    updateCsvHref();
-    loadData();
-  } else {
-    updateCsvHref();
-  }
+  // Auto-load if a uid is present
+  updateCsvHref();
+  if (uidEl.value) loadData();
 })();
 </script>
 </body>
