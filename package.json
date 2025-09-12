@@ -13,6 +13,7 @@
     "gpt-tokenizer": "^3.0.1",
     "jsonrepair": "^3.0.1",
     "microsoft-cognitiveservices-speech-sdk": "^1.44.1",
-    "openai": "^4.103.0"
+    "openai": "^4.103.0",
+    "pg": "^8.11.5"
   }
 }
