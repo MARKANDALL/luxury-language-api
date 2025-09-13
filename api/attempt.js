@@ -1,93 +1,60 @@
-// file: /api/attempt.js  (Vercel Node serverless function, ESM)
-import { Pool } from "pg";
+// file: /api/attempt.js
+import { createClient } from '@supabase/supabase-js';
 
-// ---- Connection pool (reuse across invocations) ----
-const pool =
-  globalThis.__lux_pool ||
-  new Pool({
-    connectionString:
-      process.env.POSTGRES_URL ||
-      process.env.POSTGRES_CONNECTION ||
-      process.env.DATABASE_URL,
-    ssl:
-      process.env.PGSSLMODE === "disable"
-        ? false
-        : { rejectUnauthorized: false },
-  });
-globalThis.__lux_pool = pool;
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 
-// ---- CORS ----
-const ALLOW_ORIGINS = [
-  "https://luxury-language-api.vercel.app",
-  "https://prh3j3.csb.app",
-  "http://localhost:3000",
-];
-function allowOrigin(origin) {
-  if (!origin) return ALLOW_ORIGINS[0];
-  return ALLOW_ORIGINS.includes(origin) ? origin : ALLOW_ORIGINS[0];
-}
-function setCors(req, res) {
-  const origin = allowOrigin(req.headers.origin);
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
+// Allow the app + sandbox
+const ALLOW_ORIGINS = new Set([
+  'https://luxury-language-api.vercel.app',
+  'https://prh3j3.csb.app',
+  'http://localhost:3000',
+]);
 
-function tidySummary(body) {
-  // accept scores directly from client; keep small
-  const s = {
-    pron: body.pron ?? null,
-    acc: body.acc ?? null,
-    flu: body.flu ?? null,
-    comp: body.comp ?? null,
-  };
-  // optional low phonemes list if you ever send it
-  if (Array.isArray(body.lows)) s.lows = body.lows.slice(0, 20);
-  return s;
+function cors(res, origin) {
+  const allow = ALLOW_ORIGINS.has(origin) ? origin : 'https://luxury-language-api.vercel.app';
+  res.setHeader('Access-Control-Allow-Origin', allow);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
 export default async function handler(req, res) {
-  setCors(req, res);
+  cors(res, req.headers.origin || '');
 
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method Not Allowed" });
-    return;
-  }
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method !== 'POST')   return res.status(405).json({ error: 'Method Not Allowed' });
 
   try {
+    if (!SUPABASE_URL || !SERVICE_ROLE) {
+      return res.status(500).json({ error: 'Missing Supabase env vars' });
+    }
+    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+
+    // Body from attempt-log.js
     const b = req.body || {};
     const row = {
-      uid: b.uid || null,
-      ts: b.ts || new Date().toISOString(),
-      passage_key: b.passage || "unknown",
-      part_index: Number.isFinite(+b.part) ? +b.part : 0,
-      text: b.text || "",
-      summary: tidySummary(b),
+      uid:        b.uid || null,
+      ts:         b.ts  || new Date().toISOString(),
+      passage_key: String(b.passage || 'unknown'),
+      part_index:  Number.isFinite(Number(b.part)) ? Number(b.part) : 0,
+      text:        b.text || '',
+      // What the admin pages read:
+      summary: {
+        acc:  b.acc ?? null,
+        flu:  b.flu ?? null,
+        comp: b.comp ?? null,
+        pron: b.pron ?? null,
+        // optional/large – omit if you want
+        lows: Array.isArray(b.azure?.NBest?.[0]?.Words) ? undefined : b.lows,
+      },
     };
 
-    // insert (summary is JSONB column)
-    await pool.query(
-      `INSERT INTO public.lux_attempts
-       (uid, ts, passage_key, part_index, text, summary)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [
-        row.uid,
-        row.ts,
-        row.passage_key,
-        row.part_index,
-        row.text,
-        row.summary,
-      ]
-    );
+    const { error } = await supabase.from('lux_attempts').insert(row);
+    if (error) return res.status(500).json({ ok: false, error: error.message });
 
-    res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true });
   } catch (e) {
-    console.error("attempt insert error:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
