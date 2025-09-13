@@ -1,6 +1,4 @@
-// file: /api/attempt.js  (Vercel Serverless Function)
-// Inserts into public.lux_attempts (uid, ts, passage_key, part_index, text, summary)
-
+// file: /api/attempt.js
 import { Pool } from "pg";
 
 const pool =
@@ -10,22 +8,19 @@ const pool =
       process.env.POSTGRES_URL ||
       process.env.POSTGRES_CONNECTION ||
       process.env.DATABASE_URL,
-    ssl:
-      process.env.PGSSLMODE === "disable"
-        ? false
-        : { rejectUnauthorized: false },
+    ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
   });
 globalThis.__lux_pool = pool;
 
-const ALLOW_ORIGINS = [
+const ALLOW = [
   "https://luxury-language-api.vercel.app",
   "https://prh3j3.csb.app",
   "http://localhost:3000",
 ];
 
 function allowOrigin(origin) {
-  if (!origin) return ALLOW_ORIGINS[0];
-  return ALLOW_ORIGINS.includes(origin) ? origin : ALLOW_ORIGINS[0];
+  if (!origin) return "*";
+  return ALLOW.includes(origin) ? origin : ALLOW[0];
 }
 
 export default async function handler(req, res) {
@@ -41,52 +36,42 @@ export default async function handler(req, res) {
   try {
     const b = req.body || {};
 
-    // Accept either flat scores or a nested summary
-    const summary =
-      b.summary && typeof b.summary === "object"
-        ? b.summary
-        : {
-            acc: b.acc ?? null,
-            flu: b.flu ?? null,
-            comp: b.comp ?? null,
-            pron: b.pron ?? null,
-            // if the client included lows (trouble phonemes), keep them
-            lows: Array.isArray(b.lows) ? b.lows : undefined,
-          };
+    // --- Minimal validation
+    const uid = (b.uid || "").toString().trim();
+    const passage = (b.passage || "").toString().trim();
+    const ts = b.ts ? new Date(b.ts).toISOString() : new Date().toISOString();
 
-    // Minimal row mapping to your schema
-    const row = {
-      uid: b.uid || null,
-      ts: b.ts || new Date().toISOString(),
-      passage_key: b.passage || "unknown",
-      part_index: Number.isFinite(Number(b.part)) ? Number(b.part) : 0,
-      text: b.text || "",
-      summary,
+    const part_index =
+      Number.isFinite(Number(b.part)) ? Number(b.part) : 0;
+
+    // Compact summary only (don’t store the whole Azure blob)
+    const summary = {
+      acc: Number.isFinite(Number(b.acc)) ? Number(b.acc) : null,
+      flu: Number.isFinite(Number(b.flu)) ? Number(b.flu) : null,
+      comp: Number.isFinite(Number(b.comp)) ? Number(b.comp) : null,
+      pron: Number.isFinite(Number(b.pron)) ? Number(b.pron) : null,
     };
 
-    // Insert
+    const text = (b.text || "").toString();
+
+    if (!uid || !passage) {
+      console.warn("[attempt] missing uid/passage", { uid, passage });
+      return res.status(400).json({ ok: false, error: "missing_uid_or_passage" });
+    }
+
     const sql = `
       insert into public.lux_attempts (uid, ts, passage_key, part_index, text, summary)
-      values ($1, $2, $3, $4, $5, $6)
+      values ($1, $2, $3, $4, $5, $6::jsonb)
       returning id
     `;
-    const params = [
-      row.uid,
-      row.ts,
-      row.passage_key,
-      row.part_index,
-      row.text,
-      JSON.stringify(row.summary ?? {}),
-    ];
+    const params = [uid, ts, passage, part_index, text, JSON.stringify(summary)];
 
     const { rows } = await pool.query(sql, params);
-
-    // (Optional) ignore raw Azure on the DB; it’s large
-    // If you *do* want it, create a separate table/column.
+    console.log("[attempt] inserted", { uid, passage, part_index, id: rows?.[0]?.id });
 
     return res.status(200).json({ ok: true, id: rows?.[0]?.id || null });
   } catch (e) {
-    console.error("attempt insert error:", e);
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error("[attempt] insert failed:", e);
+    return res.status(500).json({ ok: false, error: "server_error" });
   }
 }
