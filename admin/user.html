@@ -1,497 +1,283 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>User Progress (admin)</title>
+  <title>Attempts (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-  <!-- 1) Token bootstrap: store ?token=... into sessionStorage (must run before other app code) -->
-  <script>
-    (function () {
-      const t = new URLSearchParams(location.search).get('token');
-      if (t) sessionStorage.setItem('ADMIN_TOKEN', t);
-    })();
-  </script>
-
-  <!-- Chart.js -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-
   <style>
-    :root{ --gap:10px; }
-    *{ box-sizing:border-box }
-    body{ font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; color:#111 }
-    h1{ margin:0 0 14px }
-    .bar{ display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:10px }
-    .bar small{ color:#666; margin-left:auto }
-    input[type="text"], input[type="number"], input[type="date"]{
-      padding:8px; border:1px solid #ccc; border-radius:8px; height:36px;
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 14px; color:#222; }
+    h1 { font-size: 1.4rem; margin: 0 0 12px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    .row > * { margin: 4px 0; }
+    input[type="number"], input[type="date"], input[type="text"], button, select {
+      padding:6px 10px; font-size:14px; border:1px solid #c8c8c8; border-radius:6px;
     }
-    button, a.btn{
-      padding:8px 12px; border:1px solid #ccc; border-radius:8px; background:#fff; cursor:pointer;
-      text-decoration:none; display:inline-flex; align-items:center; height:36px;
-    }
-    button:disabled{ opacity:.6; cursor:default }
-    .pill{ display:inline-block; min-width:92px; padding:8px 10px; border:1px solid #ddd; border-radius:10px; background:#fafafa }
-    .pill b{ display:block; font-size:18px; }
-    #chartWrap{ margin:16px 0 12px }
-    #chart{ width:100%; max-width:1100px; height:360px }
-    .row{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 }
-    .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
-
-    table{ border-collapse:collapse; width:100%; margin-top:10px; font-size:13px }
-    th,td{ border:1px solid #e7e7e7; padding:8px; vertical-align:top }
-    th{ background:#f7f9fc; position:sticky; top:0; z-index:1 }
-    td.text{ max-width:600px }
-    .muted{ color:#666 }
-    .ok{ color:#0a7; }
-    .err{ color:#c00; }
+    button { background:#0a66ff; color:#fff; border:0; cursor:pointer; }
+    button.secondary { background:#f3f3f3; color:#222; }
+    button:disabled { background:#bbb; cursor:not-allowed; }
+    label { font-size:13px; color:#555; }
+    .chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border:1px solid #ddd; border-radius:999px; font-size:13px; }
+    .right { margin-left:auto; }
+    .muted { color:#666; font-size:12px; }
+    .ok { color:#0a7c3b; }
+    .bad { color:#b00020; }
+    table { width:100%; border-collapse:collapse; margin-top:10px; }
+    th, td { border:1px solid #ddd; padding:8px; font-size:13px; white-space:nowrap; }
+    th { background:#f5f7fa; text-align:left; }
+    td.text { white-space:normal; }
+    .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .pill { padding:2px 8px; border-radius:999px; background:#eef3ff; color:#1a4bff; font-weight:600; font-size:12px; }
+    .note { font-size:12px; color:#666; }
   </style>
+
+  <script>
+    // --- Token handling (Option C) -----------------------------------------
+    // 1) Read ?token= once and keep for this tab
+    (function ensureAdminToken(){
+      const q = new URLSearchParams(location.search);
+      const t = q.get('token');
+      if (t) sessionStorage.setItem('lux_admin_token', t);
+      // optional convenience: if token missing, allow ?t= alias
+      const t2 = q.get('t');
+      if (!t && t2) sessionStorage.setItem('lux_admin_token', t2);
+    })();
+
+    function authHeaders() {
+      const tok = sessionStorage.getItem('lux_admin_token') || '';
+      return tok ? { 'x-admin-token': tok } : {};
+    }
+
+    function setToken(tok) {
+      if (tok && tok.trim()) sessionStorage.setItem('lux_admin_token', tok.trim());
+      else sessionStorage.removeItem('lux_admin_token');
+      updateTokenBadge();
+    }
+
+    function updateTokenBadge(){
+      const badge = document.getElementById('tokenBadge');
+      const tok = sessionStorage.getItem('lux_admin_token');
+      badge.textContent = tok ? 'Token set ✓' : 'No token';
+      badge.className = 'pill ' + (tok ? 'ok' : 'bad');
+    }
+
+    // --- Helpers -----------------------------------------------------------
+    function todayISO(){ return new Date().toISOString().slice(0,10); }
+    function addDays(d, n){ const x = new Date(d); x.setDate(x.getDate()+n); return x; }
+    function fmtLocal(iso){
+      try {
+        const d = new Date(iso);
+        return d.toLocaleString();
+      } catch { return iso || ''; }
+    }
+    function getPassages() {
+      return Array.from(document.querySelectorAll('[data-pass]'))
+        .filter(x => x.checked).map(x => x.value);
+    }
+    function setPassages(list) {
+      const set = new Set(list);
+      document.querySelectorAll('[data-pass]').forEach(x => x.checked = set.has(x.value));
+    }
+
+    function readUI(){
+      return {
+        uid: (document.getElementById('uidFilter').value || '').trim(),
+        from: document.getElementById('from').value,
+        to:   document.getElementById('to').value,
+        limit: parseInt(document.getElementById('limit').value,10) || 200,
+        passages: getPassages()
+      };
+    }
+
+    function writeUI(q){
+      if (q.uid != null)   document.getElementById('uidFilter').value = q.uid;
+      if (q.from != null)  document.getElementById('from').value = q.from;
+      if (q.to != null)    document.getElementById('to').value   = q.to;
+      if (q.limit != null) document.getElementById('limit').value = q.limit;
+      if (q.passages) setPassages(q.passages);
+    }
+
+    function paramsFromUI(){
+      const q = readUI();
+      const p = new URLSearchParams();
+      if (q.uid) p.set('uid', q.uid);
+      if (q.from) p.set('from', q.from);
+      if (q.to)   p.set('to', q.to);
+      if (q.limit) p.set('limit', String(q.limit));
+      if (q.passages && q.passages.length) p.set('passages', q.passages.join(','));
+      return p;
+    }
+
+    function uiFromURL(){
+      const qs = new URLSearchParams(location.search);
+      const obj = {};
+      if (qs.get('uid')) obj.uid = qs.get('uid');
+      if (qs.get('from')) obj.from = qs.get('from');
+      if (qs.get('to'))   obj.to   = qs.get('to');
+      if (qs.get('limit')) obj.limit = parseInt(qs.get('limit'),10) || 200;
+      if (qs.get('passages')) obj.passages = qs.get('passages').split(',').filter(Boolean);
+      return obj;
+    }
+
+    // --- Data load ---------------------------------------------------------
+    async function loadAttempts() {
+      const tbody = document.getElementById('rows');
+      const countEl = document.getElementById('count');
+      tbody.innerHTML = '';
+      countEl.textContent = '…';
+
+      const p = paramsFromUI();
+      const res = await fetch(`/api/admin-recent?${p.toString()}`, {
+        headers: { ...authHeaders() }
+      });
+      if (!res.ok) {
+        countEl.textContent = 'error';
+        const txt = await res.text().catch(()=> '');
+        alert(`Failed to load (HTTP ${res.status}).\n${txt}`);
+        return;
+      }
+      const json = await res.json();
+      const rows = Array.isArray(json?.rows) ? json.rows : [];
+
+      for (const r of rows) {
+        const s = r.summary || {};
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${fmtLocal(r.ts)}</td>
+          <td title="${r.uid}">${r.label || r.uid || ''}</td>
+          <td>${r.passage_key || ''}</td>
+          <td>${r.part_index ?? ''}</td>
+          <td>${s.acc ?? ''}</td>
+          <td>${s.flu ?? ''}</td>
+          <td>${s.comp ?? ''}</td>
+          <td>${s.pron ?? ''}</td>
+          <td class="text">${(r.text || '').replace(/\s+/g,' ').slice(0,400)}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+      countEl.textContent = String(rows.length);
+    }
+
+    // --- CSV download ------------------------------------------------------
+    async function downloadCSV() {
+      const p = paramsFromUI();
+      p.set('format','csv');
+      const res = await fetch(`/api/admin-recent?${p.toString()}`, {
+        headers: { ...authHeaders() }
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(()=> '');
+        alert(`CSV download failed (HTTP ${res.status}).\n${txt}`);
+        return;
+      }
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'lux_attempts.csv';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    // --- Copy link (no token by default) ----------------------------------
+    function copyLink(includeToken=false) {
+      const p = paramsFromUI();
+      if (includeToken) {
+        const tok = sessionStorage.getItem('lux_admin_token');
+        if (tok) p.set('token', tok);
+      }
+      const url = `${location.origin}${location.pathname}?${p.toString()}`;
+      navigator.clipboard.writeText(url).then(()=> {
+        alert('Link copied to clipboard.');
+      });
+    }
+
+    // --- Init --------------------------------------------------------------
+    window.addEventListener('DOMContentLoaded', () => {
+      // Defaults: last 2 days, all passages, limit 200
+      const today = todayISO();
+      const yday  = addDays(today, -1).toISOString().slice(0,10);
+      writeUI({ from: yday, to: today, limit: 200, passages: ['grandfather','rainbow','sentences','wordList'] });
+      // Apply URL state (uid, dates, etc.)
+      writeUI(uiFromURL());
+      // Prefill UID if present in URL
+      const qs = new URLSearchParams(location.search);
+      if (qs.get('uid')) document.getElementById('uidFilter').value = qs.get('uid');
+
+      // Wire events
+      document.getElementById('reloadBtn').onclick = loadAttempts;
+      document.getElementById('csvBtn').onclick = downloadCSV;
+      document.getElementById('copyBtn').onclick = () => copyLink(false);
+      document.getElementById('copyWithTokenBtn').onclick = () => copyLink(true);
+      document.getElementById('saveTokBtn').onclick = () => {
+        const v = document.getElementById('tokInput').value;
+        setToken(v);
+        loadAttempts();
+      };
+
+      updateTokenBadge();
+      loadAttempts();
+    });
+  </script>
 </head>
 <body>
-  <h1>User Progress (admin)</h1>
+  <h1>Attempts (admin)</h1>
 
-  <!-- Top controls -->
-  <div class="bar">
-    <label>UID <input id="uid" type="text" placeholder="user id" style="width:380px"></label>
-    <label>Limit <input id="limit" type="number" value="500" min="1" max="20000" style="width:96px"></label>
-    <button id="loadBtn">Load</button>
-    <a id="csvBtn" class="btn" target="_blank" rel="noopener">Download CSV</a>
-    <button id="troubleCsvBtn">Download trouble CSV</button>
-    <button id="copyBtn">Copy link</button>
-    <small>Token is stored in this tab’s session only.</small>
-  </div>
-
-  <div class="row">
-    <label style="flex:1; min-width:320px">Display name
-      <input id="labelInput" type="text" placeholder="e.g., Mark H." style="width:100%">
+  <div class="toolbar">
+    <label>Limit
+      <input id="limit" type="number" value="200" min="1" max="2000" style="width:90px" />
     </label>
-    <button id="saveNameBtn">Save name</button>
-    <span id="saveMsg" class="muted"></span>
+    <button id="reloadBtn">Reload</button>
+    <button id="csvBtn" class="secondary">Download CSV</button>
+    <button id="copyBtn" class="secondary">Copy link</button>
+    <button id="copyWithTokenBtn" class="secondary">Copy link + token</button>
+
+    <span class="right note">Token is stored in this tab’s session only.</span>
   </div>
 
-  <div class="row">
-    <label>From <input id="from" type="date"></label>
-    <label>To <input id="to" type="date"></label>
-    <label>Smoothing
-      <select id="smooth">
-        <option value="7">7-day</option>
-        <option value="3">3-day</option>
-        <option value="0">None</option>
-      </select>
-    </label>
+  <div class="row" style="margin-top:8px">
+    <label>From <input id="from" type="date" /></label>
+    <label>To <input id="to" type="date" /></label>
 
-    <div class="checks">
-      <span>Passages:</span>
-      <label><input class="pass" type="checkbox" value="grandfather" checked> grandfather</label>
-      <label><input class="pass" type="checkbox" value="rainbow" checked> rainbow</label>
-      <label><input class="pass" type="checkbox" value="sentences" checked> sentences</label>
-      <label><input class="pass" type="checkbox" value="wordList" checked> wordList</label>
-    </div>
+    <span class="chip">
+      <input type="checkbox" data-pass value="grandfather" checked /> grandfather
+    </span>
+    <span class="chip">
+      <input type="checkbox" data-pass value="rainbow" checked /> rainbow
+    </span>
+    <span class="chip">
+      <input type="checkbox" data-pass value="sentences" checked /> sentences
+    </span>
+    <span class="chip">
+      <input type="checkbox" data-pass value="wordList" checked /> wordList
+    </span>
 
-    <button id="applyBtn">Apply</button>
-    <button id="clearBtn">Clear</button>
+    <span class="right chip">
+      <span>UID filter</span>
+      <input id="uidFilter" type="text" placeholder="paste UID…" style="width:320px" />
+    </span>
   </div>
 
-  <!-- Quick stats -->
-  <div class="row" style="gap:16px">
-    <div class="pill"><div class="muted">Attempts</div><b id="statAttempts">0</b></div>
-    <div class="pill"><div class="muted">Avg Pron</div><b id="statAvg">–</b></div>
+  <div class="row" style="margin-top:6px">
+    <span id="tokenBadge" class="pill">Token set?</span>
+    <input id="tokInput" type="text" placeholder="paste admin token…" style="width:260px" />
+    <button id="saveTokBtn" class="secondary">Set token</button>
+    <span class="note">Rows: <strong id="count">0</strong></span>
   </div>
 
-  <!-- Chart -->
-  <div id="chartWrap">
-    <canvas id="chart"></canvas>
-  </div>
-
-  <!-- Trouble tables -->
-  <div class="row" style="gap:16px; margin-top:8px">
-    <div style="max-width:520px; flex:1">
-      <h3 style="margin:8px 0 6px">Trouble sounds</h3>
-      <table id="troublePh">
-        <thead><tr><th>Phoneme</th><th>Count</th><th>Avg score</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <div style="max-width:520px; flex:1">
-      <h3 style="margin:8px 0 6px">Trouble words</h3>
-      <table id="troubleWord">
-        <thead><tr><th>Word</th><th>Count</th><th>Avg score</th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- Attempts grid -->
-  <table id="grid">
+  <table>
     <thead>
       <tr>
-        <th style="width:170px">Time (local)</th>
+        <th style="min-width:160px">Time (local)</th>
+        <th style="min-width:220px">User</th>
         <th>Passage</th>
         <th>Part</th>
         <th>Acc</th>
         <th>Flu</th>
         <th>Comp</th>
         <th>Pron</th>
-        <th class="text">Text</th>
+        <th style="min-width:420px">Text</th>
       </tr>
     </thead>
-    <tbody></tbody>
+    <tbody id="rows"></tbody>
   </table>
-
-<script>
-(function () {
-  // -------- TOKEN ----------
-  const qs = new URLSearchParams(location.search);
-  let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
-  if (!TOKEN) {
-    TOKEN = prompt('Enter ADMIN_TOKEN');
-    if (TOKEN) sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
-  }
-
-  // -------- Elements ----------
-  const uidEl   = document.getElementById('uid');
-  const limitEl = document.getElementById('limit');
-  const fromEl  = document.getElementById('from');
-  const toEl    = document.getElementById('to');
-  const smoothEl= document.getElementById('smooth');
-  const passEls = Array.from(document.querySelectorAll('.pass'));
-  const csvBtn  = document.getElementById('csvBtn');
-  const loadBtn = document.getElementById('loadBtn');
-  const applyBtn= document.getElementById('applyBtn');
-  const clearBtn= document.getElementById('clearBtn');
-  const copyBtn = document.getElementById('copyBtn');
-  const labelInput = document.getElementById('labelInput');
-  const saveBtn = document.getElementById('saveNameBtn');
-  const saveMsg = document.getElementById('saveMsg');
-  const statAttempts = document.getElementById('statAttempts');
-  const statAvg = document.getElementById('statAvg');
-  const tbody  = document.querySelector('#grid tbody');
-  const chartCanvas = document.getElementById('chart');
-  const troubleBtn = document.getElementById('troubleCsvBtn');
-
-  // Defaults from URL or sensible values
-  uidEl.value = qs.get('uid') || '';
-  limitEl.value = Number(qs.get('limit') || 500);
-  (function initDates(){
-    const pad = (n)=>String(n).padStart(2,'0');
-    const toStr = (d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-    const today = new Date();
-    const fromDefault = new Date(); fromDefault.setDate(fromDefault.getDate()-14);
-    fromEl.value = qs.get('from') || toStr(fromDefault);
-    toEl.value   = qs.get('to')   || toStr(today);
-  })();
-  (function initPassages(){
-    const p = qs.get('passages');
-    if (p) {
-      const set = new Set(p.split(',').map(s=>s.trim()));
-      passEls.forEach(el => el.checked = set.has(el.value));
-    }
-  })();
-  smoothEl.value = qs.get('smooth') ?? '7';
-
-  // State
-  let lineChart = null;
-  let currentRows = [];
-
-  // -------- Helpers ----------
-  const dateOnly = (iso)=>iso.slice(0,10);
-  const toLocal  = (iso)=> new Date(iso).toLocaleString();
-
-  function buildPassagesParam() {
-    return passEls.filter(e => e.checked).map(e => e.value).join(',');
-  }
-
-  function updateCsvHref() {
-    const uid = uidEl.value.trim();
-    const limit = Number(limitEl.value||500);
-    const passages = buildPassagesParam();
-    const from = fromEl.value; const to = toEl.value;
-    // ✅ fixed: correct endpoint + proper query string
-    let url = `/api/admin-recent?format=csv&limit=${encodeURIComponent(limit)}&token=${encodeURIComponent(TOKEN)}`;
-    if (uid) url += `&uid=${encodeURIComponent(uid)}`;
-    if (from) url += `&from=${encodeURIComponent(from)}`;
-    if (to) url += `&to=${encodeURIComponent(to)}`;
-    if (passages) url += `&passages=${encodeURIComponent(passages)}`;
-    csvBtn.href = url;
-  }
-
-  function copyLinkToClipboard() {
-    const url = new URL(location.href);
-    const params = new URLSearchParams();
-    if (uidEl.value) params.set('uid', uidEl.value);
-    if (fromEl.value) params.set('from', fromEl.value);
-    if (toEl.value) params.set('to', toEl.value);
-    if (smoothEl.value) params.set('smooth', smoothEl.value);
-    const passages = buildPassagesParam();
-    if (passages) params.set('passages', passages);
-    if (limitEl.value) params.set('limit', limitEl.value);
-    url.search = params.toString();
-    navigator.clipboard.writeText(url.toString())
-      .then(()=>{ copyBtn.textContent='Copied!'; setTimeout(()=>copyBtn.textContent='Copy link',1000); })
-      .catch(()=>{ copyBtn.textContent='Copy failed'; setTimeout(()=>copyBtn.textContent='Copy link',1200); });
-  }
-
-  function setQueryStringForState() {
-    const params = new URLSearchParams();
-    if (uidEl.value) params.set('uid', uidEl.value);
-    if (fromEl.value) params.set('from', fromEl.value);
-    if (toEl.value) params.set('to', toEl.value);
-    if (smoothEl.value) params.set('smooth', smoothEl.value);
-    const passages = buildPassagesParam();
-    if (passages) params.set('passages', passages);
-    if (limitEl.value) params.set('limit', limitEl.value);
-    history.replaceState(null,'', `${location.pathname}?${params.toString()}`);
-  }
-
-  function computeDailyAndSMA(rows, windowDays) {
-    // rows are newest->oldest from API; sort ascending by ts
-    const sorted = rows.slice().sort((a,b)=> new Date(a.ts) - new Date(b.ts));
-    const byDay = new Map();
-    for (const r of sorted) {
-      const p = Number(r?.summary?.pron);
-      if (!Number.isFinite(p)) continue;
-      const d = dateOnly(r.ts);
-      const arr = byDay.get(d) || [];
-      arr.push(p);
-      byDay.set(d, arr);
-    }
-    const days = Array.from(byDay.keys()).sort();
-    const daily = days.map(d => ({
-      date: d,
-      value: byDay.get(d).reduce((a,b)=>a+b,0)/byDay.get(d).length
-    }));
-    if (!windowDays || windowDays <= 0) return {daily, sma:[]};
-    const sma = [];
-    for (let i=0;i<daily.length;i++){
-      const start = Math.max(0, i - (windowDays - 1));
-      let sum = 0, count = 0;
-      for (let j=start;j<=i;j++){ sum += daily[j].value; count++; }
-      sma.push({ date: daily[i].date, value: sum / count });
-    }
-    return {daily, sma};
-  }
-
-  function renderChart(rows) {
-    const smoothDays = Number(smoothEl.value||0);
-    const {daily, sma} = computeDailyAndSMA(rows, smoothDays);
-    const labels = daily.map(d => d.date);
-    const pronSeries = daily.map(d => Number(d.value.toFixed(1)));
-    const smaSeries = sma.map(d => Number(d.value.toFixed(1)));
-    const data = {
-      labels,
-      datasets: [
-        { label: 'Pron score (daily avg)', data: pronSeries, borderWidth: 2, pointRadius: 3, tension: 0.2 },
-        { label: smoothDays ? `${smoothDays}-day avg` : 'moving avg (off)', data: smaSeries, borderWidth: 2, pointRadius: 0, borderDash: smoothDays ? [] : [4,4], tension: 0.2 }
-      ]
-    };
-    const options = {
-      responsive: true, maintainAspectRatio: false,
-      scales: { y: { min: 0, max: 100, ticks: { stepSize: 10 } } },
-      plugins: { legend: { display: true, position: 'top' }, tooltip: { intersect: false, mode: 'index' } }
-    };
-    if (lineChart) lineChart.destroy();
-    lineChart = new Chart(chartCanvas.getContext('2d'), { type: 'line', data, options });
-  }
-
-  function renderTable(rows) {
-    tbody.innerHTML = '';
-    for (const r of rows) {
-      const s = r.summary || {};
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${toLocal(r.ts)}</td>
-        <td>${r.passage_key || ''}</td>
-        <td>${r.part_index ?? ''}</td>
-        <td>${s.acc ?? ''}</td>
-        <td>${s.flu ?? ''}</td>
-        <td>${s.comp ?? ''}</td>
-        <td>${s.pron ?? ''}</td>
-        <td class="text">${String(r.text||'').replace(/[<>&]/g,c=>({ '<':'&lt;', '>':'&gt;', '&':'&amp;' }[c]))}</td>
-      `;
-      tbody.appendChild(tr);
-    }
-  }
-
-  function renderStats(rows) {
-    statAttempts.textContent = rows.length;
-    const vals = rows.map(r => Number(r?.summary?.pron)).filter(Number.isFinite);
-    statAvg.textContent = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) : '–';
-  }
-
-  // Trouble aggregations
-  function renderTrouble(rows){
-    const ph = new Map(), wd = new Map();
-    for (const r of rows){
-      const lows = r?.summary?.lows;
-      if (!Array.isArray(lows)) continue;
-      for (const L of lows){
-        const score = Number(L.score);
-        if (!Number.isFinite(score)) continue;
-        if (L.phoneme){
-          const a = ph.get(L.phoneme) || {sum:0, n:0};
-          a.sum += score; a.n++; ph.set(L.phoneme, a);
-        }
-        if (L.word){
-          const a = wd.get(L.word) || {sum:0, n:0};
-          a.sum += score; a.n++; wd.set(L.word, a);
-        }
-      }
-    }
-    const top = (m) => [...m.entries()].map(([k,v])=>({k, n:v.n, avg:v.sum/v.n}))
-                 .sort((a,b)=>b.n-a.n).slice(0,10);
-    document.querySelector('#troublePh tbody').innerHTML =
-      top(ph).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
-    document.querySelector('#troubleWord tbody').innerHTML =
-      top(wd).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
-  }
-
-  // CSV export of trouble items; include BOM for Excel
-  function downloadTroubleCsv(rows, uid) {
-    const agg = new Map();
-    for (const row of rows) {
-      const lows = row?.summary?.lows;
-      if (!Array.isArray(lows)) continue;
-      for (const L of lows) {
-        const phoneme = (L.phoneme || '').trim();
-        const word    = (L.word || '').trim();
-        const score   = Number(L.score);
-        const err     = (L.err || '').trim();
-        const key = `${phoneme}::${word}::${err}`;
-        let a = agg.get(key);
-        if (!a) a = { phoneme, word, err, count:0, sum:0, min:Infinity, last_ts:null, example:'' };
-        a.count++;
-        if (Number.isFinite(score)) { a.sum += score; if (score < a.min) a.min = score; }
-        if (!a.last_ts || new Date(row.ts) > new Date(a.last_ts)) {
-          a.last_ts = row.ts;
-          a.example = row.text || '';
-        }
-        agg.set(key, a);
-      }
-    }
-
-    const items = [...agg.values()].map(x => ({ ...x, avg: x.count ? x.sum / x.count : NaN }))
-      .sort((a,b)=>{
-        const aa = (Number.isFinite(a.avg) ? a.avg : 9999);
-        const bb = (Number.isFinite(b.avg) ? b.avg : 9999);
-        if (aa !== bb) return aa - bb;
-        return (b.count||0) - (a.count||0);
-      });
-
-    const esc = s => {
-      const str = String(s ?? '');
-      return /[",\n]/.test(str) ? `"${str.replace(/"/g,'""')}"` : str;
-    };
-
-    const header = ['phoneme','word','err','times','avg_score','min_score','last_seen_local','example_text'];
-    const lines = [header.join(',')];
-    for (const x of items) {
-      lines.push([ esc(x.phoneme), esc(x.word), esc(x.err),
-        x.count, (Number.isFinite(x.avg)? x.avg.toFixed(1):''), (Number.isFinite(x.min)? x.min.toFixed(0):''),
-        esc(new Date(x.last_ts).toLocaleString()), esc(x.example) ].join(','));
-    }
-
-    const csv = '\ufeff' + lines.join('\n'); // BOM
-    const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
-    const a = document.createElement('a');
-    const dt = new Date(); const pad=n=>String(n).padStart(2,'0');
-    const stamp = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
-    a.href = URL.createObjectURL(blob);
-    a.download = `trouble_${uid || 'user'}_${stamp}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    URL.revokeObjectURL(a.href);
-    a.remove();
-  }
-
-  async function saveLabel() {
-    const uid = uidEl.value.trim();
-    const label = labelInput.value.trim();
-    if (!uid) return;
-    saveMsg.textContent = 'Saving...';
-    saveMsg.className = 'muted';
-    try {
-      const res = await fetch('/api/admin-label-user', {
-        method:'POST',
-        headers: { 'Content-Type':'application/json', 'x-admin-token': TOKEN },
-        body: JSON.stringify({ uid, label })
-      });
-      if (!res.ok) throw new Error('save failed');
-      saveMsg.textContent = 'Saved';
-      saveMsg.className = 'ok';
-      setTimeout(()=>saveMsg.textContent='', 1200);
-    } catch(e){
-      saveMsg.textContent = 'Error saving';
-      saveMsg.className = 'err';
-    }
-  }
-
-  async function loadData() {
-    const uid = uidEl.value.trim();
-    if (!uid) { alert('Enter a UID (or click from /admin/)'); return; }
-
-    const limit = Number(limitEl.value || 500);
-    const passages = buildPassagesParam();
-
-    let url = `/api/admin-recent?limit=${encodeURIComponent(limit)}&token=${encodeURIComponent(TOKEN)}&uid=${encodeURIComponent(uid)}`;
-    if (fromEl.value) url += `&from=${encodeURIComponent(fromEl.value)}`;
-    if (toEl.value)   url += `&to=${encodeURIComponent(toEl.value)}`;
-    if (passages)     url += `&passages=${encodeURIComponent(passages)}`;
-
-    loadBtn.disabled = true;
-    try {
-      const r = await fetch(url, { cache:'no-store' });
-      const json = await r.json();
-      const rows = Array.isArray(json?.rows) ? json.rows : [];
-      currentRows = rows;
-
-      const first = rows[0];
-      if (first && first.label && !labelInput.value) labelInput.value = first.label;
-
-      renderStats(rows);
-      renderChart(rows);
-      renderTrouble(rows);
-      renderTable(rows);
-
-      updateCsvHref();
-      setQueryStringForState();
-    } catch(e) {
-      alert('Load failed. (Check token / URL / network)');
-      console.error(e);
-    } finally {
-      loadBtn.disabled = false;
-    }
-  }
-
-  function clearFilters() {
-    const pad = (n)=>String(n).padStart(2,'0');
-    const toStr = (d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-    const today = new Date();
-    const d = new Date(); d.setDate(d.getDate()-14);
-    fromEl.value = toStr(d);
-    toEl.value   = toStr(today);
-    smoothEl.value = '7';
-    passEls.forEach(el => el.checked = true);
-  }
-
-  // Events
-  loadBtn.addEventListener('click', loadData);
-  applyBtn.addEventListener('click', loadData);
-  clearBtn.addEventListener('click', () => { clearFilters(); loadData(); });
-  saveBtn.addEventListener('click', saveLabel);
-  copyBtn.addEventListener('click', copyLinkToClipboard);
-  troubleBtn.addEventListener('click', ()=>{
-    const uid = uidEl.value.trim();
-    if (!currentRows.length) { alert('Load the user first.'); return; }
-    downloadTroubleCsv(currentRows, uid);
-  });
-
-  // Also update CSV link any time inputs change
-  [uidEl, limitEl, fromEl, toEl, smoothEl, ...passEls].forEach(el => el.addEventListener('change', updateCsvHref));
-
-  // If we were navigated from /admin/ with a uid, load immediately
-  updateCsvHref();
-  if (uidEl.value) loadData();
-})();
-</script>
 </body>
 </html>
