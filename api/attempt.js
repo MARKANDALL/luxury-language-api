@@ -1,10 +1,6 @@
-// file: /api/attempt.js
-// Writes attempts into public.lux_attempts (same table your admin pages read)
-// Uses the same PG pool pattern as /api/admin-recent.js + permissive CORS.
-
+// /api/attempt.js  (Vercel Serverless Function, CommonJS)
 const { Pool } = require("pg");
 
-// ---- Reuse the same pool as admin-recent.js ----
 const pool =
   global.__lux_pool ||
   new Pool({
@@ -19,7 +15,6 @@ const pool =
   });
 global.__lux_pool = pool;
 
-// ---- Minimal helper to read JSON body (Vercel functions don’t auto-parse) ----
 async function readJson(req) {
   const chunks = [];
   for await (const c of req) chunks.push(c);
@@ -28,7 +23,7 @@ async function readJson(req) {
 }
 
 module.exports = async (req, res) => {
-  // CORS for dev + embeds
+  // CORS for all origins (dev embeds included)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
@@ -39,15 +34,12 @@ module.exports = async (req, res) => {
 
   try {
     const b = await readJson(req);
-
-    // Map client payload → columns expected by your admin readers
     const row = {
       uid: b.uid || null,
       ts: b.ts || new Date().toISOString(),
       passage_key: b.passage || "unknown",
       part_index: Number.isFinite(+b.part) ? +b.part : 0,
       text: b.text || "",
-      // keep scores inside summary JSON (admin pages read summary.pron/acc/flu/comp)
       summary: {
         pron: b.pron ?? b?.summary?.pron ?? null,
         acc:  b.acc  ?? b?.summary?.acc  ?? null,
@@ -55,8 +47,8 @@ module.exports = async (req, res) => {
         comp: b.comp ?? b?.summary?.comp ?? null,
         lows: (b.lows || b?.summary?.lows) ?? [],
         success: b.success !== false,
-        error: b.error || null
-      }
+        error: b.error || null,
+      },
     };
 
     const sql = `
@@ -66,7 +58,6 @@ module.exports = async (req, res) => {
       RETURNING id
     `;
     const params = [row.uid, row.ts, row.passage_key, row.part_index, row.text, row.summary];
-
     const { rows } = await pool.query(sql, params);
     return res.status(200).json({ ok: true, id: rows?.[0]?.id ?? null });
   } catch (e) {
