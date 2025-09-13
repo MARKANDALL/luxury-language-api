@@ -1,23 +1,29 @@
-<!-- must be first script on the page -->
-<script>
-  (function () {
-    const t = new URLSearchParams(location.search).get('token');
-    if (t) sessionStorage.setItem('ADMIN_TOKEN', t);
-  })();
-</script>
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Attempts (admin)</title>
+  <title>User Progress (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Store ?token for this tab under a consistent key -->
+  <script>
+    (function () {
+      const qs = new URLSearchParams(location.search);
+      const t = qs.get('token') || qs.get('t'); // allow ?t= alias
+      if (t) sessionStorage.setItem('lux_admin_token', t);
+    })();
+  </script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
   <style>
     :root{ --gap:10px; }
     *{ box-sizing:border-box }
     body{ font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; color:#111 }
     h1{ margin:0 0 14px }
-    .bar,.row{ display:flex; flex-wrap:wrap; align-items:center; gap:10px }
-    .bar{ margin-bottom:10px }
+    .bar{ display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:10px }
+    .bar small{ color:#666; margin-left:auto }
     input[type="text"], input[type="number"], input[type="date"]{
       padding:8px; border:1px solid #ccc; border-radius:8px; height:36px;
     }
@@ -25,33 +31,55 @@
       padding:8px 12px; border:1px solid #ccc; border-radius:8px; background:#fff; cursor:pointer;
       text-decoration:none; display:inline-flex; align-items:center; height:36px;
     }
-    small{ color:#666; margin-left:auto }
-    .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
+    button:disabled{ opacity:.6; cursor:default }
     .pill{ display:inline-block; min-width:92px; padding:8px 10px; border:1px solid #ddd; border-radius:10px; background:#fafafa }
     .pill b{ display:block; font-size:18px; }
+    #chartWrap{ margin:16px 0 12px }
+    #chart{ width:100%; max-width:1100px; height:360px }
+    .row{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 }
+    .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
 
     table{ border-collapse:collapse; width:100%; margin-top:10px; font-size:13px }
     th,td{ border:1px solid #e7e7e7; padding:8px; vertical-align:top }
     th{ background:#f7f9fc; position:sticky; top:0; z-index:1 }
     td.text{ max-width:600px }
     .muted{ color:#666 }
-    .uid{ font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px }
+    .ok{ color:#0a7; }
+    .err{ color:#c00; }
   </style>
 </head>
 <body>
-  <h1>Attempts (admin)</h1>
+  <h1>User Progress (admin)</h1>
 
+  <!-- Top controls -->
   <div class="bar">
-    <label>Limit <input id="limit" type="number" value="200" min="1" max="20000" style="width:96px"></label>
-    <button id="reloadBtn">Reload</button>
+    <label>UID <input id="uid" type="text" placeholder="user id" style="width:380px"></label>
+    <label>Limit <input id="limit" type="number" value="500" min="1" max="20000" style="width:96px"></label>
+    <button id="loadBtn">Load</button>
     <a id="csvBtn" class="btn" target="_blank" rel="noopener">Download CSV</a>
+    <button id="troubleCsvBtn">Download trouble CSV</button>
     <button id="copyBtn">Copy link</button>
     <small>Token is stored in this tab’s session only.</small>
   </div>
 
   <div class="row">
+    <label style="flex:1; min-width:320px">Display name
+      <input id="labelInput" type="text" placeholder="e.g., Mark H." style="width:100%">
+    </label>
+    <button id="saveNameBtn">Save name</button>
+    <span id="saveMsg" class="muted"></span>
+  </div>
+
+  <div class="row">
     <label>From <input id="from" type="date"></label>
     <label>To <input id="to" type="date"></label>
+    <label>Smoothing
+      <select id="smooth">
+        <option value="7">7-day</option>
+        <option value="3">3-day</option>
+        <option value="0">None</option>
+      </select>
+    </label>
 
     <div class="checks">
       <span>Passages:</span>
@@ -61,20 +89,44 @@
       <label><input class="pass" type="checkbox" value="wordList" checked> wordList</label>
     </div>
 
-    <label style="margin-left:auto">UID filter
-      <input id="uidFilter" type="text" placeholder="full or partial UID" style="width:280px">
-    </label>
+    <button id="applyBtn">Apply</button>
+    <button id="clearBtn">Clear</button>
   </div>
 
-  <div class="row" style="gap:16px; margin:6px 0 2px">
-    <div class="pill"><div class="muted">Attempts</div><b id="statCount">0</b></div>
+  <!-- Quick stats -->
+  <div class="row" style="gap:16px">
+    <div class="pill"><div class="muted">Attempts</div><b id="statAttempts">0</b></div>
+    <div class="pill"><div class="muted">Avg Pron</div><b id="statAvg">–</b></div>
   </div>
 
+  <!-- Chart -->
+  <div id="chartWrap">
+    <canvas id="chart"></canvas>
+  </div>
+
+  <!-- Trouble tables -->
+  <div class="row" style="gap:16px; margin-top:8px">
+    <div style="max-width:520px; flex:1">
+      <h3 style="margin:8px 0 6px">Trouble sounds</h3>
+      <table id="troublePh">
+        <thead><tr><th>Phoneme</th><th>Count</th><th>Avg score</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div style="max-width:520px; flex:1">
+      <h3 style="margin:8px 0 6px">Trouble words</h3>
+      <table id="troubleWord">
+        <thead><tr><th>Word</th><th>Count</th><th>Avg score</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Attempts grid -->
   <table id="grid">
     <thead>
       <tr>
         <th style="width:170px">Time (local)</th>
-        <th style="width:240px">User</th>
         <th>Passage</th>
         <th>Part</th>
         <th>Acc</th>
@@ -88,110 +140,168 @@
   </table>
 
 <script>
-(function(){
-  // ----- token handling -----
+(function () {
+  // -------- TOKEN ----------
   const qs = new URLSearchParams(location.search);
-  let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
+  let TOKEN = sessionStorage.getItem('lux_admin_token') || qs.get('token') || qs.get('t');
   if (!TOKEN) {
-    TOKEN = prompt('Enter ADMIN_TOKEN');
-    if (TOKEN) sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
+    TOKEN = prompt('Enter admin token');
+    if (TOKEN) sessionStorage.setItem('lux_admin_token', TOKEN);
   }
 
-  // ----- els -----
+  // -------- Elements ----------
+  const uidEl   = document.getElementById('uid');
   const limitEl = document.getElementById('limit');
   const fromEl  = document.getElementById('from');
   const toEl    = document.getElementById('to');
+  const smoothEl= document.getElementById('smooth');
   const passEls = Array.from(document.querySelectorAll('.pass'));
-  const uidFilterEl = document.getElementById('uidFilter');
-  const reloadBtn = document.getElementById('reloadBtn');
   const csvBtn  = document.getElementById('csvBtn');
+  const loadBtn = document.getElementById('loadBtn');
+  const applyBtn= document.getElementById('applyBtn');
+  const clearBtn= document.getElementById('clearBtn');
   const copyBtn = document.getElementById('copyBtn');
-  const statCount = document.getElementById('statCount');
-  const tbody = document.querySelector('#grid tbody');
+  const labelInput = document.getElementById('labelInput');
+  const saveBtn = document.getElementById('saveNameBtn');
+  const saveMsg = document.getElementById('saveMsg');
+  const statAttempts = document.getElementById('statAttempts');
+  const statAvg = document.getElementById('statAvg');
+  const tbody  = document.querySelector('#grid tbody');
+  const chartCanvas = document.getElementById('chart');
+  const troubleBtn = document.getElementById('troubleCsvBtn');
 
-  // defaults
-  (function init(){
-    limitEl.value = Number(qs.get('limit') || 200);
-    const pad = n=>String(n).padStart(2,'0');
-    const toStr = d=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  // Defaults from URL or sensible values
+  uidEl.value = qs.get('uid') || '';
+  limitEl.value = Number(qs.get('limit') || 500);
+  (function initDates(){
+    const pad = (n)=>String(n).padStart(2,'0');
+    const toStr = (d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
     const today = new Date();
     const fromDefault = new Date(); fromDefault.setDate(fromDefault.getDate()-14);
     fromEl.value = qs.get('from') || toStr(fromDefault);
     toEl.value   = qs.get('to')   || toStr(today);
-    uidFilterEl.value = qs.get('uid') || '';
+  })();
+  (function initPassages(){
     const p = qs.get('passages');
     if (p) {
       const set = new Set(p.split(',').map(s=>s.trim()));
       passEls.forEach(el => el.checked = set.has(el.value));
     }
-    updateCsvHref();
   })();
+  smoothEl.value = qs.get('smooth') ?? '7';
 
-  function buildPassagesParam(){ return passEls.filter(e=>e.checked).map(e=>e.value).join(','); }
-  function isLikelyFullUid(s){ return /^[0-9a-f-]{30,}$/i.test(s.trim()); }
+  // State
+  let lineChart = null;
+  let currentRows = [];
 
-  function setQueryString(){
-    const params = new URLSearchParams();
-    params.set('limit', limitEl.value || '200');
-    if (fromEl.value) params.set('from', fromEl.value);
-    if (toEl.value) params.set('to', toEl.value);
-    const passages = buildPassagesParam(); if (passages) params.set('passages', passages);
-    if (uidFilterEl.value) params.set('uid', uidFilterEl.value.trim());
-    history.replaceState(null,'', `${location.pathname}?${params.toString()}`);
+  // -------- Helpers ----------
+  const dateOnly = (iso)=>iso.slice(0,10);
+  const toLocal  = (iso)=> new Date(iso).toLocaleString();
+
+  function buildPassagesParam() {
+    return passEls.filter(e => e.checked).map(e => e.value).join(',');
   }
 
-  function updateCsvHref(){
+  function updateCsvHref() {
+    const uid = uidEl.value.trim();
+    const limit = Number(limitEl.value||500);
     const passages = buildPassagesParam();
-    const uid = uidFilterEl.value.trim();
-    let url = `/api/admin-resend?format=csv&token=${encodeURIComponent(TOKEN)}&limit=${encodeURIComponent(limitEl.value||200)}`;
-    if (fromEl.value) url += `&from=${encodeURIComponent(fromEl.value)}`;
-    if (toEl.value) url += `&to=${encodeURIComponent(toEl.value)}`;
+    const from = fromEl.value; const to = toEl.value;
+    // CSV must include token because it's a link (no headers)
+    let url = `/api/admin-recent?format=csv&limit=${encodeURIComponent(limit)}&token=${encodeURIComponent(TOKEN)}`;
+    if (uid) url += `&uid=${encodeURIComponent(uid)}`;
+    if (from) url += `&from=${encodeURIComponent(from)}`;
+    if (to) url += `&to=${encodeURIComponent(to)}`;
     if (passages) url += `&passages=${encodeURIComponent(passages)}`;
-    if (isLikelyFullUid(uid)) url += `&uid=${encodeURIComponent(uid)}`;
     csvBtn.href = url;
   }
 
-  function copyLink(){
-    setQueryString();
-    navigator.clipboard.writeText(location.href)
+  function copyLinkToClipboard() {
+    const url = new URL(location.href);
+    const params = new URLSearchParams();
+    if (uidEl.value) params.set('uid', uidEl.value);
+    if (fromEl.value) params.set('from', fromEl.value);
+    if (toEl.value) params.set('to', toEl.value);
+    if (smoothEl.value) params.set('smooth', smoothEl.value);
+    const passages = buildPassagesParam();
+    if (passages) params.set('passages', passages);
+    if (limitEl.value) params.set('limit', limitEl.value);
+    url.search = params.toString();
+    navigator.clipboard.writeText(url.toString())
       .then(()=>{ copyBtn.textContent='Copied!'; setTimeout(()=>copyBtn.textContent='Copy link',1000); })
       .catch(()=>{ copyBtn.textContent='Copy failed'; setTimeout(()=>copyBtn.textContent='Copy link',1200); });
   }
 
-  function toLocal(iso){ return new Date(iso).toLocaleString(); }
-
-  function render(rows){
-    const filter = uidFilterEl.value.trim().toLowerCase();
-    const filtered = filter && !isLikelyFullUid(filter)
-      ? rows.filter(r => (r.uid||'').toLowerCase().includes(filter))
-      : rows;
-
-    statCount.textContent = filtered.length;
-    tbody.innerHTML = '';
-
+  function setQueryStringForState() {
+    const params = new URLSearchParams();
+    if (uidEl.value) params.set('uid', uidEl.value);
+    if (fromEl.value) params.set('from', fromEl.value);
+    if (toEl.value) params.set('to', toEl.value);
+    if (smoothEl.value) params.set('smooth', smoothEl.value);
     const passages = buildPassagesParam();
-    const paramsForUser = (uid) => {
-      const u = new URL('/admin/user.html', location.origin);
-      const sp = new URLSearchParams();
-      sp.set('uid', uid);
-      if (fromEl.value) sp.set('from', fromEl.value);
-      if (toEl.value) sp.set('to', toEl.value);
-      if (passages) sp.set('passages', passages);
-      u.search = sp.toString();
-      return u.toString();
-    };
+    if (passages) params.set('passages', passages);
+    if (limitEl.value) params.set('limit', limitEl.value);
+    history.replaceState(null,'', `${location.pathname}?${params.toString()}`);
+  }
 
-    for (const r of filtered){
+  function computeDailyAndSMA(rows, windowDays) {
+    // rows are newest->oldest from API; sort ascending by ts
+    const sorted = rows.slice().sort((a,b)=> new Date(a.ts) - new Date(b.ts));
+    const byDay = new Map();
+    for (const r of sorted) {
+      const p = Number(r?.summary?.pron);
+      if (!Number.isFinite(p)) continue;
+      const d = dateOnly(r.ts);
+      const arr = byDay.get(d) || [];
+      arr.push(p);
+      byDay.set(d, arr);
+    }
+    const days = Array.from(byDay.keys()).sort();
+    const daily = days.map(d => ({
+      date: d,
+      value: byDay.get(d).reduce((a,b)=>a+b,0)/byDay.get(d).length
+    }));
+    if (!windowDays || windowDays <= 0) return {daily, sma:[]};
+    const sma = [];
+    for (let i=0;i<daily.length;i++){
+      const start = Math.max(0, i - (windowDays - 1));
+      let sum = 0, count = 0;
+      for (let j=start;j<=i;j++){ sum += daily[j].value; count++; }
+      sma.push({ date: daily[i].date, value: sum / count });
+    }
+    return {daily, sma};
+  }
+
+  function renderChart(rows) {
+    const smoothDays = Number(smoothEl.value||0);
+    const {daily, sma} = computeDailyAndSMA(rows, smoothDays);
+    const labels = daily.map(d => d.date);
+    const pronSeries = daily.map(d => Number(d.value.toFixed(1)));
+    const smaSeries = sma.map(d => Number(d.value.toFixed(1)));
+    const data = {
+      labels,
+      datasets: [
+        { label: 'Pron score (daily avg)', data: pronSeries, borderWidth: 2, pointRadius: 3, tension: 0.2 },
+        { label: smoothDays ? `${smoothDays}-day avg` : 'moving avg (off)', data: smaSeries, borderWidth: 2, pointRadius: 0, borderDash: smoothDays ? [] : [4,4], tension: 0.2 }
+      ]
+    };
+    const options = {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { min: 0, max: 100, ticks: { stepSize: 10 } } },
+      plugins: { legend: { display: true, position: 'top' }, tooltip: { intersect: false, mode: 'index' } }
+    };
+    if (lineChart) lineChart.destroy();
+    lineChart = new Chart(chartCanvas.getContext('2d'), { type: 'line', data, options });
+  }
+
+  function renderTable(rows) {
+    tbody.innerHTML = '';
+    for (const r of rows) {
       const s = r.summary || {};
-      const label = r.label ? `${r.label}` : '';
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${toLocal(r.ts)}</td>
-        <td>
-          <div>${label ? `<b>${label}</b>` : ''}</div>
-          <div class="uid"><a href="${paramsForUser(r.uid)}">${r.uid}</a></div>
-        </td>
-        <td>${r.passage_key||''}</td>
+        <td>${r.passage_key || ''}</td>
         <td>${r.part_index ?? ''}</td>
         <td>${s.acc ?? ''}</td>
         <td>${s.flu ?? ''}</td>
@@ -203,51 +313,186 @@
     }
   }
 
-  async function load(){
-    const passages = buildPassagesParam();
-    const uid = uidFilterEl.value.trim();
+  function renderStats(rows) {
+    statAttempts.textContent = rows.length;
+    const vals = rows.map(r => Number(r?.summary?.pron)).filter(Number.isFinite);
+    statAvg.textContent = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) : '–';
+  }
 
-    let url = `/api/admin-recent?token=${encodeURIComponent(TOKEN)}&limit=${encodeURIComponent(limitEl.value||200)}`;
-    if (fromEl.value) url += `&from=${encodeURIComponent(fromEl.value)}`;
-    if (toEl.value) url += `&to=${encodeURIComponent(toEl.value)}`;
-    if (passages) url += `&passages=${encodeURIComponent(passages)}`;
-    if (isLikelyFullUid(uid)) url += `&uid=${encodeURIComponent(uid)}`;
+  // Trouble aggregations
+  function renderTrouble(rows){
+    const ph = new Map(), wd = new Map();
+    for (const r of rows){
+      const lows = r?.summary?.lows;
+      if (!Array.isArray(lows)) continue;
+      for (const L of lows){
+        const score = Number(L.score);
+        if (!Number.isFinite(score)) continue;
+        if (L.phoneme){
+          const a = ph.get(L.phoneme) || {sum:0, n:0};
+          a.sum += score; a.n++; ph.set(L.phoneme, a);
+        }
+        if (L.word){
+          const a = wd.get(L.word) || {sum:0, n:0};
+          a.sum += score; a.n++; wd.set(L.word, a);
+        }
+      }
+    }
+    const top = (m) => [...m.entries()].map(([k,v])=>({k, n:v.n, avg:v.sum/v.n}))
+                 .sort((a,b)=>b.n-a.n).slice(0,10);
+    document.querySelector('#troublePh tbody').innerHTML =
+      top(ph).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
+    document.querySelector('#troubleWord tbody').innerHTML =
+      top(wd).map(r=>`<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
+  }
 
-    reloadBtn.disabled = true;
-    try{
-      const res = await fetch(url, { cache:'no-store' });
-      const json = await res.json();
-      render(Array.isArray(json?.rows) ? json.rows : []);
-      updateCsvHref();
-      setQueryString();
-    }catch(e){
-      alert('Load failed (check token / network).');
-      console.error(e);
-    }finally{
-      reloadBtn.disabled = false;
+  // CSV export of trouble items; include BOM for Excel
+  function downloadTroubleCsv(rows, uid) {
+    const agg = new Map();
+    for (const row of rows) {
+      const lows = row?.summary?.lows;
+      if (!Array.isArray(lows)) continue;
+      for (const L of lows) {
+        const phoneme = (L.phoneme || '').trim();
+        const word    = (L.word || '').trim();
+        const score   = Number(L.score);
+        const err     = (L.err || '').trim();
+        const key = `${phoneme}::${word}::${err}`;
+        let a = agg.get(key);
+        if (!a) a = { phoneme, word, err, count:0, sum:0, min:Infinity, last_ts:null, example:'' };
+        a.count++;
+        if (Number.isFinite(score)) { a.sum += score; if (score < a.min) a.min = score; }
+        if (!a.last_ts || new Date(row.ts) > new Date(a.last_ts)) {
+          a.last_ts = row.ts;
+          a.example = row.text || '';
+        }
+        agg.set(key, a);
+      }
+    }
+
+    const items = [...agg.values()].map(x => ({ ...x, avg: x.count ? x.sum / x.count : NaN }))
+      .sort((a,b)=>{
+        const aa = (Number.isFinite(a.avg) ? a.avg : 9999);
+        const bb = (Number.isFinite(b.avg) ? b.avg : 9999);
+        if (aa !== bb) return aa - bb;
+        return (b.count||0) - (a.count||0);
+      });
+
+    const esc = s => {
+      const str = String(s ?? '');
+      return /[",\n]/.test(str) ? `"${str.replace(/"/g,'""')}"` : str;
+    };
+
+    const header = ['phoneme','word','err','times','avg_score','min_score','last_seen_local','example_text'];
+    const lines = [header.join(',')];
+    for (const x of items) {
+      lines.push([ esc(x.phoneme), esc(x.word), esc(x.err),
+        x.count, (Number.isFinite(x.avg)? x.avg.toFixed(1):''), (Number.isFinite(x.min)? x.min.toFixed(0):''),
+        esc(new Date(x.last_ts).toLocaleString()), esc(x.example) ].join(','));
+    }
+
+    const csv = '\ufeff' + lines.join('\n'); // BOM
+    const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    const dt = new Date(); const pad=n=>String(n).padStart(2,'0');
+    const stamp = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
+    a.href = URL.createObjectURL(blob);
+    a.download = `trouble_${uid || 'user'}_${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }
+
+  async function saveLabel() {
+    const uid = uidEl.value.trim();
+    const label = labelInput.value.trim();
+    if (!uid) return;
+    saveMsg.textContent = 'Saving...';
+    saveMsg.className = 'muted';
+    try {
+      const res = await fetch('/api/admin-label-user', {
+        method:'POST',
+        headers: { 'Content-Type':'application/json', 'x-admin-token': TOKEN },
+        body: JSON.stringify({ uid, label })
+      });
+      if (!res.ok) throw new Error('save failed');
+      saveMsg.textContent = 'Saved';
+      saveMsg.className = 'ok';
+      setTimeout(()=>saveMsg.textContent='', 1200);
+    } catch(e){
+      saveMsg.textContent = 'Error saving';
+      saveMsg.className = 'err';
     }
   }
 
-  // events
-  reloadBtn.addEventListener('click', load);
-  copyBtn.addEventListener('click', copyLink);
-  [limitEl, fromEl, toEl, uidFilterEl, ...passEls].forEach(el=>{
-    el.addEventListener('change', ()=>{ updateCsvHref(); setQueryString(); });
+  async function loadData() {
+    const uid = uidEl.value.trim();
+    if (!uid) { alert('Enter a UID (or click from /admin/)'); return; }
+
+    const limit = Number(limitEl.value || 500);
+    const passages = buildPassagesParam();
+
+    let url = `/api/admin-recent?limit=${encodeURIComponent(limit)}&token=${encodeURIComponent(TOKEN)}&uid=${encodeURIComponent(uid)}`;
+    if (fromEl.value) url += `&from=${encodeURIComponent(fromEl.value)}`;
+    if (toEl.value)   url += `&to=${encodeURIComponent(toEl.value)}`;
+    if (passages)     url += `&passages=${encodeURIComponent(passages)}`;
+
+    loadBtn.disabled = true;
+    try {
+      const r = await fetch(url, { cache:'no-store' });
+      const json = await r.json();
+      const rows = Array.isArray(json?.rows) ? json.rows : [];
+      currentRows = rows;
+
+      const first = rows[0];
+      if (first && first.label && !labelInput.value) labelInput.value = first.label;
+
+      renderStats(rows);
+      renderChart(rows);
+      renderTrouble(rows);
+      renderTable(rows);
+
+      updateCsvHref();
+      setQueryStringForState();
+    } catch(e) {
+      alert('Load failed. (Check token / URL / network)');
+      console.error(e);
+    } finally {
+      loadBtn.disabled = false;
+    }
+  }
+
+  function clearFilters() {
+    const pad = (n)=>String(n).padStart(2,'0');
+    const toStr = (d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const today = new Date();
+    const d = new Date(); d.setDate(d.getDate()-14);
+    fromEl.value = toStr(d);
+    toEl.value   = toStr(today);
+    smoothEl.value = '7';
+    passEls.forEach(el => el.checked = true);
+  }
+
+  // Events
+  loadBtn.addEventListener('click', loadData);
+  applyBtn.addEventListener('click', loadData);
+  clearBtn.addEventListener('click', () => { clearFilters(); loadData(); });
+  saveBtn.addEventListener('click', saveLabel);
+  copyBtn.addEventListener('click', copyLinkToClipboard);
+  troubleBtn.addEventListener('click', ()=>{
+    const uid = uidEl.value.trim();
+    if (!currentRows.length) { alert('Load the user first.'); return; }
+    downloadTroubleCsv(currentRows, uid);
   });
 
-  // initial load
-  load();
-})();
-  <script>
-  // --- Token bootstrap: prefer ?token=... when present, store in session
-  (function () {
-    const qs = new URLSearchParams(location.search);
-    const t = qs.get('token');
-    if (t) sessionStorage.setItem('ADMIN_TOKEN', t);
-  })();
-  // ...rest of the existing script follows...
-</script>
+  // Also update CSV link any time inputs change
+  [uidEl, limitEl, fromEl, toEl, smoothEl, ...passEls].forEach(el => el.addEventListener('change', updateCsvHref));
 
+  // If we were navigated from /admin/ with a uid, load immediately
+  updateCsvHref();
+  if (uidEl.value) loadData();
+})();
 </script>
 </body>
 </html>
