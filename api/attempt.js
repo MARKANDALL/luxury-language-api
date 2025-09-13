@@ -1,56 +1,58 @@
-// /api/attempt.js  (Node/Next API Route)
-import { sql } from '@vercel/postgres';
+// pages/api/attempt.js  (Next.js "pages" router)
+import { saveAttempt } from '../../lib/db' // whatever you use to insert
 
-const ALLOW = new Set([
-  'https://prh3j3.csb.app',              // your sandbox
-  'https://luxurylanguagelearninglab.com', // prod (add if needed)
-  'http://localhost:3000',
-]);
+const ALLOW_ORIGINS = [
+  'https://luxury-language-api.vercel.app',
+  'https://prh3j3.csb.app',             // your CodeSandbox
+  'http://localhost:3000'
+];
 
-function cors(res, origin) {
-  if (origin && ALLOW.has(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-  }
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+function allowOrigin(origin) {
+  if (!origin) return '*'; // permissive fallback
+  return ALLOW_ORIGINS.includes(origin) ? origin : ALLOW_ORIGINS[0];
 }
 
 export default async function handler(req, res) {
-  cors(res, req.headers.origin);
+  const origin = allowOrigin(req.headers.origin);
 
-  if (req.method === 'OPTIONS') return res.status(204).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+  // Shared headers
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Vary', 'Origin'); // cache-safe
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    // Preflight OK
+    res.status(204).end();
+    return;
+  }
+
+  if (req.method !== 'POST') {
+    res.status(405).json({ error: 'Method Not Allowed' });
+    return;
+  }
 
   try {
-    const { uid, ts, passage, part, text, success, error, acc, flu, comp, pron } = req.body || {};
+    const body = req.body || {};
+    // minimally validate
+    const row = {
+      uid: body.uid || null,
+      ts: body.ts || new Date().toISOString(),
+      passage: body.passage || 'unknown',
+      part: Number(body.part ?? 0),
+      text: body.text || '',
+      acc: body.acc ?? null,
+      flu: body.flu ?? null,
+      comp: body.comp ?? null,
+      pron: body.pron ?? null,
+      success: body.success !== false,
+      error: body.error || null,
+      azure: body.azure || null
+    };
 
-    // create table once (idempotent)
-    await sql`
-      CREATE TABLE IF NOT EXISTS attempts (
-        id SERIAL PRIMARY KEY,
-        uid TEXT,
-        ts TIMESTAMPTZ,
-        passage TEXT,
-        part INT,
-        text TEXT,
-        success BOOLEAN,
-        error TEXT,
-        acc REAL,
-        flu REAL,
-        comp REAL,
-        pron REAL
-      )
-    `;
-
-    await sql`
-      INSERT INTO attempts (uid, ts, passage, part, text, success, error, acc, flu, comp, pron)
-      VALUES (${uid}, ${ts}, ${passage}, ${part}, ${text}, ${success}, ${error}, ${acc}, ${flu}, ${comp}, ${pron})
-    `;
-
-    return res.status(200).json({ ok: true });
+    await saveAttempt(row); // insert into your DB
+    res.status(200).json({ ok: true });
   } catch (e) {
-    console.error('attempt insert failed', e);
-    return res.status(500).json({ ok: false, error: 'db-failed' });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 }
