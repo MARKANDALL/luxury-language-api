@@ -5,12 +5,16 @@
   <title>User Progress (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  <!-- Store ?token for this tab under a consistent key -->
+  <!-- Seed token into this tab (accept ?token= or ?t=). If still missing, prompt. -->
   <script>
-    (function () {
+    (function ensureToken() {
       const qs = new URLSearchParams(location.search);
-      const t = qs.get('token') || qs.get('t'); // allow ?t= alias
-      if (t) sessionStorage.setItem('lux_admin_token', t);
+      const fromQS = qs.get('token') || qs.get('t');
+      if (fromQS) sessionStorage.setItem('lux_admin_token', fromQS);
+      if (!sessionStorage.getItem('lux_admin_token')) {
+        const entered = prompt('Enter admin token');
+        if (entered) sessionStorage.setItem('lux_admin_token', entered.trim());
+      }
     })();
   </script>
 
@@ -38,7 +42,6 @@
     #chart{ width:100%; max-width:1100px; height:360px }
     .row{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:8px 0 }
     .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
-
     table{ border-collapse:collapse; width:100%; margin-top:10px; font-size:13px }
     th,td{ border:1px solid #e7e7e7; padding:8px; vertical-align:top }
     th{ background:#f7f9fc; position:sticky; top:0; z-index:1 }
@@ -49,6 +52,7 @@
   </style>
 </head>
 <body>
+  <!-- Tiny “switcher” lives at the very top of <body> -->
   <nav style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
     <a href="/admin/user.html">Attempts</a>
     <a href="/admin/index.html">User Progress</a>
@@ -56,7 +60,6 @@
   </nav>
 
   <h1>User Progress (admin)</h1>
-
 
   <!-- Top controls -->
   <div class="bar">
@@ -149,12 +152,7 @@
 <script>
 (function () {
   // -------- TOKEN ----------
-  const qs = new URLSearchParams(location.search);
-  let TOKEN = sessionStorage.getItem('lux_admin_token') || qs.get('token') || qs.get('t');
-  if (!TOKEN) {
-    TOKEN = prompt('Enter admin token');
-    if (TOKEN) sessionStorage.setItem('lux_admin_token', TOKEN);
-  }
+  const TOKEN = sessionStorage.getItem('lux_admin_token') || '';
 
   // -------- Elements ----------
   const uidEl   = document.getElementById('uid');
@@ -177,9 +175,11 @@
   const chartCanvas = document.getElementById('chart');
   const troubleBtn = document.getElementById('troubleCsvBtn');
 
-  // Defaults from URL or sensible values
+  // Defaults (URL or sensible)
+  const qs = new URLSearchParams(location.search);
   uidEl.value = qs.get('uid') || '';
   limitEl.value = Number(qs.get('limit') || 500);
+
   (function initDates(){
     const pad = (n)=>String(n).padStart(2,'0');
     const toStr = (d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
@@ -188,6 +188,7 @@
     fromEl.value = qs.get('from') || toStr(fromDefault);
     toEl.value   = qs.get('to')   || toStr(today);
   })();
+
   (function initPassages(){
     const p = qs.get('passages');
     if (p) {
@@ -205,6 +206,8 @@
   const dateOnly = (iso)=>iso.slice(0,10);
   const toLocal  = (iso)=> new Date(iso).toLocaleString();
 
+  const headers = TOKEN ? { 'x-admin-token': TOKEN } : {};
+
   function buildPassagesParam() {
     return passEls.filter(e => e.checked).map(e => e.value).join(',');
   }
@@ -214,7 +217,7 @@
     const limit = Number(limitEl.value||500);
     const passages = buildPassagesParam();
     const from = fromEl.value; const to = toEl.value;
-    // CSV must include token because it's a link (no headers)
+    // CSV must include token in the query (links can't set headers)
     let url = `/api/admin-recent?format=csv&limit=${encodeURIComponent(limit)}&token=${encodeURIComponent(TOKEN)}`;
     if (uid) url += `&uid=${encodeURIComponent(uid)}`;
     if (from) url += `&from=${encodeURIComponent(from)}`;
@@ -252,7 +255,6 @@
   }
 
   function computeDailyAndSMA(rows, windowDays) {
-    // rows are newest->oldest from API; sort ascending by ts
     const sorted = rows.slice().sort((a,b)=> new Date(a.ts) - new Date(b.ts));
     const byDay = new Map();
     for (const r of sorted) {
@@ -326,7 +328,6 @@
     statAvg.textContent = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1) : '–';
   }
 
-  // Trouble aggregations
   function renderTrouble(rows){
     const ph = new Map(), wd = new Map();
     for (const r of rows){
@@ -378,7 +379,7 @@
     }
 
     const items = [...agg.values()].map(x => ({ ...x, avg: x.count ? x.sum / x.count : NaN }))
-      .sort((a,b)=>{
+      .sort((a,b)=> {
         const aa = (Number.isFinite(a.avg) ? a.avg : 9999);
         const bb = (Number.isFinite(b.avg) ? b.avg : 9999);
         if (aa !== bb) return aa - bb;
@@ -398,7 +399,7 @@
         esc(new Date(x.last_ts).toLocaleString()), esc(x.example) ].join(','));
     }
 
-    const csv = '\ufeff' + lines.join('\n'); // BOM
+    const csv = '\ufeff' + lines.join('\n');
     const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     const dt = new Date(); const pad=n=>String(n).padStart(2,'0');
@@ -420,7 +421,7 @@
     try {
       const res = await fetch('/api/admin-label-user', {
         method:'POST',
-        headers: { 'Content-Type':'application/json', 'x-admin-token': TOKEN },
+        headers: { 'Content-Type':'application/json', ...headers },
         body: JSON.stringify({ uid, label })
       });
       if (!res.ok) throw new Error('save failed');
@@ -440,14 +441,19 @@
     const limit = Number(limitEl.value || 500);
     const passages = buildPassagesParam();
 
-    let url = `/api/admin-recent?limit=${encodeURIComponent(limit)}&token=${encodeURIComponent(TOKEN)}&uid=${encodeURIComponent(uid)}`;
+    let url = `/api/admin-recent?limit=${encodeURIComponent(limit)}&uid=${encodeURIComponent(uid)}`;
     if (fromEl.value) url += `&from=${encodeURIComponent(fromEl.value)}`;
     if (toEl.value)   url += `&to=${encodeURIComponent(toEl.value)}`;
     if (passages)     url += `&passages=${encodeURIComponent(passages)}`;
 
     loadBtn.disabled = true;
     try {
-      const r = await fetch(url, { cache:'no-store' });
+      const r = await fetch(url, { cache:'no-store', headers });
+      if (!r.ok) {
+        const txt = await r.text().catch(()=> '');
+        alert(`Load failed (HTTP ${r.status}).\n${txt}`);
+        return;
+      }
       const json = await r.json();
       const rows = Array.isArray(json?.rows) ? json.rows : [];
       currentRows = rows;
@@ -463,7 +469,7 @@
       updateCsvHref();
       setQueryStringForState();
     } catch(e) {
-      alert('Load failed. (Check token / URL / network)');
+      alert('Load failed. (Network?)');
       console.error(e);
     } finally {
       loadBtn.disabled = false;
@@ -493,10 +499,9 @@
     downloadTroubleCsv(currentRows, uid);
   });
 
-  // Also update CSV link any time inputs change
   [uidEl, limitEl, fromEl, toEl, smoothEl, ...passEls].forEach(el => el.addEventListener('change', updateCsvHref));
 
-  // If we were navigated from /admin/ with a uid, load immediately
+  // If we were navigated with a uid, load immediately
   updateCsvHref();
   if (uidEl.value) loadData();
 })();
