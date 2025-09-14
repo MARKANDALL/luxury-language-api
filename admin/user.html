@@ -31,15 +31,15 @@
   </style>
 
   <script>
-    // --- Token handling (Option C) -----------------------------------------
-    // 1) Read ?token= once and keep for this tab
+    // Ensure the token exists in this tab (accept ?token=/?t=; otherwise prompt)
     (function ensureAdminToken(){
       const q = new URLSearchParams(location.search);
-      const t = q.get('token');
+      const t = q.get('token') || q.get('t');
       if (t) sessionStorage.setItem('lux_admin_token', t);
-      // optional convenience: if token missing, allow ?t= alias
-      const t2 = q.get('t');
-      if (!t && t2) sessionStorage.setItem('lux_admin_token', t2);
+      if (!sessionStorage.getItem('lux_admin_token')) {
+        const entered = prompt('Enter admin token');
+        if (entered) sessionStorage.setItem('lux_admin_token', entered.trim());
+      }
     })();
 
     function authHeaders() {
@@ -64,10 +64,7 @@
     function todayISO(){ return new Date().toISOString().slice(0,10); }
     function addDays(d, n){ const x = new Date(d); x.setDate(x.getDate()+n); return x; }
     function fmtLocal(iso){
-      try {
-        const d = new Date(iso);
-        return d.toLocaleString();
-      } catch { return iso || ''; }
+      try { return new Date(iso).toLocaleString(); } catch { return iso || ''; }
     }
     function getPassages() {
       return Array.from(document.querySelectorAll('[data-pass]'))
@@ -126,9 +123,7 @@
       countEl.textContent = '…';
 
       const p = paramsFromUI();
-      const res = await fetch(`/api/admin-recent?${p.toString()}`, {
-        headers: { ...authHeaders() }
-      });
+      const res = await fetch(`/api/admin-recent?${p.toString()}`, { headers: { ...authHeaders() } });
       if (!res.ok) {
         countEl.textContent = 'error';
         const txt = await res.text().catch(()=> '');
@@ -157,13 +152,11 @@
       countEl.textContent = String(rows.length);
     }
 
-    // --- CSV download ------------------------------------------------------
+    // --- CSV download via fetch (header allowed) --------------------------
     async function downloadCSV() {
       const p = paramsFromUI();
       p.set('format','csv');
-      const res = await fetch(`/api/admin-recent?${p.toString()}`, {
-        headers: { ...authHeaders() }
-      });
+      const res = await fetch(`/api/admin-recent?${p.toString()}`, { headers: { ...authHeaders() } });
       if (!res.ok) {
         const txt = await res.text().catch(()=> '');
         alert(`CSV download failed (HTTP ${res.status}).\n${txt}`);
@@ -177,7 +170,7 @@
       URL.revokeObjectURL(a.href);
     }
 
-    // --- Copy link (no token by default) ----------------------------------
+    // --- Copy link (with or without token) --------------------------------
     function copyLink(includeToken=false) {
       const p = paramsFromUI();
       if (includeToken) {
@@ -185,9 +178,7 @@
         if (tok) p.set('token', tok);
       }
       const url = `${location.origin}${location.pathname}?${p.toString()}`;
-      navigator.clipboard.writeText(url).then(()=> {
-        alert('Link copied to clipboard.');
-      });
+      navigator.clipboard.writeText(url).then(()=> alert('Link copied to clipboard.'));
     }
 
     // --- Init --------------------------------------------------------------
@@ -196,8 +187,10 @@
       const today = todayISO();
       const yday  = addDays(today, -1).toISOString().slice(0,10);
       writeUI({ from: yday, to: today, limit: 200, passages: ['grandfather','rainbow','sentences','wordList'] });
+
       // Apply URL state (uid, dates, etc.)
       writeUI(uiFromURL());
+
       // Prefill UID if present in URL
       const qs = new URLSearchParams(location.search);
       if (qs.get('uid')) document.getElementById('uidFilter').value = qs.get('uid');
@@ -214,7 +207,7 @@
       };
 
       updateTokenBadge();
-      loadAttempts();
+      loadAttempts(); // safe now because we ensured a token above
     });
   </script>
 </head>
@@ -226,7 +219,6 @@
   </nav>
 
   <h1>Attempts (admin)</h1>
-
 
   <div class="toolbar">
     <label>Limit
