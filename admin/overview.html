@@ -5,15 +5,6 @@
   <title>Cohort Overview (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  <!-- Keep ?token (or ?t) in this tab -->
-  <script>
-    (function () {
-      const qs = new URLSearchParams(location.search);
-      const t = qs.get('token') || qs.get('t');
-      if (t) sessionStorage.setItem('lux_admin_token', t);
-    })();
-  </script>
-
   <!-- Chart.js for sparklines -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
@@ -22,8 +13,14 @@
     *{ box-sizing:border-box }
     body{ font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; color:#111 }
     h1{ margin:0 0 14px }
-    nav a{ text-decoration:none; color:#246; padding:2px 6px; border-radius:6px }
-    nav a.active{ background:#eef3ff; font-weight:600 }
+
+    /* shared nav */
+    .nav { display:flex; gap:10px; align-items:center; margin-bottom:8px; }
+    .nav-link { padding:2px 6px; text-decoration:none; color:inherit; border-radius:6px; }
+    .nav-link.active { font-weight:600; text-decoration:underline; }
+    .right{ margin-left:auto }
+    .note{ color:#666; font-size:12px }
+
     .bar{ display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:8px 0 12px }
     input[type="text"], input[type="number"], input[type="date"], select{
       padding:8px; border:1px solid #ccc; border-radius:8px; height:36px;
@@ -33,10 +30,11 @@
       text-decoration:none; display:inline-flex; align-items:center; height:36px;
     }
     button.primary{ background:#0a66ff; color:#fff; border:0 }
+
     .pill{ display:inline-block; min-width:120px; padding:8px 10px; border:1px solid #ddd; border-radius:10px; background:#fafafa; text-align:center }
     .pill b{ display:block; font-size:18px }
-    .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center }
 
+    .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center }
     .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
     .muted{ color:#666 }
     .ok{ color:#0a7 }
@@ -53,15 +51,28 @@
     /* Simple empty state */
     .empty{ padding:24px; text-align:center; color:#666; border:1px dashed #ddd; border-radius:12px; background:#fafafa }
   </style>
+
+  <script>
+    // Ensure admin token lives in this tab's session (accept ?token or ?t; otherwise prompt)
+    (function ensureAdminToken(){
+      const qs = new URLSearchParams(location.search);
+      const t = qs.get('token') || qs.get('t');
+      if (t) sessionStorage.setItem('lux_admin_token', t);
+      if (!sessionStorage.getItem('lux_admin_token')) {
+        const entered = prompt('Enter admin token');
+        if (entered) sessionStorage.setItem('lux_admin_token', entered.trim());
+      }
+    })();
+  </script>
 </head>
 <body>
 
   <!-- Tiny nav to switch views -->
-  <nav style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
-    <a href="/admin/user.html">Attempts</a>
-    <a href="/admin/index.html">User Progress</a>
-    <a class="active" href="/admin/overview.html">Cohort</a>
-    <span style="margin-left:auto;color:#666;font-size:12px">Token lives in this tab</span>
+  <nav class="nav">
+    <a href="/admin/overview.html" class="nav-link active">Cohort</a>
+    <a href="/admin/user.html" class="nav-link">Attempts</a>
+    <a href="/admin/index.html" class="nav-link">User Progress</a>
+    <span class="right note">Token lives in this tab</span>
   </nav>
 
   <h1>Cohort Overview (admin)</h1>
@@ -102,7 +113,7 @@
     <label>Limit <input id="limit" type="number" value="10000" min="100" max="200000" style="width:96px"></label>
 
     <button id="reload" class="primary">Reload</button>
-    <button id="copy" >Copy link</button>
+    <button id="copy">Copy link</button>
     <button id="csv">Download CSV</button>
   </div>
 
@@ -154,9 +165,9 @@
 <script>
 (function () {
   // ---------- Token ----------
-  const TOKEN = sessionStorage.getItem('lux_admin_token') || '';
   function authHeaders() {
-    return TOKEN ? { 'x-admin-token': TOKEN } : {};
+    const tok = sessionStorage.getItem('lux_admin_token') || '';
+    return tok ? { 'x-admin-token': tok } : {};
   }
 
   // ---------- Elements ----------
@@ -326,7 +337,6 @@
 
     let newUsers=0, returning=0;
     for (const a of byUid.values()) {
-      // Heuristic: seen in previous window => returning; else new
       if (a.wasSeenBefore) returning++; else newUsers++;
     }
 
@@ -337,7 +347,6 @@
   }
 
   function sparkline(canvas, data) {
-    // Render a tiny line without axes/legend
     const ctx = canvas.getContext('2d');
     if (canvas._chart) { canvas._chart.destroy(); }
     canvas._chart = new Chart(ctx, {
@@ -395,7 +404,6 @@
         </td>
       `;
       tbody.appendChild(tr);
-      // sparkline
       const c = tr.querySelector('.spark');
       const canvas = document.createElement('canvas');
       canvas.width = 100; canvas.height = 26;
@@ -458,7 +466,7 @@
       renderTable(byUid);
       buildTrouble(currRows);
 
-      // CSV button binds to current snapshot
+      // CSV snapshot
       csvBtn.onclick = ()=> downloadCSV(byUid);
 
     } catch (e) {
@@ -470,11 +478,9 @@
   }
 
   // ---------- Wire up ----------
-  // Defaults
   applyQSDefaults();
   if (!fromEl.value || !toEl.value) setRangeByQuick();
 
-  // Events
   quickEl.addEventListener('change', ()=>{ setRangeByQuick(); loadCohort(); });
   [fromEl, toEl, sortEl, searchEl, limitEl, ...passEls].forEach(el => el.addEventListener('change', loadCohort));
   reloadBtn.addEventListener('click', loadCohort);
