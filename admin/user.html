@@ -28,6 +28,11 @@
     .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
     .pill { padding:2px 8px; border-radius:999px; background:#eef3ff; color:#1a4bff; font-weight:600; font-size:12px; }
     .note { font-size:12px; color:#666; }
+
+    /* nav styles */
+    .nav { display:flex; gap:10px; align-items:center; margin-bottom:8px; }
+    .nav-link { padding:2px 6px; text-decoration:none; color:inherit; border-radius:6px; }
+    .nav-link.active { font-weight:600; text-decoration:underline; }
   </style>
 
   <script>
@@ -63,12 +68,9 @@
     // --- Helpers -----------------------------------------------------------
     function todayISO(){ return new Date().toISOString().slice(0,10); }
     function addDays(d, n){ const x = new Date(d); x.setDate(x.getDate()+n); return x; }
-    function fmtLocal(iso){
-      try { return new Date(iso).toLocaleString(); } catch { return iso || ''; }
-    }
+    function fmtLocal(iso){ try { return new Date(iso).toLocaleString(); } catch { return iso || ''; } }
     function getPassages() {
-      return Array.from(document.querySelectorAll('[data-pass]'))
-        .filter(x => x.checked).map(x => x.value);
+      return Array.from(document.querySelectorAll('[data-pass]')).filter(x => x.checked).map(x => x.value);
     }
     function setPassages(list) {
       const set = new Set(list);
@@ -154,8 +156,7 @@
 
     // --- CSV download via fetch (header allowed) --------------------------
     async function downloadCSV() {
-      const p = paramsFromUI();
-      p.set('format','csv');
+      const p = paramsFromUI(); p.set('format','csv');
       const res = await fetch(`/api/admin-recent?${p.toString()}`, { headers: { ...authHeaders() } });
       if (!res.ok) {
         const txt = await res.text().catch(()=> '');
@@ -212,10 +213,11 @@
   </script>
 </head>
 <body>
-  <nav style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
-    <a href="/admin/user.html">Attempts</a>
-    <a href="/admin/index.html">User Progress</a>
-    <span style="margin-left:auto;color:#666;font-size:12px">Token lives in this tab</span>
+  <nav class="nav">
+    <a href="/admin/overview.html" class="nav-link">Cohort</a>
+    <a href="/admin/user.html" class="nav-link active">Attempts</a>
+    <a href="/admin/index.html" class="nav-link">User Progress</a>
+    <span class="right note">Token lives in this tab</span>
   </nav>
 
   <h1>Attempts (admin)</h1>
@@ -236,18 +238,10 @@
     <label>From <input id="from" type="date" /></label>
     <label>To <input id="to" type="date" /></label>
 
-    <span class="chip">
-      <input type="checkbox" data-pass value="grandfather" checked /> grandfather
-    </span>
-    <span class="chip">
-      <input type="checkbox" data-pass value="rainbow" checked /> rainbow
-    </span>
-    <span class="chip">
-      <input type="checkbox" data-pass value="sentences" checked /> sentences
-    </span>
-    <span class="chip">
-      <input type="checkbox" data-pass value="wordList" checked /> wordList
-    </span>
+    <span class="chip"><input type="checkbox" data-pass value="grandfather" checked /> grandfather</span>
+    <span class="chip"><input type="checkbox" data-pass value="rainbow" checked /> rainbow</span>
+    <span class="chip"><input type="checkbox" data-pass value="sentences" checked /> sentences</span>
+    <span class="chip"><input type="checkbox" data-pass value="wordList" checked /> wordList</span>
 
     <span class="right chip">
       <span>UID filter</span>
