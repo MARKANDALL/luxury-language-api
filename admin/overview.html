@@ -1,22 +1,30 @@
-<!-- must be first script on the page -->
-<script>
-  (function () {
-    const t = new URLSearchParams(location.search).get('token');
-    if (t) sessionStorage.setItem('ADMIN_TOKEN', t);
-  })();
-</script>
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <title>Cohort Overview (admin)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Keep ?token (or ?t) in this tab -->
+  <script>
+    (function () {
+      const qs = new URLSearchParams(location.search);
+      const t = qs.get('token') || qs.get('t');
+      if (t) sessionStorage.setItem('lux_admin_token', t);
+    })();
+  </script>
+
+  <!-- Chart.js for sparklines -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
   <style>
-    :root{ --gap:10px }
+    :root{ --gap:10px; }
     *{ box-sizing:border-box }
     body{ font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:16px; color:#111 }
     h1{ margin:0 0 14px }
-    .bar,.row{ display:flex; flex-wrap:wrap; align-items:center; gap:10px }
+    nav a{ text-decoration:none; color:#246; padding:2px 6px; border-radius:6px }
+    nav a.active{ background:#eef3ff; font-weight:600 }
+    .bar{ display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:8px 0 12px }
     input[type="text"], input[type="number"], input[type="date"], select{
       padding:8px; border:1px solid #ccc; border-radius:8px; height:36px;
     }
@@ -24,35 +32,50 @@
       padding:8px 12px; border:1px solid #ccc; border-radius:8px; background:#fff; cursor:pointer;
       text-decoration:none; display:inline-flex; align-items:center; height:36px;
     }
-    .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
-    small{ color:#666; margin-left:auto }
+    button.primary{ background:#0a66ff; color:#fff; border:0 }
+    .pill{ display:inline-block; min-width:120px; padding:8px 10px; border:1px solid #ddd; border-radius:10px; background:#fafafa; text-align:center }
+    .pill b{ display:block; font-size:18px }
+    .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center }
 
-    .grid{
-      display:grid;
-      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-      gap:12px; margin-top:12px;
-    }
-    .card{
-      border:1px solid #e7e7e7; border-radius:12px; padding:12px; background:#fff;
-      display:flex; flex-direction:column; gap:8px;
-    }
-    .uid{ font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12px; color:#444 }
-    .rowmeta{ display:flex; gap:10px; flex-wrap:wrap }
-    .pill{ padding:4px 8px; border-radius:999px; background:#f4f6fb; font-weight:600 }
+    .checks{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
     .muted{ color:#666 }
-    .pos{ color:#0a7; } .neg{ color:#c00; }
+    .ok{ color:#0a7 }
+    .bad{ color:#b00 }
+
+    table{ border-collapse:collapse; width:100%; margin-top:12px; font-size:13px }
+    th,td{ border:1px solid #e7e7e7; padding:8px; vertical-align:middle; background:#fff }
+    th{ background:#f7f9fc; position:sticky; top:0; z-index:1 }
+    td.min{ width:68px; text-align:right }
+    td.actions a{ margin-right:8px; }
+    .spark{ width:100px; height:26px }
+    .kpis{ display:flex; gap:12px; flex-wrap:wrap; margin:12px 0 }
+
+    /* Simple empty state */
+    .empty{ padding:24px; text-align:center; color:#666; border:1px dashed #ddd; border-radius:12px; background:#fafafa }
   </style>
 </head>
 <body>
+
+  <!-- Tiny nav to switch views -->
+  <nav style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+    <a href="/admin/user.html">Attempts</a>
+    <a href="/admin/index.html">User Progress</a>
+    <a class="active" href="/admin/overview.html">Cohort</a>
+    <span style="margin-left:auto;color:#666;font-size:12px">Token lives in this tab</span>
+  </nav>
+
   <h1>Cohort Overview (admin)</h1>
 
-  <div class="row">
+  <!-- Top controls -->
+  <div class="bar">
     <label>From <input id="from" type="date"></label>
     <label>To <input id="to" type="date"></label>
-    <label>Window
-      <select id="window">
-        <option value="7">7-day delta</option>
-        <option value="14">14-day delta</option>
+
+    <label>Quick range
+      <select id="quick">
+        <option value="7">7 days</option>
+        <option value="14" selected>14 days</option>
+        <option value="30">30 days</option>
       </select>
     </label>
 
@@ -67,163 +90,405 @@
     <label>Sort
       <select id="sort">
         <option value="last">Last seen</option>
-        <option value="attempts">Attempts</option>
         <option value="avg">Avg pron</option>
-        <option value="delta">Delta (recent-prev)</option>
+        <option value="delta">Δ vs prior</option>
+        <option value="attempts">Attempts</option>
+        <option value="label">Label/UID</option>
       </select>
     </label>
 
-    <button id="reloadBtn">Reload</button>
-    <button id="copyBtn">Copy link</button>
-    <a class="btn" href="/admin/">Attempts</a>
-    <small>Token is stored in this tab’s session only.</small>
+    <label>Search <input id="search" type="text" placeholder="label or uid…" style="width:220px"></label>
+
+    <label>Limit <input id="limit" type="number" value="10000" min="100" max="200000" style="width:96px"></label>
+
+    <button id="reload" class="primary">Reload</button>
+    <button id="copy" >Copy link</button>
+    <button id="csv">Download CSV</button>
   </div>
 
-  <div class="row" style="margin:8px 0 0; gap:16px">
-    <div class="muted">Users: <b id="count">0</b></div>
+  <!-- KPIs -->
+  <div class="kpis">
+    <div class="pill"><div class="muted">Active users</div><b id="kActive">0</b></div>
+    <div class="pill"><div class="muted">New in window</div><b id="kNew">0</b></div>
+    <div class="pill"><div class="muted">Returning</div><b id="kReturning">0</b></div>
+    <div class="pill"><div class="muted">Avg pron (cohort)</div><b id="kAvg">–</b></div>
   </div>
 
-  <div id="grid" class="grid"></div>
+  <!-- Global trouble roll-ups -->
+  <div class="row" style="gap:16px; margin-top:4px">
+    <div style="max-width:520px; flex:1">
+      <h3 style="margin:6px 0">Cohort trouble sounds</h3>
+      <table id="troublePh">
+        <thead><tr><th>Phoneme</th><th class="min">Count</th><th class="min">Avg score</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div style="max-width:520px; flex:1">
+      <h3 style="margin:6px 0">Cohort trouble words</h3>
+      <table id="troubleWord">
+        <thead><tr><th>Word</th><th class="min">Count</th><th class="min">Avg score</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Cohort table -->
+  <table id="grid">
+    <thead>
+      <tr>
+        <th>User (label · uid)</th>
+        <th class="min">Attempts</th>
+        <th class="min">Avg pron</th>
+        <th class="min">Δ vs prior</th>
+        <th class="min">Last seen</th>
+        <th>Trend</th>
+        <th>Open</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <!-- Empty state -->
+  <div id="empty" class="empty" style="display:none">No activity for the chosen filters. Try expanding the date range.</div>
 
 <script>
-(function(){
-  const qs = new URLSearchParams(location.search);
-  let TOKEN = sessionStorage.getItem('ADMIN_TOKEN') || qs.get('token');
-  if (!TOKEN) {
-    TOKEN = prompt('Enter ADMIN_TOKEN');
-    if (TOKEN) sessionStorage.setItem('ADMIN_TOKEN', TOKEN);
+(function () {
+  // ---------- Token ----------
+  const TOKEN = sessionStorage.getItem('lux_admin_token') || '';
+  function authHeaders() {
+    return TOKEN ? { 'x-admin-token': TOKEN } : {};
   }
 
+  // ---------- Elements ----------
   const fromEl   = document.getElementById('from');
   const toEl     = document.getElementById('to');
-  const windowEl = document.getElementById('window');
+  const quickEl  = document.getElementById('quick');
   const sortEl   = document.getElementById('sort');
+  const searchEl = document.getElementById('search');
+  const limitEl  = document.getElementById('limit');
   const passEls  = Array.from(document.querySelectorAll('.pass'));
-  const reloadBtn= document.getElementById('reloadBtn');
-  const copyBtn  = document.getElementById('copyBtn');
-  const gridEl   = document.getElementById('grid');
-  const countEl  = document.getElementById('count');
+  const reloadBtn= document.getElementById('reload');
+  const copyBtn  = document.getElementById('copy');
+  const csvBtn   = document.getElementById('csv');
 
-  // defaults
-  (function init(){
-    const pad = n => String(n).padStart(2,'0');
-    const toStr = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-    const today = new Date();
-    const start = new Date(); start.setDate(start.getDate()-14);
-    fromEl.value    = qs.get('from')    || toStr(start);
-    toEl.value      = qs.get('to')      || toStr(today);
-    windowEl.value  = qs.get('window')  || '7';
-    sortEl.value    = qs.get('sort')    || 'last';
+  const kActive = document.getElementById('kActive');
+  const kNew = document.getElementById('kNew');
+  const kReturning = document.getElementById('kReturning');
+  const kAvg = document.getElementById('kAvg');
+
+  const tbody = document.querySelector('#grid tbody');
+  const emptyState = document.getElementById('empty');
+
+  // ---------- Utils ----------
+  const pad = (n)=>String(n).padStart(2,'0');
+  const dstr = (d)=>`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+  const toLocal = (iso)=> new Date(iso).toLocaleString();
+
+  function setRangeByQuick() {
+    const days = Number(quickEl.value || 14);
+    const to = new Date();           // today (local)
+    const from = new Date();
+    from.setDate(from.getDate() - (days-1));
+    fromEl.value = dstr(from);
+    toEl.value   = dstr(to);
+  }
+
+  function buildPassagesParam() {
+    return passEls.filter(e=>e.checked).map(e=>e.value).join(',');
+  }
+
+  function paramsToQS() {
+    const p = new URLSearchParams();
+    if (fromEl.value) p.set('from', fromEl.value);
+    if (toEl.value) p.set('to', toEl.value);
+    if (sortEl.value) p.set('sort', sortEl.value);
+    if (searchEl.value) p.set('q', searchEl.value.trim());
+    if (limitEl.value) p.set('limit', limitEl.value);
+    const passages = buildPassagesParam();
+    if (passages) p.set('passages', passages);
+    return p;
+  }
+
+  function applyQSDefaults() {
+    const qs = new URLSearchParams(location.search);
+    quickEl.value = qs.get('quick') || '14';
+    if (qs.get('from') && qs.get('to')) {
+      fromEl.value = qs.get('from');
+      toEl.value   = qs.get('to');
+    } else {
+      setRangeByQuick();
+    }
+    if (qs.get('sort')) sortEl.value = qs.get('sort');
+    if (qs.get('q')) searchEl.value = qs.get('q');
+    if (qs.get('limit')) limitEl.value = Number(qs.get('limit')) || 10000;
     const p = qs.get('passages');
     if (p) {
       const set = new Set(p.split(',').map(s=>s.trim()));
       passEls.forEach(el => el.checked = set.has(el.value));
     }
-  })();
-
-  function buildPassagesParam(){ return passEls.filter(e=>e.checked).map(e=>e.value).join(','); }
-
-  function setQS(){
-    const sp = new URLSearchParams();
-    if (fromEl.value) sp.set('from', fromEl.value);
-    if (toEl.value)   sp.set('to', toEl.value);
-    sp.set('window', windowEl.value);
-    sp.set('sort', sortEl.value);
-    const passages = buildPassagesParam(); if (passages) sp.set('passages', passages);
-    history.replaceState(null,'', `${location.pathname}?${sp.toString()}`);
   }
 
-  function fmt(n){ return (n==null || Number.isNaN(n)) ? '–' : Number(n).toFixed(1); }
-  function rel(iso){
-    const d=new Date(iso), s=(Date.now()-d.getTime())/1000, day=86400;
-    if (s < 60)   return `${Math.floor(s)}s ago`;
-    if (s < 3600) return `${Math.floor(s/60)}m ago`;
-    if (s < day)  return `${Math.floor(s/3600)}h ago`;
-    return `${Math.floor(s/day)}d ago`;
+  function replaceURLState() {
+    const p = paramsToQS();
+    p.set('quick', quickEl.value);
+    history.replaceState(null, '', `${location.pathname}?${p.toString()}`);
   }
 
-  function userUrl(uid){
-    const u = new URL('/admin/user.html', location.origin);
-    const p = new URLSearchParams();
-    p.set('uid', uid);
-    if (fromEl.value) p.set('from', fromEl.value);
-    if (toEl.value)   p.set('to', toEl.value);
-    const passages = buildPassagesParam(); if (passages) p.set('passages', passages);
-    u.search = p.toString();
-    return u.toString();
+  // ---------- Aggregation ----------
+  function groupByUid(rows) {
+    // rows: array of attempts within *current* window
+    const byUid = new Map();
+    for (const r of rows) {
+      const uid = r.uid;
+      const a = byUid.get(uid) || {
+        uid, label: r.label || '',
+        attempts: 0, last_ts: null,
+        scores: [], // for trend + avg
+      };
+      a.attempts++;
+      const p = Number(r?.summary?.pron);
+      if (Number.isFinite(p)) a.scores.push({ ts: r.ts, p });
+      if (!a.last_ts || new Date(r.ts) > new Date(a.last_ts)) a.last_ts = r.ts;
+      byUid.set(uid, a);
+    }
+    // finalize averages
+    for (const a of byUid.values()) {
+      const ps = a.scores.map(x=>x.p);
+      a.avg = ps.length ? ps.reduce((x,y)=>x+y,0)/ps.length : NaN;
+      // sort trend points by time asc
+      a.trend = a.scores.sort((x,y)=> new Date(x.ts)-new Date(y.ts)).map(x=>x.p);
+      a.trendDates = a.scores.map(x=>x.ts);
+    }
+    return byUid;
   }
 
-  function render(rows){
-    const mode = sortEl.value;
-    rows = rows.slice();
-    if (mode === 'attempts') rows.sort((a,b)=> (b.attempts||0)-(a.attempts||0));
-    else if (mode === 'avg') rows.sort((a,b)=> (b.avg_pron??-1)-(a.avg_pron??-1));
-    else if (mode === 'delta') rows.sort((a,b)=> (b.delta??-1)-(a.delta??-1));
-    else rows.sort((a,b)=> new Date(b.last_ts)-new Date(a.last_ts));
-
-    countEl.textContent = rows.length;
-    gridEl.innerHTML = '';
-
+  function buildTrouble(rows){
+    const ph = new Map(), wd = new Map();
     for (const r of rows){
-      const card = document.createElement('div');
-      card.className = 'card';
-      const deltaClass = r.delta == null ? '' : (r.delta >= 0 ? 'pos' : 'neg');
-      const label = r.label || '(unlabeled)';
-      card.innerHTML = `
-        <div><b>${label}</b></div>
-        <div class="uid">${r.uid}</div>
-        <div class="rowmeta">
-          <span class="pill">Avg ${fmt(r.avg_pron)}</span>
-          <span class="pill">${r.attempts || 0} attempts</span>
-          <span class="pill ${deltaClass}">${r.delta == null ? '–' : (r.delta>0?'+':'')+fmt(r.delta)} Δ</span>
-        </div>
-        <div class="muted">Last seen ${r.last_ts ? rel(r.last_ts) : '–'}</div>
-        <div><a class="btn" href="${userUrl(r.uid)}">Open user →</a></div>
-      `;
-      gridEl.appendChild(card);
+      const lows = r?.summary?.lows;
+      if (!Array.isArray(lows)) continue;
+      for (const L of lows){
+        const score = Number(L.score);
+        if (!Number.isFinite(score)) continue;
+        if (L.phoneme){
+          const a = ph.get(L.phoneme) || {sum:0, n:0};
+          a.sum += score; a.n++; ph.set(L.phoneme, a);
+        }
+        if (L.word){
+          const a = wd.get(L.word) || {sum:0, n:0};
+          a.sum += score; a.n++; wd.set(L.word, a);
+        }
+      }
+    }
+    const top = (m) => [...m.entries()].map(([k,v])=>({k, n:v.n, avg:v.sum/v.n}))
+                 .sort((a,b)=>b.n-a.n).slice(0,10);
+    document.querySelector('#troublePh tbody').innerHTML =
+      top(ph).map(r=>`<tr><td>${r.k}</td><td class="min">${r.n}</td><td class="min">${r.avg.toFixed(1)}</td></tr>`).join('');
+    document.querySelector('#troubleWord tbody').innerHTML =
+      top(wd).map(r=>`<tr><td>${r.k}</td><td class="min">${r.n}</td><td class="min">${r.avg.toFixed(1)}</td></tr>`).join('');
+  }
+
+  // ---------- Data load ----------
+  async function fetchWindow(from, to, passages, limit) {
+    const qs = new URLSearchParams();
+    if (from) qs.set('from', from);
+    if (to)   qs.set('to', to);
+    if (passages) qs.set('passages', passages);
+    qs.set('limit', String(limit || 10000));
+    const url = `/api/admin-recent?${qs.toString()}`;
+    const res = await fetch(url, { headers: { ...authHeaders() }, cache:'no-store' });
+    if (!res.ok) {
+      const t = await res.text().catch(()=> '');
+      throw new Error(`Load failed (HTTP ${res.status}). ${t}`);
+    }
+    const json = await res.json();
+    return Array.isArray(json?.rows) ? json.rows : [];
+  }
+
+  function computeDelta(currMap, prevRows) {
+    // prevRows: attempts in previous window; compute avg by uid
+    const prevMap = groupByUid(prevRows);
+    for (const [uid, a] of currMap.entries()) {
+      const prev = prevMap.get(uid);
+      const prevAvg = prev && Number.isFinite(prev.avg) ? prev.avg : NaN;
+      a.delta = (Number.isFinite(a.avg) && Number.isFinite(prevAvg)) ? (a.avg - prevAvg) : NaN;
+      a.wasSeenBefore = !!prev; // used for "new" vs "returning" heuristic
     }
   }
 
-  async function load(){
-    reloadBtn.disabled = true;
-    try{
-      let url = `/api/admin-user-stats?token=${encodeURIComponent(TOKEN)}&window=${encodeURIComponent(windowEl.value)}`;
-      if (fromEl.value) url += `&from=${encodeURIComponent(fromEl.value)}`;
-      if (toEl.value)   url += `&to=${encodeURIComponent(toEl.value)}`;
-      const passages = buildPassagesParam(); if (passages) url += `&passages=${encodeURIComponent(passages)}`;
-      const r = await fetch(url, { cache: 'no-store' });
-      const json = await r.json();
-      render(Array.isArray(json?.rows) ? json.rows : []);
-      setQS();
-    }catch(e){
-      alert('Load failed (check token / network).');
+  function renderKPIs(currRows, byUid) {
+    const active = byUid.size;
+    let sum=0, n=0;
+    for (const a of byUid.values()) {
+      if (Number.isFinite(a.avg)) { sum += a.avg; n++; }
+    }
+    const avg = n? (sum/n).toFixed(1) : '–';
+
+    let newUsers=0, returning=0;
+    for (const a of byUid.values()) {
+      // Heuristic: seen in previous window => returning; else new
+      if (a.wasSeenBefore) returning++; else newUsers++;
+    }
+
+    kActive.textContent = active;
+    kNew.textContent = newUsers;
+    kReturning.textContent = returning;
+    kAvg.textContent = avg;
+  }
+
+  function sparkline(canvas, data) {
+    // Render a tiny line without axes/legend
+    const ctx = canvas.getContext('2d');
+    if (canvas._chart) { canvas._chart.destroy(); }
+    canvas._chart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: data.map((_,i)=>i+1), datasets: [{ data, borderWidth: 2, pointRadius: 0, tension: 0.25 }] },
+      options: { responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false}, tooltip:{enabled:false} },
+        scales:{ x:{ display:false }, y:{ display:false, min:0, max:100 } }
+      }
+    });
+  }
+
+  function renderTable(byUid) {
+    const q = searchEl.value.trim().toLowerCase();
+    let rows = [...byUid.values()];
+    if (q) {
+      rows = rows.filter(a =>
+        (a.label||'').toLowerCase().includes(q) ||
+        (a.uid||'').toLowerCase().includes(q)
+      );
+    }
+
+    const sort = sortEl.value;
+    rows.sort((a,b)=>{
+      if (sort==='last')     return new Date(b.last_ts)-new Date(a.last_ts);
+      if (sort==='attempts') return (b.attempts||0)-(a.attempts||0);
+      if (sort==='avg')      return (isFinite(b.avg)?b.avg:-1)-(isFinite(a.avg)?a.avg:-1);
+      if (sort==='delta')    return (isFinite(b.delta)?b.delta:-999)-(isFinite(a.delta)?a.delta:-999);
+      if (sort==='label')    return String(a.label||a.uid).localeCompare(String(b.label||b.uid));
+      return 0;
+    });
+
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      emptyState.style.display = 'block';
+      return;
+    }
+    emptyState.style.display = 'none';
+
+    for (const a of rows) {
+      const tr = document.createElement('tr');
+      const avgTxt   = Number.isFinite(a.avg)   ? a.avg.toFixed(1)   : '';
+      const deltaTxt = Number.isFinite(a.delta) ? (a.delta>=0?'+':'') + a.delta.toFixed(1) : '';
+
+      tr.innerHTML = `
+        <td><strong>${a.label || '—'}</strong><br><span class="muted" style="font-size:12px">${a.uid}</span></td>
+        <td class="min">${a.attempts}</td>
+        <td class="min">${avgTxt}</td>
+        <td class="min" style="color:${Number.isFinite(a.delta)?(a.delta>=0?'#0a7':'#b00'):'#666'}">${deltaTxt}</td>
+        <td class="min">${a.last_ts ? toLocal(a.last_ts) : ''}</td>
+        <td><div class="spark"></div></td>
+        <td class="actions">
+          <a href="/admin/index.html?uid=${encodeURIComponent(a.uid)}" class="btn">Progress</a>
+          <a href="/admin/user.html?uid=${encodeURIComponent(a.uid)}" class="btn">Attempts</a>
+        </td>
+      `;
+      tbody.appendChild(tr);
+      // sparkline
+      const c = tr.querySelector('.spark');
+      const canvas = document.createElement('canvas');
+      canvas.width = 100; canvas.height = 26;
+      c.appendChild(canvas);
+      sparkline(canvas, a.trend);
+    }
+  }
+
+  function downloadCSV(byUid) {
+    const rows = [...byUid.values()];
+    const lines = [['uid','label','attempts','avg_pron','delta_vs_prior','last_seen_local'].join(',')];
+    for (const a of rows) {
+      const esc = s => {
+        const str = String(s ?? '');
+        return /[",\n]/.test(str) ? `"${str.replace(/"/g,'""')}"` : str;
+      };
+      lines.push([
+        esc(a.uid),
+        esc(a.label),
+        a.attempts,
+        Number.isFinite(a.avg) ? a.avg.toFixed(1) : '',
+        Number.isFinite(a.delta) ? a.delta.toFixed(1) : '',
+        esc(a.last_ts ? toLocal(a.last_ts) : '')
+      ].join(','));
+    }
+    const csv = '\ufeff' + lines.join('\n');
+    const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'cohort_overview.csv';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // ---------- Main load ----------
+  async function loadCohort() {
+    try {
+      reloadBtn.disabled = true;
+      replaceURLState();
+
+      const from = fromEl.value;
+      const to   = toEl.value;
+      const days = Math.max(1, Math.ceil((new Date(to)-new Date(from))/(1000*60*60*24))+1);
+      const passages = buildPassagesParam();
+      const limit = Number(limitEl.value || 10000);
+
+      // Current window
+      const currRows = await fetchWindow(from, to, passages, limit);
+
+      // Previous window for deltas
+      const prevTo   = new Date(from);
+      prevTo.setDate(prevTo.getDate() - 1);
+      const prevFrom = new Date(prevTo);
+      prevFrom.setDate(prevFrom.getDate() - (days - 1));
+      const prevRows = await fetchWindow(dstr(prevFrom), dstr(prevTo), passages, limit);
+
+      const byUid = groupByUid(currRows);
+      computeDelta(byUid, prevRows);
+      renderKPIs(currRows, byUid);
+      renderTable(byUid);
+      buildTrouble(currRows);
+
+      // CSV button binds to current snapshot
+      csvBtn.onclick = ()=> downloadCSV(byUid);
+
+    } catch (e) {
+      alert(e.message || String(e));
       console.error(e);
-    }finally{
+    } finally {
       reloadBtn.disabled = false;
     }
   }
 
-  document.getElementById('reloadBtn').addEventListener('click', load);
-  document.getElementById('copyBtn').addEventListener('click', ()=>{
-    setQS();
-    navigator.clipboard.writeText(location.href)
-      .then(()=>{ copyBtn.textContent='Copied!'; setTimeout(()=>copyBtn.textContent='Copy link',1000); })
-      .catch(()=>{ copyBtn.textContent='Copy failed'; setTimeout(()=>copyBtn.textContent='Copy link',1200); });
+  // ---------- Wire up ----------
+  // Defaults
+  applyQSDefaults();
+  if (!fromEl.value || !toEl.value) setRangeByQuick();
+
+  // Events
+  quickEl.addEventListener('change', ()=>{ setRangeByQuick(); loadCohort(); });
+  [fromEl, toEl, sortEl, searchEl, limitEl, ...passEls].forEach(el => el.addEventListener('change', loadCohort));
+  reloadBtn.addEventListener('click', loadCohort);
+
+  copyBtn.addEventListener('click', ()=>{
+    const p = paramsToQS(); p.set('quick', quickEl.value);
+    navigator.clipboard.writeText(`${location.origin}${location.pathname}?${p.toString()}`)
+      .then(()=> copyBtn.textContent='Copied!')
+      .finally(()=> setTimeout(()=> copyBtn.textContent='Copy link', 1000));
   });
-  [fromEl,toEl,windowEl,sortEl,...passEls].forEach(el=>el.addEventListener('change', setQS));
 
-  load();
+  // Auto-load on first paint
+  loadCohort();
 })();
-  <script>
-  // --- Token bootstrap: prefer ?token=... when present, store in session
-  (function () {
-    const qs = new URLSearchParams(location.search);
-    const t = qs.get('token');
-    if (t) sessionStorage.setItem('ADMIN_TOKEN', t);
-  })();
-  // ...rest of the existing script follows...
-</script>
-
 </script>
 </body>
 </html>
