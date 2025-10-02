@@ -1,5 +1,5 @@
 // file: /api/attempt.js
-// Purpose: accept attempt payloads from the client and insert into Postgres (lux_attempts)
+// Accept attempt payloads and insert into Postgres (table: public.lux_attempts)
 
 import { Pool } from "pg";
 
@@ -11,7 +11,6 @@ const pool =
       process.env.POSTGRES_URL ||
       process.env.POSTGRES_CONNECTION ||
       process.env.DATABASE_URL,
-    // Most hosted Postgres require SSL; disable only if you know you need to
     ssl:
       process.env.PGSSLMODE === "disable"
         ? false
@@ -20,16 +19,21 @@ const pool =
 globalThis.__lux_pool = pool;
 
 // ---------- CORS ----------
-const ALLOW_ORIGINS = new Set([
-  "https://luxury-language-api.vercel.app",
-  "https://prh3j3.csb.app", // CodeSandbox preview
-  "http://localhost:3000",
-  "http://localhost:5173",
-]);
-
+const PROD_ORIGIN = "https://luxury-language-api.vercel.app";
+// allow any CodeSandbox preview in dev (e.g. https://abcd123.csb.app)
+function originAllowed(o) {
+  if (!o) return false;
+  if (o === PROD_ORIGIN) return true;
+  try {
+    const u = new URL(o);
+    return u.hostname.endsWith(".csb.app") || u.hostname === "localhost";
+  } catch {
+    return false;
+  }
+}
 function pickOrigin(req) {
   const o = req.headers.origin || "";
-  return ALLOW_ORIGINS.has(o) ? o : "https://luxury-language-api.vercel.app";
+  return originAllowed(o) ? o : PROD_ORIGIN;
 }
 
 // ---------- Helpers ----------
@@ -39,6 +43,62 @@ function toIso(x) {
   } catch {
     return new Date().toISOString();
   }
+}
+
+function numOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Build a compact summary for admin UI from Azure JSON
+function toSummaryFromAzure(result) {
+  // Defensive defaults
+  const nb = result?.NBest?.[0] || {};
+  const pa = nb?.PronunciationAssessment || result?.PronunciationAssessment || {};
+  const ca = nb?.ContentAssessment || result?.ContentAssessment || {};
+
+  const pron =
+    numOrNull(nb?.PronScore ?? pa?.PronunciationScore ?? pa?.PronScore) ?? null;
+  const acc = numOrNull(nb?.AccuracyScore ?? pa?.AccuracyScore) ?? null;
+  const flu = numOrNull(nb?.FluencyScore ?? pa?.FluencyScore) ?? null;
+  const comp = numOrNull(nb?.CompletenessScore ?? pa?.CompletenessScore) ?? null;
+
+  const words = Array.isArray(nb?.Words) ? nb.Words : [];
+
+  // trouble phonemes (lowest 6 by score)
+  const phScores = [];
+  for (const w of words) {
+    const phs = Array.isArray(w?.Phonemes) ? w.Phonemes : [];
+    for (const p of phs) {
+      const key = String(p?.Phoneme || "").trim();
+      const score = numOrNull(p?.AccuracyScore);
+      if (!key || score == null) continue;
+      phScores.push({ p: key, s: score });
+    }
+  }
+  phScores.sort((a, b) => a.s - b.s);
+  const lows = phScores.slice(0, 6).map((x) => [x.p, x.s]);
+
+  // trouble words (aggregate avg by word, lowest 10)
+  const wordAgg = new Map();
+  for (const w of words) {
+    const key = String(w?.Word || w?.word || "").trim().toLowerCase();
+    const s = numOrNull(w?.AccuracyScore);
+    if (!key || s == null) continue;
+    const cur = wordAgg.get(key) || { sum: 0, n: 0 };
+    cur.sum += s;
+    cur.n += 1;
+    wordAgg.set(key, cur);
+  }
+  const wordRows = Array.from(wordAgg.entries()).map(([w, { sum, n }]) => ({
+    w,
+    s: Math.round(sum / Math.max(1, n)),
+    n,
+  }));
+  wordRows.sort((a, b) => a.s - b.s);
+  const wordsLow = wordRows.slice(0, 10).map((r) => [r.w, r.s, r.n]);
+
+  return { pron, acc, flu, comp, lows, words: wordsLow };
 }
 
 export default async function handler(req, res) {
@@ -60,36 +120,51 @@ export default async function handler(req, res) {
   }
 
   try {
-    const body = req.body || {};
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
 
-    // Build the row we store; "summary" is jsonb and feeds the admin UI (trouble words/sounds)
-    const row = {
-      uid: body.uid || null,
-      ts: toIso(body.ts),
-      passage_key: body.passage || "unknown",
-      part_index: Number(body.part ?? 0),
-      text: body.text || "",
-      // Summary should contain {pron,acc,flu,comp,lows[],words[]}; client now sends this
-      summary:
-        body.summary && typeof body.summary === "object"
-          ? body.summary
-          : {
-              // fallback if client sent flat scores
-              pron: body.pron ?? null,
-              acc: body.acc ?? null,
-              flu: body.flu ?? null,
-              comp: body.comp ?? null,
-              lows: body.lows || [],
-              words: body.words || [],
-            },
-    };
+    // ---- Accept both legacy and new shapes ----
+    const uid = body.uid || body.userId || null;
+    const passageKey = body.passageKey || body.passage || "unknown";
+    const partIndex =
+      body.partIndex != null ? Number(body.partIndex) : Number(body.part ?? 0);
+    const text =
+      body.text ||
+      body.referenceText ||
+      body.azureResult?.DisplayText ||
+      body.azureResult?.NBest?.[0]?.Display ||
+      "";
 
-    // Minimal validation
-    if (!row.uid) {
-      return res.status(400).json({ ok: false, error: "missing_uid" });
+    // summary:
+    let summary = null;
+    if (body.summary && typeof body.summary === "object") {
+      summary = body.summary;
+    } else if (body.azureResult && typeof body.azureResult === "object") {
+      summary = toSummaryFromAzure(body.azureResult);
+    } else {
+      // fallback to any flat fields client might have sent
+      summary = {
+        pron: numOrNull(body.pron),
+        acc: numOrNull(body.acc),
+        flu: numOrNull(body.flu),
+        comp: numOrNull(body.comp),
+        lows: Array.isArray(body.lows) ? body.lows : [],
+        words: Array.isArray(body.words) ? body.words : [],
+      };
     }
 
-    // Insert into Postgres
+    if (!uid) return res.status(400).json({ ok: false, error: "missing_uid" });
+
+    const row = {
+      uid,
+      ts: toIso(body.ts),
+      passage_key: passageKey,
+      part_index: Number.isFinite(partIndex) ? partIndex : 0,
+      text,
+      summary: summary || {},
+    };
+
+    // Insert
     const sql = `
       INSERT INTO public.lux_attempts
         (uid, ts, passage_key, part_index, text, summary)
@@ -103,13 +178,12 @@ export default async function handler(req, res) {
       row.passage_key,
       row.part_index,
       row.text,
-      JSON.stringify(row.summary || {}),
+      JSON.stringify(row.summary),
     ];
 
     const { rows } = await pool.query(sql, params);
     const insertedId = rows?.[0]?.id || null;
 
-    // Nice log line (shows up in Vercel logs)
     console.log("[attempt] inserted", {
       uid: row.uid,
       passage: row.passage_key,
@@ -120,10 +194,8 @@ export default async function handler(req, res) {
     res.status(200).json({ ok: true, id: insertedId });
   } catch (err) {
     console.error("attempt handler error:", err);
-    res.status(500).json({
-      ok: false,
-      error: "server_error",
-      detail: String(err?.message || err),
-    });
+    res
+      .status(500)
+      .json({ ok: false, error: "server_error", detail: String(err?.message || err) });
   }
 }
