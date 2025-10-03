@@ -1,47 +1,41 @@
 // /api/tts.js
-// - GET  ?voices=1  -> proxy Azure voices list for your region (capabilities for style/role)
-// - POST (JSON)     -> build SSML and synthesize. On 400 with style, retry neutral and add X-Style-Fallback header.
+// - GET  ?voices=1  -> proxy Azure voices list (capabilities for styles/roles)
+// - POST JSON       -> build SSML on server. Omits zero-valued prosody attrs.
+//                     If 400 with style, retry neutral and set X-Style-Fallback.
 
 export default async function handler(req, res) {
   // CORS
-  res.setHeader("Access-Control-Allow-Origin", "*"); // consider locking to your origin
+  res.setHeader("Access-Control-Allow-Origin", "*"); // tighten to your origin if desired
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") return res.status(204).end();
 
   try {
-    const REGION =
-      process.env.AZURE_SPEECH_REGION ||
-      process.env.AZURE_REGION ||
-      "eastus";
-    const KEY =
-      process.env.AZURE_SPEECH_KEY ||
-      process.env.AZURE_TTS_KEY;
+    const REGION = process.env.AZURE_SPEECH_REGION || process.env.AZURE_REGION || "eastus";
+    const KEY    = process.env.AZURE_SPEECH_KEY    || process.env.AZURE_TTS_KEY;
 
     if (!REGION || !KEY) {
       return res.status(500).json({ error: "Server TTS not configured" });
     }
 
-    // GET voices capabilities (no body)
+    // ---------- GET: voices list ----------
     if (req.method === "GET") {
-      const wantsVoices = String(req.query?.voices || "") === "1";
-      if (!wantsVoices) {
+      if (String(req.query?.voices || "") !== "1") {
         return res.status(400).json({ error: "Bad request" });
       }
       const voicesUrl = `https://${REGION}.tts.speech.microsoft.com/cognitiveservices/voices/list`;
       const vr = await fetch(voicesUrl, {
         method: "GET",
-        headers: { "Ocp-Apim-Subscription-Key": KEY },
+        headers: { "Ocp-Apim-Subscription-Key": KEY, "Ocp-Apim-Subscription-Region": REGION },
       });
       if (!vr.ok) {
         const t = await vr.text().catch(() => "");
         console.error("🔻 AZURE VOICES ERROR", vr.status, t.slice(0, 300));
         return res.status(vr.status).json({ error: "voices list failed" });
       }
-      const json = await vr.json();
-      // Return en-US only (you can broaden later)
-      const enUS = json.filter((v) => v.Locale === "en-US");
+      const all = await vr.json();
+      const enUS = all.filter(v => v.Locale === "en-US");
       return res.status(200).json(enUS);
     }
 
@@ -50,22 +44,28 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    // Parse body
-    const { ssml, text, voice, ratePct, pitchSt, style, styledegree, role } = req.body || {};
+    // ---------- POST: synth ----------
+    let bodyData = req.body;
+    if (typeof bodyData === "string") { try { bodyData = JSON.parse(bodyData); } catch {} }
+
+    const {
+      ssml,
+      text,
+      voice,
+      ratePct,      // number, e.g. 0, +5, -10
+      pitchSt,      // number, semitones
+      style,        // string or ""
+      styledegree,  // number
+      role          // optional
+    } = bodyData || {};
+
     if (!voice) return res.status(400).json({ error: "missing voice" });
     if (!ssml && (!text || typeof text !== "string" || !text.trim())) {
       return res.status(400).json({ error: "missing text or ssml" });
     }
 
-    // Helper: build SSML on the server (so logs show exactly what Azure receives)
-    function escapeXml(s = "") {
-      return s
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&apos;");
-    }
+    // Helpers
+    const endpoint = `https://${REGION}.tts.speech.microsoft.com/cognitiveservices/v1`;
 
     const STYLE_SYNONYMS = {
       "customer-service": "customerservice",
@@ -75,103 +75,118 @@ export default async function handler(req, res) {
       newscaster: "newscast",
     };
 
-    function normalizeStyle(label = "", styleList = []) {
-      if (!label) return "";
-      const wanted = (STYLE_SYNONYMS[label] || label).toLowerCase();
-      if (wanted === "newscast") {
-        // If variants exist for this voice list call, pick formal over casual on the fly
-        // (We don't have voice-specific list here; client filters already. Keep generic.)
-        return "newscast"; // Azure still accepts "newscast" for many voices
-      }
-      return wanted;
-    }
+    const normStyle = (s = "") => {
+      if (!s) return "";
+      const wanted = (STYLE_SYNONYMS[s] || s).toLowerCase();
+      return wanted === "newscast" ? "newscast" : wanted;
+    };
 
-    function buildSSMLServer() {
+    const esc = (s = "") =>
+      s.replace(/&/g, "&amp;")
+       .replace(/</g, "&lt;")
+       .replace(/>/g, "&gt;")
+       .replace(/"/g, "&quot;")
+       .replace(/'/g, "&apos;");
+
+    // Build SSML.
+    // IMPORTANT: only include mstts namespace when style is present,
+    // and OMIT zero-valued rate/pitch entirely to avoid 400s.
+    function buildSSML() {
       if (ssml) return String(ssml);
 
-      const rPct = Math.round(Number(ratePct || 0));
-      const rate = rPct === 0 ? "0%" : rPct > 0 ? `+${rPct}%` : `${rPct}%`;
-      const pSt = Number(pitchSt || 0);
-      const pitch = pSt === 0 ? "0st" : pSt > 0 ? `+${pSt}st` : `${pSt}st`;
+      const r = Number.isFinite(ratePct) ? Math.round(ratePct) : 0;
+      const p = Number.isFinite(pitchSt) ? Math.round(pitchSt) : 0;
 
-      const rawStyle = (style || "").trim();
-      const normStyle = normalizeStyle(rawStyle);
+      const rateAttr  = r === 0 ? "" : ` rate="${r > 0 ? `+${r}%` : `${r}%`}"`;
+      const pitchAttr = p === 0 ? "" : ` pitch="${p > 0 ? `+${p}st` : `${p}st`}"`;
+
+      const s = normStyle(style || "");
       const deg = Math.min(2, Math.max(0.01, Number(styledegree || 1)));
       const roleAttr = role ? ` role="${role}"` : "";
 
-      const ns =
-        'xmlns="http://www.w3.org/2001/10/synthesis" ' +
-        'xmlns:mstts="https://www.w3.org/2001/mstts" ' +
-        'xml:lang="en-US"';
+      // Neutral path (no style): no mstts namespace, and only add <prosody> if we have attrs.
+      if (!s) {
+        const prosodyOpen = (rateAttr || pitchAttr) ? `<prosody${rateAttr}${pitchAttr}>` : "";
+        const prosodyClose = prosodyOpen ? `</prosody>` : "";
+        const inner = prosodyOpen ? `${prosodyOpen}${esc(text)}${prosodyClose}` : esc(text);
+        const xml =
+          `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">` +
+          `<voice name="${voice}">` + inner + `</voice></speak>`;
+        return xml;
+      }
 
-      const inner = normStyle
-        ? `<mstts:express-as style="${normStyle}" styledegree="${deg}"${roleAttr}><prosody rate="${rate}" pitch="${pitch}">${escapeXml(
-            text
-          )}</prosody></mstts:express-as>`
-        : `<prosody rate="${rate}" pitch="${pitch}">${escapeXml(text)}</prosody>`;
+      // Styled path
+      const prosodyOpen = `<prosody${rateAttr}${pitchAttr}>`;
+      const inner =
+        `<mstts:express-as style="${s}" styledegree="${deg}"${roleAttr}>` +
+        `${prosodyOpen}${esc(text)}</prosody>` +
+        `</mstts:express-as>`;
 
-      return `<speak version="1.0" ${ns}><voice name="${voice}">${inner}</voice></speak>`;
+      const xml =
+        `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">` +
+        `<voice name="${voice}" xmlns:mstts="https://www.w3.org/2001/mstts">` +
+        inner +
+        `</voice></speak>`;
+      return xml;
     }
 
-    const endpoint = `https://${REGION}.tts.speech.microsoft.com/cognitiveservices/v1`;
-
-    async function synth(ssmlToSend) {
-      console.log("🔸 SSML SENT TO AZURE:\n", ssmlToSend);
+    const callAzure = async (xml) => {
+      console.log("🔸 SSML SENT TO AZURE:\n", xml);
       const r = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Ocp-Apim-Subscription-Key": KEY,
+          "Ocp-Apim-Subscription-Region": REGION, // some tenants require region header
           "Content-Type": "application/ssml+xml",
           "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
           "User-Agent": "lux-pronunciation-tool",
         },
-        body: ssmlToSend,
+        body: xml,
       });
       return r;
-    }
+    };
 
-    // 1) First attempt (as requested)
-    const firstSSML = buildSSMLServer();
-    let r = await synth(firstSSML);
+    // First attempt (exact request)
+    const firstXml = buildSSML();
+    let r = await callAzure(firstXml);
 
-    // 2) If Azure 400 and a style was requested, retry neutral so UI can still play audio
-    const requestedStyle =
-      (STYLE_SYNONYMS[(style || "").trim()] || (style || "").trim()) || "";
+    // If a style was requested and Azure returns 400, retry neutral.
+    const requestedStyle = normStyle(style || "");
     if (!r.ok && r.status === 400 && requestedStyle) {
+      const neutralXml = firstXml
+        .replace(/<mstts:express-as[^>]*>/, "")
+        .replace(/<\/mstts:express-as>/, "")
+        // if no rate/pitch remained, also remove empty <prosody></prosody> just in case
+        .replace(/<prosody>\s*([^]*?)\s*<\/prosody>/, "$1");
       console.warn("🔻 AZURE ERROR 400 (will retry neutral)");
-      const neutralSSML = buildSSMLServer().replace(
-        /<mstts:express-as[^>]*>/,
-        ""
-      ).replace(
-        /<\/mstts:express-as>/,
-        ""
-      );
-      console.log("↩️  Retrying without express-as…\n", neutralSSML);
-      const r2 = await synth(neutralSSML);
+      console.log("↩️  Retrying without express-as…\n", neutralXml);
+
+      const r2 = await callAzure(neutralXml);
       if (r2.ok) {
-        const audioBuffer = Buffer.from(await r2.arrayBuffer());
+        const buf = Buffer.from(await r2.arrayBuffer());
         res.setHeader("Content-Type", "audio/mpeg");
         res.setHeader("Cache-Control", "no-store");
         res.setHeader("X-Style-Fallback", requestedStyle);
-        return res.status(200).send(audioBuffer);
+        return res.status(200).send(buf);
       } else {
         const t2 = await r2.text().catch(() => "");
-        console.error("🔻 AZURE ERROR (retry)", r2.status, t2.slice(0, 300));
+        console.error("🔻 AZURE ERROR (retry)", r2.status, t2.slice(0, 500) || "(no body)");
         return res.status(r2.status).json({ error: "Azure TTS error (retry)", detail: t2 });
       }
     }
 
     if (!r.ok) {
       const t = await r.text().catch(() => "");
-      console.error("🔻 AZURE ERROR", r.status, t.slice(0, 300));
+      console.error("🔻 AZURE ERROR", r.status, t.slice(0, 500) || "(no body)");
       return res.status(r.status).json({ error: "Azure TTS error", detail: t });
     }
 
     // Success
-    const audioBuffer = Buffer.from(await r.arrayBuffer());
+    const audio = Buffer.from(await r.arrayBuffer());
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
-    return res.status(200).send(audioBuffer);
+    return res.status(200).send(audio);
+
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "server error" });
