@@ -1,7 +1,7 @@
 // /api/tts.js
 export default async function handler(req, res) {
   // --- CORS (so your sandbox can call this) ---
-  res.setHeader("Access-Control-Allow-Origin", "*"); // or your specific origin
+  res.setHeader("Access-Control-Allow-Origin", "*"); // or set to your exact origin
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
@@ -32,15 +32,15 @@ export default async function handler(req, res) {
 
     const endpoint = `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`;
 
-    // --- Build the request body ---
+    // --- Build the SSML or legacy body ---
     let body;
     let contentType = "application/ssml+xml";
 
     if (ssml) {
-      // Already a full SSML string from the client
+      // Already a full SSML string from the client (includes style, pitch, etc.)
       body = ssml;
     } else {
-      // Legacy: wrap plain text in minimal SSML
+      // Legacy fallback: wrap plain text
       const safe = (s = "") =>
         s
           .replace(/&/g, "&amp;")
@@ -48,7 +48,6 @@ export default async function handler(req, res) {
           .replace(/>/g, "&gt;")
           .replace(/"/g, "&quot;")
           .replace(/'/g, "&apos;");
-
       body = `
         <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
           <voice name="${voice}">
@@ -56,6 +55,9 @@ export default async function handler(req, res) {
           </voice>
         </speak>`.trim();
     }
+
+    // 🔸 Log the SSML body for debugging in Vercel logs
+    console.log("🔸 SSML SENT TO AZURE:\n", body);
 
     // --- Call Azure ---
     const azureRes = await fetch(endpoint, {
