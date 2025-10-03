@@ -21,42 +21,66 @@ export default async function handler(req, res) {
 
     const endpoint = `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`;
 
-    // Build SSML (or wrap plain text)
-    let body;
-    if (ssml) {
-      body = ssml;
-    } else {
-      const safe = (s="") => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
-                              .replace(/"/g,"&quot;").replace(/'/g,"&apos;");
-      body = `
-        <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
-          <voice name="${voice}">
-            <prosody rate="${rate}">${safe(text)}</prosody>
-          </voice>
-        </speak>`.trim();
+    const safe = (s = "") =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
+       .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+    const bodyPrimary = ssml || `
+      <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
+        <voice name="${voice}">
+          <prosody rate="${rate}">${safe(text)}</prosody>
+        </voice>
+      </speak>`.trim();
+
+    console.log("🔸 SSML SENT TO AZURE:\n", bodyPrimary);
+
+    const callAzure = async (body) => {
+      const r = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Ocp-Apim-Subscription-Key": key,
+          "Ocp-Apim-Subscription-Region": region, // extra signal; harmless if not needed
+          "Content-Type": "application/ssml+xml",
+          "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+          "User-Agent": "LuxPronunciationTool",
+        },
+        body,
+      });
+      return r;
+    };
+
+    // First attempt (whatever client requested)
+    let azureRes = await callAzure(bodyPrimary);
+    if (!azureRes.ok) {
+      // Read whatever Azure returned (sometimes empty)
+      const detail = await azureRes.text().catch(() => "");
+      console.error("🔻 AZURE ERROR", azureRes.status, detail?.slice(0, 800) || "(no body)");
+
+      // If the request used express-as, retry once without it (keep prosody)
+      if (azureRes.status === 400 && bodyPrimary.includes("<mstts:express-as")) {
+        const stripped = bodyPrimary
+          .replace(/<mstts:express-as[^>]*>/, "")
+          .replace(/<\/mstts:express-as>/, "");
+        console.log("↩️  Retrying without express-as…\n", stripped);
+        azureRes = await callAzure(stripped);
+        if (azureRes.ok) {
+          const buf = Buffer.from(await azureRes.arrayBuffer());
+          res.setHeader("Content-Type", "audio/mpeg");
+          res.setHeader("Cache-Control", "no-store");
+          res.setHeader("X-Style-Fallback", "1");
+          return res.status(200).send(buf);
+        }
+        const detail2 = await azureRes.text().catch(() => "");
+        console.error("🔻 AZURE ERROR (retry)", azureRes.status, detail2?.slice(0, 800) || "(no body)");
+        return res.status(azureRes.status).json({ error: "Azure TTS error", detail: detail2 || detail || "" });
+      }
+
+      // No express-as, just fail through
+      return res.status(azureRes.status).json({ error: "Azure TTS error", detail });
     }
 
-    // Log the SSML sent
-    console.log("🔸 SSML SENT TO AZURE:\n", body);
-
-    const r = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Ocp-Apim-Subscription-Key": key,
-        "Content-Type": "application/ssml+xml",
-        "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
-        "User-Agent": "LuxPronunciationTool",
-      },
-      body,
-    });
-
-    if (!r.ok) {
-      const detail = await r.text().catch(() => "");
-      console.error("🔻 AZURE ERROR", r.status, detail);
-      return res.status(r.status).json({ error: "Azure TTS error", detail });
-    }
-
-    const buf = Buffer.from(await r.arrayBuffer());
+    // Success path
+    const buf = Buffer.from(await azureRes.arrayBuffer());
     res.setHeader("Content-Type", "audio/mpeg");
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).send(buf);
