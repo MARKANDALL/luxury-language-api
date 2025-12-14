@@ -1,5 +1,6 @@
 // api/pronunciation-gpt.js
 // Mode + Chunk support enabled.
+// STATUS: Phase B Optimized (Lazy Loading + Logging)
 
 export const config = {
   api: {
@@ -9,6 +10,7 @@ export const config = {
 };
 
 export default async function handler(req, res) {
+  // 1. CORS & Methods
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -17,6 +19,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
 
+  // 2. Imports
   const [{ OpenAI }, { jsonrepair }] = await Promise.all([
     import("openai"),
     import("jsonrepair"),
@@ -24,7 +27,7 @@ export default async function handler(req, res) {
 
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  // --- Helpers ---
+  // 3. Helpers
   const universallyHard = new Set(["θ", "ð", "ɹ"]);
   const langs = {
     es: "Spanish", fr: "French", pt: "Portuguese", zh: "Chinese",
@@ -59,13 +62,17 @@ export default async function handler(req, res) {
     return JSON.parse(str.slice(str.indexOf("{"), str.lastIndexOf("}") + 1));
   }
 
+  // 4. Translation Helper
   async function translateMissing(arr, lang) {
     const need = arr.filter((s) => !s.l1);
     if (!need.length || lang === "universal") return;
     
+    // LOG: Prove we are translating
+    console.log(`[AI Coach] Translating ${need.length} sections to ${lang}...`);
+
     const prompt = `Translate these English strings into *${langs[lang]}*. Return JSON object { "items": ["..."] }.`;
     const rsp = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o-mini", // Cheap model for translation
       temperature: 0,
       response_format: { type: "json_object" },
       max_tokens: 1000,
@@ -84,6 +91,7 @@ export default async function handler(req, res) {
     }
   }
 
+  // 5. Main Handler
   try {
     const {
       referenceText = "",
@@ -98,8 +106,7 @@ export default async function handler(req, res) {
     const worst = worstPhoneme(azureResult);
     const badList = worstWords(azureResult);
 
-    // --- MILESTONE 2: CHUNKING LOGIC ---
-    
+    // --- SECTIONS DEFINITION ---
     const ALL_SECTIONS = [
       { emoji: "🎯", en: "Quick Coaching", min: 80, max: 120 },
       { emoji: "🔬", en: "Phoneme Profile", min: 70, max: 110 },
@@ -111,11 +118,13 @@ export default async function handler(req, res) {
 
     let targetSections = [];
     let systemPrompt = "";
-    let model = "gpt-4o";
+    let model = "gpt-4o"; // Default high-quality
     let maxTokens = 1800;
 
+    // --- PHASE B: COST CONTROL LOGIC ---
     if (mode === "simple") {
       // FAST MODE: gpt-4o-mini, 1 section
+      console.log("[AI Coach] Mode: Simple (Mini Model)");
       model = "gpt-4o-mini";
       maxTokens = 600;
       targetSections = [{ title: "Quick Coach", en: "string", emoji: "⚡" }];
@@ -125,17 +134,18 @@ Return pure JSON: { "sections": [ { "title": "Quick Coach", "en": "string", "emo
 Provide 3 bullet points on the user's worst phoneme /${worst}/ or worst words. Max 50 words total. No markdown.`;
 
     } else {
-      // DETAILED MODE: gpt-4o, chunked
-      // Chunk 1: indices 0, 1
-      // Chunk 2: indices 2, 3
-      // Chunk 3: indices 4, 5
+      // DETAILED MODE: gpt-4o, Chunked
+      // Logic: Slice the array so we ONLY generate 2 sections at a time.
       const chunkIdx = Math.max(1, Math.min(3, Number(chunk) || 1)) - 1;
       const start = chunkIdx * 2;
       const end = start + 2;
       
       targetSections = ALL_SECTIONS.slice(start, end);
       
-      // Calculate max tokens based on chunk size (saving money)
+      // LOG: Prove we are lazy-loading
+      console.log(`[AI Coach] Mode: Deep (Chunk ${chunkIdx + 1} of 3) -> Generates ${targetSections.length} sections`);
+
+      // Optimize tokens: We only need ~500 words for 2 sections
       maxTokens = 1000; 
 
       const ranges = targetSections
@@ -174,7 +184,6 @@ If langCode === "universal" leave "l1" blank. No markdown.`;
     try {
       data = forceJson(gptRaw);
     } catch (e1) {
-      // Only repair if strictly necessary
       data = JSON.parse(jsonrepair(gptRaw));
     }
 
@@ -190,7 +199,7 @@ If langCode === "universal" leave "l1" blank. No markdown.`;
     return res.status(200).json({ sections: finalSections });
 
   } catch (err) {
-    console.error("[pronunciation-gpt]", err);
+    console.error("[pronunciation-gpt] Fatal Error:", err);
     return res.status(200).json({
       fallbackSections: [{ title: "Error", en: "Could not generate feedback.", emoji: "⚠️" }]
     });
