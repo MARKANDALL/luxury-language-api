@@ -1,4 +1,4 @@
-// /api/assess.js
+// /api/assess.js  (backend)
 import formidable from "formidable";
 import fs from "fs/promises";
 import ffmpeg from "fluent-ffmpeg";
@@ -10,21 +10,19 @@ ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 export const config = { api: { bodyParser: false } };
 
-function firstOf(v) {
-  return Array.isArray(v) ? v[0] : v;
-}
-
-function getFile(f) {
-  if (!f) return null;
-  return Array.isArray(f) ? f[0] : f;
-}
-
-export default async function handler(req, res) {
-  // CORS
+function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Cache-Control", "no-store");
+}
+
+function pickFirst(v) {
+  return Array.isArray(v) ? v[0] : v;
+}
+
+export default async function handler(req, res) {
+  cors(res);
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Only POST allowed" });
@@ -34,56 +32,46 @@ export default async function handler(req, res) {
     process.env.AZURE_REGION ||
     "eastus";
 
+  const key = process.env.AZURE_SPEECH_KEY;
+  if (!key) return res.status(500).json({ error: "Missing AZURE_SPEECH_KEY" });
+
   const enableProsody =
     String(process.env.ENABLE_PROSODY || "").toLowerCase() === "true";
 
   console.log("[FeatureFlag] ENABLE_PROSODY:", enableProsody);
 
-  if (!process.env.AZURE_SPEECH_KEY) {
-    return res.status(500).json({ error: "missing_env", detail: "AZURE_SPEECH_KEY is not set" });
-  }
-
-  // Allow empty files so we can return a clean 400 ourselves (instead of formidable throwing)
-  const form = formidable({
-    multiples: false,
-    allowEmptyFiles: true,
-    minFileSize: 0,
-    maxFileSize: 15 * 1024 * 1024, // 15MB safety
-  });
-
-  let outputPath = null;
   let inputPath = null;
+  let outputPath = null;
 
   try {
-    const { fields, files } = await new Promise((resolve, reject) => {
-      form.parse(req, (err, fields, files) => {
-        if (err) return reject(err);
-        resolve({ fields, files });
-      });
+    // IMPORTANT: allowEmptyFiles:true so Formidable doesn't throw (1010) before we can 400 it.
+    const form = formidable({
+      multiples: false,
+      allowEmptyFiles: true,
+      maxFileSize: 15 * 1024 * 1024, // 15MB safety
     });
 
-    // Inputs
-    const referenceText = firstOf(fields?.text) || "";
-    const audioFile = getFile(files?.audio);
+    const { fields, files } = await new Promise((resolve, reject) => {
+      form.parse(req, (err, flds, fls) => (err ? reject(err) : resolve({ fields: flds, files: fls })));
+    });
 
+    let referenceText = pickFirst(fields?.text);
+    referenceText = typeof referenceText === "string" ? referenceText.trim() : "";
+
+    const audioFile = files?.audio?.[0] || files?.audio;
     inputPath = audioFile?.filepath || audioFile?.path || null;
-    const size = Number(audioFile?.size || 0);
+    const size = Number(audioFile?.size ?? 0);
 
-    if (!referenceText.trim()) {
-      return res.status(400).json({ error: "bad_request", detail: "Missing text" });
+    if (!referenceText) return res.status(400).json({ error: "Missing text" });
+    if (!inputPath) return res.status(400).json({ error: "Missing audio" });
+
+    // Empty/zero-byte audio => 400 (NOT 500)
+    if (!Number.isFinite(size) || size <= 0) {
+      return res.status(400).json({ error: "Empty audio" });
     }
 
-    if (!inputPath) {
-      return res.status(400).json({ error: "bad_request", detail: "Missing audio file" });
-    }
-
-    if (size <= 0) {
-      // IMPORTANT: this is your requested behavior
-      return res.status(400).json({ error: "empty_audio", detail: "Audio upload was empty (0 bytes)" });
-    }
-
-    // Convert to 16 kHz mono WAV
-    outputPath = path.join(tmpdir(), `converted_${Date.now()}_${Math.random().toString(16).slice(2)}.wav`);
+    // Convert to 16 kHz mono WAV (Azure expects PCM-ish)
+    outputPath = path.join(tmpdir(), `lux_assess_${Date.now()}_${Math.random().toString(16).slice(2)}.wav`);
 
     await new Promise((resolve, reject) => {
       ffmpeg(inputPath)
@@ -105,19 +93,14 @@ export default async function handler(req, res) {
       ...(enableProsody && { EnableProsodyAssessment: true }),
     };
 
-    const pronAssessmentHeader = Buffer.from(
-      JSON.stringify(pronAssessmentParams),
-      "utf8"
-    ).toString("base64");
+    const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "utf8").toString("base64");
 
-    const endpoint =
-      `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1` +
-      `?language=en-US&format=detailed`;
+    const endpoint = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed`;
 
     const azureRes = await fetch(endpoint, {
       method: "POST",
       headers: {
-        "Ocp-Apim-Subscription-Key": process.env.AZURE_SPEECH_KEY,
+        "Ocp-Apim-Subscription-Key": key,
         "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
         "Pronunciation-Assessment": pronAssessmentHeader,
         Accept: "application/json",
@@ -127,20 +110,20 @@ export default async function handler(req, res) {
 
     const raw = await azureRes.text();
 
-    let json = null;
+    let json;
     try {
       json = JSON.parse(raw);
     } catch {
-      return res.status(azureRes.status).json({
-        error: "azure_non_json",
+      return res.status(502).json({
+        error: "Azure returned non-JSON",
         status: azureRes.status,
-        raw: raw.slice(0, 2000), // keep logs sane
+        raw,
       });
     }
 
-    if (azureRes.status >= 400) {
+    if (!azureRes.ok) {
       return res.status(azureRes.status).json({
-        error: "azure_error",
+        error: "Azure error",
         status: azureRes.status,
         json,
       });
@@ -148,20 +131,16 @@ export default async function handler(req, res) {
 
     return res.status(200).json(json);
   } catch (e) {
-    // If formidable still throws something with an httpCode, reflect it cleanly
-    const httpCode = Number(e?.httpCode || 0);
-    if (httpCode >= 400 && httpCode < 500) {
-      return res.status(httpCode).json({
-        error: "bad_request",
-        detail: e?.message || String(e),
-        code: e?.code || null,
-      });
+    // If formidable still throws, map empty-file-ish cases to 400
+    const msg = String(e?.message || e);
+    if (msg.includes("allowEmptyFiles is false") || msg.includes("file size should be greater than 0")) {
+      return res.status(400).json({ error: "Empty audio" });
     }
 
     console.error("[/api/assess] error:", e);
-    return res.status(500).json({ error: "server_error", detail: e?.message || String(e) });
+    return res.status(500).json({ error: "Server error", details: String(e?.message || e) });
   } finally {
-    // Cleanup temp files
+    // cleanup temp files
     if (outputPath) {
       try { await fs.rm(outputPath, { force: true }); } catch {}
     }
