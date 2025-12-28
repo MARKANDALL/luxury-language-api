@@ -103,14 +103,17 @@ export default async function handler(req, res) {
     // --- Inputs
     const uid = q.uid ? String(q.uid) : null;
     const limit = clampInt(q.limit, 1, 2000, 500);
+
     const fromIso = parseISO(q.from);
-    // make "to" exclusive end-of-day if date supplied
+
+    // make "to" exclusive end-of-day if date supplied (YYYY-MM-DD => next day at 00:00)
     const toIso = q.to
       ? new Date(new Date(q.to).getTime() + 24 * 3600 * 1000).toISOString()
       : null;
 
-    // passages filter
+    // passages filter (supports BOTH: passages=a,b,c  AND legacy: passage=a)
     let passages = null;
+
     if (q.passages) {
       const list = String(q.passages)
         .split(",")
@@ -118,6 +121,9 @@ export default async function handler(req, res) {
         .filter(Boolean)
         .filter((p) => ALLOWED_PASSAGES.has(p));
       if (list.length) passages = list;
+    } else if (q.passage) {
+      const one = String(q.passage).trim();
+      if (ALLOWED_PASSAGES.has(one)) passages = [one];
     }
 
     // --- Build SQL safely
@@ -150,10 +156,14 @@ export default async function handler(req, res) {
         a.part_index,
         a.text,
         a.summary,
-        COALESCE(l.label, '') AS label
+        COALESCE(l.label, u.label, '') AS label
       FROM public.lux_attempts a
- LEFT JOIN public.lux_user_labels l ON l.uid::text = a.uid    `;
+      LEFT JOIN public.lux_user_labels l ON l.uid::text = a.uid
+      LEFT JOIN public.lux_users u ON u.uid::text = a.uid
+    `;
+
     if (where.length) sql += ` WHERE ${where.join(" AND ")} `;
+
     params.push(limit);
     sql += ` ORDER BY a.ts DESC LIMIT $${params.length}`;
 
