@@ -135,6 +135,12 @@ export default async function handler(req, res) {
       body.azureResult?.NBest?.[0]?.Display ||
       "";
 
+    // --- NEW: accept sessionId (both shapes) ---
+    const sessionId = body.sessionId || body.session_id || null;
+
+    // Prefer client-sent localTime if present
+    const ts = toIso(body.localTime || body.ts);
+
     // summary:
     let summary = null;
     if (body.summary && typeof body.summary === "object") {
@@ -157,19 +163,20 @@ export default async function handler(req, res) {
 
     const row = {
       uid,
-      ts: toIso(body.ts),
+      ts,
       passage_key: passageKey,
       part_index: Number.isFinite(partIndex) ? partIndex : 0,
       text,
       summary: summary || {},
+      session_id: sessionId,
     };
 
     // Insert
     const sql = `
       INSERT INTO public.lux_attempts
-        (uid, ts, passage_key, part_index, text, summary)
+        (uid, ts, passage_key, part_index, text, summary, session_id)
       VALUES
-        ($1, $2::timestamptz, $3, $4, $5, $6::jsonb)
+        ($1, $2::timestamptz, $3, $4, $5, $6::jsonb, $7)
       RETURNING id
     `;
     const params = [
@@ -179,6 +186,7 @@ export default async function handler(req, res) {
       row.part_index,
       row.text,
       JSON.stringify(row.summary),
+      row.session_id,
     ];
 
     const { rows } = await pool.query(sql, params);
