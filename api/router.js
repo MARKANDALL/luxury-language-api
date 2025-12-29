@@ -6,6 +6,7 @@ import adminRecent from "../routes/admin-recent.js";
 import adminUserStats from "../routes/admin-user-stats.js";
 import assess from "../routes/assess.js";
 import attempt from "../routes/attempt.js";
+import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
 import evaluate from "../routes/evaluate.js";
 import migrate from "../routes/migrate.js";
@@ -20,6 +21,7 @@ const ROUTES = {
   "admin-user-stats": adminUserStats,
   assess,
   attempt,
+  "convo-report": convoReport,
   "convo-turn": convoTurn,
   evaluate,
   migrate,
