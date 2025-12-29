@@ -4,7 +4,9 @@
   "private": true,
   "description": "Pronunciation tool API functions",
   "type": "module",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@supabase/supabase-js": "^2.57.4",
@@ -13,6 +15,7 @@
     "gpt-tokenizer": "^3.0.1",
     "jsonrepair": "^3.0.1",
     "microsoft-cognitiveservices-speech-sdk": "^1.44.1",
+    "node-wav": "^0.0.2",
     "openai": "^4.103.0",
     "pg": "^8.11.5"
   }
