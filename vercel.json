@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/api/router", "destination": "/api/router" },
+    { "source": "/api/:route*", "destination": "/api/router?route=:route*" }
+  ]
+}
