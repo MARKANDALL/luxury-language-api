@@ -1,4 +1,4 @@
-// api/convo-report.js
+// routes/convo-report.js
 export const config = {
   api: { bodyParser: true, externalResolver: true },
 };
