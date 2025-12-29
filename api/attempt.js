@@ -125,7 +125,8 @@ export default async function handler(req, res) {
 
     // ---- Accept both legacy and new shapes ----
     const uid = body.uid || body.userId || null;
-    const passageKey = body.passageKey || body.passage || "unknown";
+    const passageKey =
+      body.passageKey || body.passage_key || body.passage || "unknown";
     const partIndex =
       body.partIndex != null ? Number(body.partIndex) : Number(body.part ?? 0);
     const text =
@@ -195,6 +196,7 @@ export default async function handler(req, res) {
     console.log("[attempt] inserted", {
       uid: row.uid,
       passage: row.passage_key,
+      session_id: row.session_id,
       part_index: row.part_index,
       id: insertedId,
     });
