@@ -39,8 +39,8 @@ export default async function handler(req, res) {
     const { uid } = req.query;
 
     if (!uid || !isUUID(uid)) {
-      return res.status(400).json({ 
-        error: "Invalid or missing UID. Must be a standard UUID." 
+      return res.status(400).json({
+        error: "Invalid or missing UID. Must be a standard UUID.",
       });
     }
 
@@ -54,7 +54,8 @@ export default async function handler(req, res) {
         passage_key,
         part_index,
         text,
-        summary
+        session_id,
+        (summary - 'raw') AS summary
       FROM public.lux_attempts
       WHERE uid = $1
       ORDER BY ts DESC
@@ -65,7 +66,6 @@ export default async function handler(req, res) {
 
     // 5. Return the rows
     return res.status(200).json({ rows });
-
   } catch (err) {
     console.error("user-recent error:", err);
     return res.status(500).json({ error: "Server error fetching history." });

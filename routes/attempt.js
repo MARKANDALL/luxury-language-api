@@ -143,21 +143,45 @@ export default async function handler(req, res) {
     const ts = toIso(body.localTime || body.ts);
 
     // summary:
-    let summary = null;
+    // Merge server-derived base summary (Azure) with client extensions (meta/stats/AI artifacts).
+    const azureObj =
+      body.azureResult && typeof body.azureResult === "object"
+        ? body.azureResult
+        : null;
+
+    // Back-compat fallback shape (used when no Azure and/or when client sends flat fields)
+    const flatBaseline = {
+      pron: numOrNull(body.pron),
+      acc: numOrNull(body.acc),
+      flu: numOrNull(body.flu),
+      comp: numOrNull(body.comp),
+      lows: Array.isArray(body.lows) ? body.lows : [],
+      words: Array.isArray(body.words) ? body.words : [],
+    };
+    const hasFlat =
+      flatBaseline.pron != null ||
+      flatBaseline.acc != null ||
+      flatBaseline.flu != null ||
+      flatBaseline.comp != null ||
+      (flatBaseline.lows && flatBaseline.lows.length) ||
+      (flatBaseline.words && flatBaseline.words.length);
+
+    // Start with the server-derived summary when we have Azure, else fall back to the flat baseline.
+    let summary = azureObj ? toSummaryFromAzure(azureObj) : flatBaseline;
+
+    // Prefer merging client summary (meta/stats/etc) on top of base summary.
     if (body.summary && typeof body.summary === "object") {
-      summary = body.summary;
-    } else if (body.azureResult && typeof body.azureResult === "object") {
-      summary = toSummaryFromAzure(body.azureResult);
-    } else {
-      // fallback to any flat fields client might have sent
-      summary = {
-        pron: numOrNull(body.pron),
-        acc: numOrNull(body.acc),
-        flu: numOrNull(body.flu),
-        comp: numOrNull(body.comp),
-        lows: Array.isArray(body.lows) ? body.lows : [],
-        words: Array.isArray(body.words) ? body.words : [],
-      };
+      summary = { ...summary, ...body.summary };
+    } else if (azureObj && hasFlat) {
+      // Rare: allow flat fields to extend/override when Azure exists but no summary object was sent
+      summary = { ...summary, ...flatBaseline };
+    }
+
+    // Optional: persist raw Azure only when explicitly requested (never returned by user-recent).
+    if (body.storeRawAzure === true && azureObj) {
+      const raw = summary.raw && typeof summary.raw === "object" ? summary.raw : {};
+      if (!raw.azure) raw.azure = azureObj;
+      summary.raw = raw;
     }
 
     if (!uid) return res.status(400).json({ ok: false, error: "missing_uid" });
