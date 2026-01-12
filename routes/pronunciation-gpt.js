@@ -16,14 +16,23 @@ const PERSONAS = {
     style: "Encouraging, gentle, constructive."
   },
   drill: {
-    role: "You are a strict Drill Sergeant. DO NOT use emojis. DO NOT give praise. State the error bluntly. Command the user to repeat.",
-    style: "Direct, imperative, harsh, concise. Use ALL CAPS for key commands."
+    role: "You are a strict Drill Sergeant. DO NOT use emojis. DO NOT give praise. State the error bluntly. Command the user to repeat. IMPORTANT: Do NOT write in ALL CAPS by default. Use normal sentence case for explanations.",
+    style: "Direct, imperative, harsh, concise. Sentence case by default. You may use ALL CAPS only for very short command phrases (max 4 words) and at most twice per response, to simulate shouting."
   },
   linguist: {
     role: "You are a technical Speech Pathologist. Use IPA symbols. Focus on tongue position (alveolar ridge, bilabial, etc), voicing, and airflow.",
     style: "Clinical, precise, academic. No fluff."
   }
 };
+
+// Extra guardrails specifically for Drill Sergeant casing behavior
+const DRILL_CASING_GUARDRAILS = `
+Casing rules (Drill Sergeant):
+- Write in normal sentence case by default.
+- DO NOT write the whole response in ALL CAPS.
+- ALL CAPS is allowed only for short commands (≤4 words), max 2 per response.
+- If you use an ALL CAPS command, put it on its own line.
+`;
 
 export default async function handler(req, res) {
   // 1. CORS
@@ -155,6 +164,7 @@ export default async function handler(req, res) {
       systemPrompt = `
         ${selectedPersona.role}
         Tone: ${selectedPersona.style}
+        ${persona === "drill" ? DRILL_CASING_GUARDRAILS : ""}
         Return pure JSON: { "sections": [ { "title": "Quick Coach", "en": "string", "emoji": "⚡" } ] }
         Provide 3 bullet points on the user's worst phoneme /${worst}/ or worst words. Max 50 words total. No markdown.
       `;
@@ -178,6 +188,7 @@ export default async function handler(req, res) {
       systemPrompt = `
         ${selectedPersona.role}
         Tone: ${selectedPersona.style}
+        ${persona === "drill" ? DRILL_CASING_GUARDRAILS : ""}
         Return pure JSON exactly like: { "sections":[ {"title":"","titleL1":"","en":"","l1":""} ] }
         Follow these ${targetSections.length} sections in order:
         ${ranges}
