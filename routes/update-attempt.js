@@ -21,8 +21,18 @@ export default async function handler(req, res) {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-token");
   if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "method_not_allowed" });
+
+  // --- Admin token gate
+  const token =
+    (req.headers["x-admin-token"] || "").toString().trim() ||
+    (req.query?.token || "").toString().trim();
+  const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
+  if (!expected || token !== expected) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
 
   try {
     const { id, ai_feedback } = req.body;
