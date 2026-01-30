@@ -3,13 +3,25 @@ export default async function handler(req, res) {
   // Basic CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-token");
   // Let browser JS read our custom headers:
   res.setHeader("Access-Control-Expose-Headers",
     "X-Style-Used, X-Style-Requested, X-Style-Fallback, X-Style-Message, X-Azure-Region"
   );
 
   if (req.method === "OPTIONS") return res.status(204).end();
+
+  // P0: ADMIN_TOKEN gate (cost-control for paid Azure TTS proxy)
+const token =
+  (req.headers["x-admin-token"] || "").toString().trim() ||
+  (req.query?.token || "").toString().trim();
+
+const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
+
+if (!expected || token !== expected) {
+  return res.status(401).json({ error: "unauthorized" });
+}
+
 
   const key = process.env.AZURE_SPEECH_KEY || process.env.AZURE_TTS_KEY;
   const region =
