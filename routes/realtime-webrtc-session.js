@@ -31,10 +31,14 @@ async function handler(req, res) {
     (req.headers["x-admin-token"] || "").toString().trim() ||
     (req.query?.token || "").toString().trim();
 
-  const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
-  if (!expected || token !== expected) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
+const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
+
+// TEMP: If ADMIN_TOKEN is unset, keep the endpoint open for testing.
+// When you set ADMIN_TOKEN later, token becomes required.
+if (expected && token !== expected) {
+  return res.status(401).json({ error: "unauthorized" });
+}
+
 
   const apiKey = (process.env.OPENAI_API_KEY || "").toString().trim();
   if (!apiKey) {
