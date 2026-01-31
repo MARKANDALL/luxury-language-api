@@ -11,6 +11,7 @@ import convoTurn from "../routes/convo-turn.js";
 import evaluate from "../routes/evaluate.js";
 import migrate from "../routes/migrate.js";
 import pronunciationGpt from "../routes/pronunciation-gpt.js";
+import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
 import tts from "../routes/tts.js";
 import updateAttempt from "../routes/update-attempt.js";
 import userRecent from "../routes/user-recent.js";
@@ -26,6 +27,7 @@ const ROUTES = {
   evaluate,
   migrate,
   "pronunciation-gpt": pronunciationGpt,
+  "realtime/webrtc/session": realtimeWebrtcSession,
   tts,
   "update-attempt": updateAttempt,
   "user-recent": userRecent,
