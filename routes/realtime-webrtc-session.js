@@ -1,138 +1,135 @@
-// routes/realtime-webrtc-session.js
-// POST /api/realtime/webrtc/session
-// Receives browser offer SDP (text/plain or application/sdp) and returns answer SDP from OpenAI Realtime.
-//
-// Uses OpenAI "unified interface" SDP exchange via /v1/realtime/calls.
+// features/streaming/transport/realtime-webrtc.js
+// Implements the TransportController contract: emits events via onEvent({type: ...})
 
-export const config = {
-  api: {
-    bodyParser: false, // we need the raw SDP text
-    externalResolver: true,
-  },
-};
+import { getWebRTCAnswerSDP } from "./session-bootstrap.js";
 
-async function handler(req, res) {
-  // CORS
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-token");
-  res.setHeader(
-    "Access-Control-Expose-Headers",
-    "X-Voice-Requested, X-Voice-Used, X-Model-Used"
-  );
+export function createRealtimeWebRTCTransport({ onEvent } = {}) {
+  let pc = null;
+  let dc = null;
+  let micStream = null;
+  let audioEl = null;
 
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method Not Allowed" });
+  function emit(type, extra) {
+    try { onEvent?.({ type, ...(extra || {}) }); } catch {}
   }
 
-  // ADMIN_TOKEN gate (cost-control)
-  const token =
-    (req.headers["x-admin-token"] || "").toString().trim() ||
-    (req.query?.token || "").toString().trim();
+  async function connect() {
+    if (pc) return;
 
-  const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
-  if (!expected || token !== expected) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
+    pc = new RTCPeerConnection();
 
-  const apiKey = (process.env.OPENAI_API_KEY || "").toString().trim();
-  if (!apiKey) {
-    return res.status(500).json({ error: "missing_openai_api_key" });
-  }
+    // Remote audio playback
+    audioEl = document.createElement("audio");
+    audioEl.autoplay = true;
+    audioEl.playsInline = true;
 
-  // Read offer SDP as raw text
-  const offerSDP = await readTextBody(req);
-  if (!offerSDP || offerSDP.trim().length < 20) {
-    return res.status(400).json({ error: "missing_offer_sdp" });
-  }
-
-  // Config knobs (optional)
-  const model = (req.query?.model || "gpt-realtime").toString();
-  const requestedVoice = (req.query?.voice || "marin").toString();
-
-  // Voice fallback: try requested voice first; if it fails and it's not marin, retry marin.
-  const primaryVoice = requestedVoice;
-  const fallbackVoice = primaryVoice === "marin" ? null : "marin";
-
-  const attempt1 = await callRealtime({ apiKey, offerSDP, model, voice: primaryVoice });
-  let final = attempt1;
-
-  if (!attempt1.ok && fallbackVoice) {
-    const attempt2 = await callRealtime({ apiKey, offerSDP, model, voice: fallbackVoice });
-    if (attempt2.ok) final = attempt2;
-  }
-
-  res.setHeader("X-Voice-Requested", primaryVoice);
-  res.setHeader("X-Voice-Used", final.voice || primaryVoice);
-  res.setHeader("X-Model-Used", model);
-
-  if (!final.ok) {
-    // Preserve status + text for debugging in the frontend error path
-    res.status(final.status || 500);
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    return res.end(final.text || "Realtime SDP exchange failed");
-  }
-
-  // Success: return answer SDP text
-  res.status(200);
-  res.setHeader("Content-Type", "application/sdp; charset=utf-8");
-  return res.end(final.text);
-}
-
-export default handler;
-
-async function callRealtime({ apiKey, offerSDP, model, voice }) {
-  const sessionConfig = JSON.stringify({
-    type: "realtime",
-    model,
-    audio: { output: { voice } },
-  });
-
-  // FormData is available in modern Node runtimes on Vercel.
-  // If your runtime lacks it, you'll see an exception and it will show in Vercel logs.
-  const fd = new FormData();
-  fd.set("sdp", offerSDP);
-  fd.set("session", sessionConfig);
-
-  try {
-    const r = await fetch("https://api.openai.com/v1/realtime/calls", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: fd,
-    });
-
-    const text = await r.text();
-    return { ok: r.ok, status: r.status, text, voice };
-  } catch (e) {
-    return {
-      ok: false,
-      status: 500,
-      text: `Realtime call error: ${e?.message || String(e)}`,
-      voice,
+    pc.ontrack = (e) => {
+      try { audioEl.srcObject = e.streams[0]; } catch {}
     };
-  }
-}
 
-function readTextBody(req) {
-  // In some environments, req.body may already be present; prefer it if it's a string.
-  if (typeof req.body === "string") return Promise.resolve(req.body);
+    pc.onconnectionstatechange = () => {
+      const s = pc?.connectionState || "disconnected";
+      if (s === "connected") emit("connected");
+      if (s === "failed" || s === "disconnected" || s === "closed") emit("disconnected");
+    };
 
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
+    // Live mic track (always-on for now)
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    for (const t of micStream.getTracks()) pc.addTrack(t, micStream);
 
-    req.on("data", (c) => {
-      chunks.push(c);
-      size += c.length;
-      if (size > 2_000_000) {
-        reject(new Error("Body too large"));
-      }
+    // Data channel for events + text
+    dc = pc.createDataChannel("oai-events");
+    dc.addEventListener("open", () => emit("connected"));
+    dc.addEventListener("close", () => emit("disconnected"));
+    dc.addEventListener("message", (e) => {
+      let evt = null;
+      try { evt = JSON.parse(e.data); } catch { return; }
+      const text = extractAssistantText(evt);
+      if (text) emit("assistant_text", { text });
     });
 
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
+    // SDP exchange via your backend
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const answerSDP = await getWebRTCAnswerSDP(offer.sdp);
+    await pc.setRemoteDescription({ type: "answer", sdp: answerSDP });
+
+    emit("connected"); // best-effort so UI doesn't hang
+  }
+
+  async function disconnect() {
+    try { dc?.close(); } catch {}
+    try { pc?.close(); } catch {}
+
+    if (micStream) {
+      for (const t of micStream.getTracks()) {
+        try { t.stop(); } catch {}
+      }
+    }
+
+    pc = null;
+    dc = null;
+    micStream = null;
+
+    try {
+      if (audioEl) {
+        audioEl.pause();
+        audioEl.srcObject = null;
+        audioEl.remove();
+      }
+    } catch {}
+    audioEl = null;
+
+    emit("disconnected");
+  }
+
+  function sendEvent(evt) {
+    if (!dc || dc.readyState !== "open") return false;
+    dc.send(JSON.stringify(evt));
+    return true;
+  }
+
+  async function sendUserText(text) {
+    if (!text) return;
+
+    const ok1 = sendEvent({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text }],
+      },
+    });
+
+    const ok2 = sendEvent({ type: "response.create" });
+
+    if (!ok1 || !ok2) throw new Error("Transport not connected");
+  }
+
+  // Your current PTT records blobs; WebRTC realtime uses live mic tracks instead.
+  async function sendUserAudio({ blob } = {}) {
+    const kb = blob ? Math.round(blob.size / 1024) : 0;
+    throw new Error(
+      `WebRTC transport uses live mic audio (tracks). sendUserAudio(blob) not supported (~${kb} KB).`
+    );
+  }
+
+  return { connect, disconnect, sendUserText, sendUserAudio };
+}
+
+function extractAssistantText(evt) {
+  if (!evt || typeof evt !== "object") return "";
+
+  if (typeof evt.delta === "string" && evt.delta) return evt.delta;
+  if (typeof evt.text === "string" && evt.text) return evt.text;
+
+  const content = evt?.item?.content;
+  if (Array.isArray(content)) {
+    for (const c of content) {
+      if (c && typeof c.text === "string" && c.text) return c.text;
+      if (c && typeof c.transcript === "string" && c.transcript) return c.transcript;
+    }
+  }
+  return "";
 }
