@@ -11,6 +11,18 @@ export const config = {
   },
 };
 
+function clampNumber(v, fallback, min, max) {
+  const n = Number.parseFloat(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function clampInt(v, fallback, min, max) {
+  const n = Number.parseInt(v, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
 async function handler(req, res) {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -56,18 +68,51 @@ async function handler(req, res) {
   }
 
   // Config knobs (optional)
-  const model = (req.query?.model || "gpt-realtime").toString();
-  const requestedVoice = (req.query?.voice || "marin").toString();
+  // Defaults: cost-controlled by default
+  const model =
+    (req.query?.model || "gpt-realtime-mini").toString().trim() ||
+    "gpt-realtime-mini";
+
+  const requestedVoice =
+    (req.query?.voice || "marin").toString().trim() || "marin";
+
+  // Realtime supports audio.output.speed: 0.25–1.5, default 1.0 (between turns only)
+  // Lux Streaming default is intentionally slower.
+  // NOTE: Realtime's documented default is 1.0, but we set 0.85 as our product default.
+  const speed = clampNumber(req.query?.speed, 0.85, 0.25, 1.5);
+
+  // Hard cap tokens per assistant response (safety/cost control)
+  // Allow override, but clamp safely.
+  const maxOutputTokens = clampInt(
+    req.query?.max_output_tokens ?? req.query?.maxOutputTokens,
+    250,
+    1,
+    4096
+  );
 
   // Voice fallback: try requested voice first; if it fails and it's not marin, retry marin.
   const primaryVoice = requestedVoice;
   const fallbackVoice = primaryVoice === "marin" ? null : "marin";
 
-  const attempt1 = await callRealtime({ apiKey, offerSDP, model, voice: primaryVoice });
+  const attempt1 = await callRealtime({
+    apiKey,
+    offerSDP,
+    model,
+    voice: primaryVoice,
+    speed,
+    maxOutputTokens,
+  });
   let final = attempt1;
 
   if (!attempt1.ok && fallbackVoice) {
-    const attempt2 = await callRealtime({ apiKey, offerSDP, model, voice: fallbackVoice });
+    const attempt2 = await callRealtime({
+      apiKey,
+      offerSDP,
+      model,
+      voice: fallbackVoice,
+      speed,
+      maxOutputTokens,
+    });
     if (attempt2.ok) final = attempt2;
   }
 
@@ -90,11 +135,14 @@ async function handler(req, res) {
 
 export default handler;
 
-async function callRealtime({ apiKey, offerSDP, model, voice }) {
+async function callRealtime({ apiKey, offerSDP, model, voice, speed, maxOutputTokens }) {
   const sessionConfig = JSON.stringify({
     type: "realtime",
     model,
-    audio: { output: { voice } },
+    max_output_tokens: maxOutputTokens,
+    audio: { output: { voice, speed } },
+    // Per API docs, audio responses include transcript; do not request both audio+text explicitly.
+    output_modalities: ["audio"],
   });
 
   // FormData is available in modern Node runtimes on Vercel.
