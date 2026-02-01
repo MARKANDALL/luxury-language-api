@@ -93,13 +93,22 @@ async function handler(req, res) {
   const primaryVoice = requestedVoice;
   const fallbackVoice = primaryVoice === "marin" ? null : "marin";
 
+  const sessionConfig = JSON.stringify({
+    type: "realtime",
+    model,
+    max_output_tokens: maxOutputTokens,
+    audio: { output: { voice: primaryVoice, speed } },
+    turn_detection: {
+      type: "server_vad",
+      create_response: true, // Start in Auto; we'll toggle to False via frontend for Tap mode
+    },
+    output_modalities: ["audio"],
+  });
+
   const attempt1 = await callRealtime({
     apiKey,
     offerSDP,
-    model,
-    voice: primaryVoice,
-    speed,
-    maxOutputTokens,
+    sessionConfig,
   });
   let final = attempt1;
 
@@ -107,10 +116,10 @@ async function handler(req, res) {
     const attempt2 = await callRealtime({
       apiKey,
       offerSDP,
-      model,
-      voice: fallbackVoice,
-      speed,
-      maxOutputTokens,
+      sessionConfig: JSON.stringify({
+        ...JSON.parse(sessionConfig),
+        audio: { output: { voice: fallbackVoice, speed } },
+      }),
     });
     if (attempt2.ok) final = attempt2;
   }
@@ -134,24 +143,7 @@ async function handler(req, res) {
 
 export default handler;
 
-async function callRealtime({ apiKey, offerSDP, model, voice, speed, maxOutputTokens }) {
-  const sessionConfig = JSON.stringify({
-    type: "realtime",
-    model,
-    max_output_tokens: maxOutputTokens,
-    audio: { output: { voice, speed } },
-    // ❌ REMOVE THIS BLOCK causing the 400 error
-    /*
-    turn_detection: {
-      type: "server_vad",
-      create_response: false 
-    }
-    */
-    output_modalities: ["audio"],
-  });
-
-  // FormData is available in modern Node runtimes on Vercel.
-  // If your runtime lacks it, you'll see an exception and it will show in Vercel logs.
+async function callRealtime({ apiKey, offerSDP, sessionConfig }) {
   const fd = new FormData();
   fd.set("sdp", offerSDP);
   fd.set("session", sessionConfig);
@@ -166,13 +158,13 @@ async function callRealtime({ apiKey, offerSDP, model, voice, speed, maxOutputTo
     });
 
     const text = await r.text();
-    return { ok: r.ok, status: r.status, text, voice };
+    return { ok: r.ok, status: r.status, text, voice: JSON.parse(sessionConfig).audio.output.voice };
   } catch (e) {
     return {
       ok: false,
       status: 500,
       text: `Realtime call error: ${e?.message || String(e)}`,
-      voice,
+      voice: JSON.parse(sessionConfig).audio.output.voice,
     };
   }
 }
