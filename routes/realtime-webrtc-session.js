@@ -140,12 +140,13 @@ async function callRealtime({ apiKey, offerSDP, model, voice, speed, maxOutputTo
     model,
     max_output_tokens: maxOutputTokens,
     audio: { output: { voice, speed } },
-    // ✅ FIX: Force "Tap Mode" (create_response: false) during initialization.
-    // This prevents the AI from blurting out a response before the frontend logic loads.
+    // ❌ REMOVE THIS BLOCK causing the 400 error
+    /*
     turn_detection: {
       type: "server_vad",
-      create_response: false
-    },
+      create_response: false 
+    }
+    */
     output_modalities: ["audio"],
   });
 
