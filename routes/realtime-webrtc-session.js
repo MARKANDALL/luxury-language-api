@@ -1,4 +1,3 @@
-// routes/realtime-webrtc-session.js
 // POST /api/realtime/webrtc/session
 // Receives browser offer SDP (text/plain or application/sdp) and returns answer SDP from OpenAI Realtime.
 //
@@ -141,7 +140,12 @@ async function callRealtime({ apiKey, offerSDP, model, voice, speed, maxOutputTo
     model,
     max_output_tokens: maxOutputTokens,
     audio: { output: { voice, speed } },
-    // Per API docs, audio responses include transcript; do not request both audio+text explicitly.
+    // ✅ FIX: Force "Tap Mode" (create_response: false) during initialization.
+    // This prevents the AI from blurting out a response before the frontend logic loads.
+    turn_detection: {
+      type: "server_vad",
+      create_response: false
+    },
     output_modalities: ["audio"],
   });
 
