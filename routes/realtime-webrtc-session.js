@@ -93,14 +93,20 @@ async function handler(req, res) {
   const primaryVoice = requestedVoice;
   const fallbackVoice = primaryVoice === "marin" ? null : "marin";
 
+  // NOTE: Start in Tap (create_response: false). The frontend toggles per UI.
   const sessionConfig = JSON.stringify({
     type: "realtime",
     model,
     max_output_tokens: maxOutputTokens,
-    audio: { output: { voice: primaryVoice, speed } },
-    turn_detection: {
-      type: "server_vad",
-      create_response: true, // Start in Auto; we'll toggle to False via frontend for Tap mode
+    audio: {
+      output: { voice: primaryVoice, speed },
+      input: {
+        turn_detection: {
+          type: "server_vad",
+          create_response: false, // default TAP; frontend toggles to true for AUTO
+          interrupt_response: true,
+        },
+      },
     },
     output_modalities: ["audio"],
   });
@@ -113,13 +119,12 @@ async function handler(req, res) {
   let final = attempt1;
 
   if (!attempt1.ok && fallbackVoice) {
+    const base = JSON.parse(sessionConfig);
+    base.audio = { ...(base.audio || {}), output: { voice: fallbackVoice, speed } };
     const attempt2 = await callRealtime({
       apiKey,
       offerSDP,
-      sessionConfig: JSON.stringify({
-        ...JSON.parse(sessionConfig),
-        audio: { output: { voice: fallbackVoice, speed } },
-      }),
+      sessionConfig: JSON.stringify(base),
     });
     if (attempt2.ok) final = attempt2;
   }
@@ -145,8 +150,9 @@ export default handler;
 
 async function callRealtime({ apiKey, offerSDP, sessionConfig }) {
   const fd = new FormData();
-  fd.set("sdp", offerSDP);
-  fd.set("session", sessionConfig);
+  // Match the multipart types shown in the Realtime Create call docs.
+  fd.set("sdp", new Blob([offerSDP], { type: "application/sdp" }), "offer.sdp");
+  fd.set("session", new Blob([sessionConfig], { type: "application/json" }), "session.json");
 
   try {
     const r = await fetch("https://api.openai.com/v1/realtime/calls", {
