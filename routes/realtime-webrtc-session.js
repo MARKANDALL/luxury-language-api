@@ -117,6 +117,7 @@ async function handler(req, res) {
     sessionConfig,
   });
   let final = attempt1;
+  let usedVoice = primaryVoice;
 
   if (!attempt1.ok && fallbackVoice) {
     const base = JSON.parse(sessionConfig);
@@ -126,11 +127,14 @@ async function handler(req, res) {
       offerSDP,
       sessionConfig: JSON.stringify(base),
     });
-    if (attempt2.ok) final = attempt2;
+    if (attempt2.ok) {
+      final = attempt2;
+      usedVoice = fallbackVoice;
+    }
   }
 
   res.setHeader("X-Voice-Requested", primaryVoice);
-  res.setHeader("X-Voice-Used", final.voice || primaryVoice);
+  res.setHeader("X-Voice-Used", usedVoice);
   res.setHeader("X-Model-Used", model);
 
   if (!final.ok) {
@@ -151,20 +155,33 @@ export default handler;
 import { Blob } from "buffer";
 
 async function callRealtime({ apiKey, offerSDP, sessionConfig }) {
+  console.log("offerSDP length:", (offerSDP || "").length);
+
   const fd = new FormData();
 
-  // ✅ REQUIRED: send these as multipart "file parts"
+  // REQUIRED: "sdp" must be present
   fd.append("sdp", new Blob([offerSDP], { type: "application/sdp" }), "offer.sdp");
-  fd.append("session", new Blob([sessionConfig], { type: "application/json" }), "session.json");
+
+  // Optional: session config
+  fd.append(
+    "session",
+    new Blob([sessionConfig], { type: "application/json" }),
+    "session.json"
+  );
 
   const r = await fetch("https://api.openai.com/v1/realtime/calls", {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}` },
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      // IMPORTANT: Do NOT set Content-Type here. fetch sets the multipart boundary.
+      // Optional on some stacks:
+      // "OpenAI-Beta": "realtime=v1",
+    },
     body: fd,
   });
 
   const text = await r.text();
-  return { ok: r.ok, status: r.status, text, voice: JSON.parse(sessionConfig).audio.output.voice };
+  return { ok: r.ok, status: r.status, text };
 }
 
 function readTextBody(req) {
