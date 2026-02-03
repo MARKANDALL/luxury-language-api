@@ -151,39 +151,20 @@ export default handler;
 import { Blob } from "buffer";
 
 async function callRealtime({ apiKey, offerSDP, sessionConfig }) {
-  if (!offerSDP || !String(offerSDP).trim()) {
-    return {
-      ok: false,
-      status: 400,
-      text: 'Missing SDP offer (backend did not receive request body)',
-      voice: (() => { try { return JSON.parse(sessionConfig).audio.output.voice; } catch { return null; } })(),
-    };
-  }
-
   const fd = new FormData();
-  // Send as proper multipart "file parts" (OpenAI expects an `sdp` field)
+
+  // ✅ REQUIRED: send these as multipart "file parts"
   fd.append("sdp", new Blob([offerSDP], { type: "application/sdp" }), "offer.sdp");
   fd.append("session", new Blob([sessionConfig], { type: "application/json" }), "session.json");
 
-  try {
-    const r = await fetch("https://api.openai.com/v1/realtime/calls", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: fd,
-    });
+  const r = await fetch("https://api.openai.com/v1/realtime/calls", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: fd,
+  });
 
-    const text = await r.text();
-    return { ok: r.ok, status: r.status, text, voice: JSON.parse(sessionConfig).audio.output.voice };
-  } catch (e) {
-    return {
-      ok: false,
-      status: 500,
-      text: `Realtime call error: ${e?.message || String(e)}`,
-      voice: JSON.parse(sessionConfig).audio.output.voice,
-    };
-  }
+  const text = await r.text();
+  return { ok: r.ok, status: r.status, text, voice: JSON.parse(sessionConfig).audio.output.voice };
 }
 
 function readTextBody(req) {
