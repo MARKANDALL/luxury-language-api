@@ -25,6 +25,8 @@ function clampInt(v, fallback, min, max) {
 }
 
 async function handler(req, res) {
+  console.log("webrtc/session handler version: 2026-02-03 blob-multipart-v1");
+
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
