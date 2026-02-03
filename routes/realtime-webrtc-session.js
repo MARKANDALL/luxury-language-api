@@ -148,11 +148,22 @@ async function handler(req, res) {
 
 export default handler;
 
+import { Blob } from "buffer";
+
 async function callRealtime({ apiKey, offerSDP, sessionConfig }) {
+  if (!offerSDP || !String(offerSDP).trim()) {
+    return {
+      ok: false,
+      status: 400,
+      text: 'Missing SDP offer (backend did not receive request body)',
+      voice: (() => { try { return JSON.parse(sessionConfig).audio.output.voice; } catch { return null; } })(),
+    };
+  }
+
   const fd = new FormData();
-  // Match the multipart types shown in the Realtime Create call docs.
-  fd.set("sdp", new Blob([offerSDP], { type: "application/sdp" }), "offer.sdp");
-  fd.set("session", new Blob([sessionConfig], { type: "application/json" }), "session.json");
+  // Send as proper multipart "file parts" (OpenAI expects an `sdp` field)
+  fd.append("sdp", new Blob([offerSDP], { type: "application/sdp" }), "offer.sdp");
+  fd.append("session", new Blob([sessionConfig], { type: "application/json" }), "session.json");
 
   try {
     const r = await fetch("https://api.openai.com/v1/realtime/calls", {
