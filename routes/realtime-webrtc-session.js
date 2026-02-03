@@ -3,8 +3,6 @@
 //
 // Uses OpenAI "unified interface" SDP exchange via /v1/realtime/calls.
 
-import { Blob } from "buffer";
-
 export const config = {
   api: {
     bodyParser: false, // we need the raw SDP text
@@ -25,7 +23,8 @@ function clampInt(v, fallback, min, max) {
 }
 
 async function handler(req, res) {
-  console.log("webrtc/session handler version: 2026-02-03 blob-multipart-v1");
+  // quick “is this code deployed?” marker
+  console.log("webrtc/session handler version: 2026-02-03 form-fields-v1");
 
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -72,7 +71,6 @@ async function handler(req, res) {
     }
 
     // Config knobs (optional)
-    // Defaults: cost-controlled by default
     const model =
       (req.query?.model || "gpt-realtime-mini").toString().trim() ||
       "gpt-realtime-mini";
@@ -80,13 +78,8 @@ async function handler(req, res) {
     const requestedVoice =
       (req.query?.voice || "marin").toString().trim() || "marin";
 
-    // Realtime supports audio.output.speed: 0.25–1.5, default 1.0 (between turns only)
-    // Lux Streaming default is intentionally slower.
-    // NOTE: Realtime's documented default is 1.0, but we set 0.85 as our product default.
     const speed = clampNumber(req.query?.speed, 0.85, 0.25, 1.5);
 
-    // Hard cap tokens per assistant response (safety/cost control)
-    // Allow override, but clamp safely.
     const maxOutputTokens = clampInt(
       req.query?.max_output_tokens ?? req.query?.maxOutputTokens,
       250,
@@ -98,7 +91,7 @@ async function handler(req, res) {
     const primaryVoice = requestedVoice;
     const fallbackVoice = primaryVoice === "marin" ? null : "marin";
 
-    // NOTE: Start in Tap (create_response: false). The frontend toggles per UI.
+    // NOTE: Start in Tap (create_response: false). Frontend toggles via session.update later.
     const sessionConfig = {
       type: "realtime",
       model,
@@ -108,7 +101,6 @@ async function handler(req, res) {
         input: {
           turn_detection: {
             type: "server_vad",
-            // Default to TAP (no auto-response). Your frontend toggles this per UI.
             create_response: false,
             interrupt_response: true,
             threshold: 0.5,
@@ -120,11 +112,7 @@ async function handler(req, res) {
       output_modalities: ["audio"],
     };
 
-    const attempt1 = await callRealtime({
-      apiKey,
-      offerSDP,
-      sessionConfig,
-    });
+    const attempt1 = await callRealtime({ apiKey, offerSDP, sessionConfig });
     let final = attempt1;
     let usedVoice = primaryVoice;
 
@@ -151,7 +139,6 @@ async function handler(req, res) {
     res.setHeader("X-Model-Used", model);
 
     if (!final.ok) {
-      // Preserve status + text for debugging in the frontend error path
       res.status(final.status || 500);
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       return res.end(final.text || "Realtime SDP exchange failed");
@@ -173,21 +160,24 @@ async function handler(req, res) {
 export default handler;
 
 async function callRealtime({ apiKey, offerSDP, sessionConfig }) {
-  const fd = new FormData();
   const sessionJson = JSON.stringify(sessionConfig);
 
-  // IMPORTANT: OpenAI expects multipart parts; send as blobs with filenames.
-  fd.append("sdp", new Blob([offerSDP], { type: "application/sdp" }), "offer.sdp");
-  fd.append("session", new Blob([sessionJson], { type: "application/json" }), "session.json");
+  // ✅ CRITICAL: send as plain multipart *fields* (strings), not Blob+filename “file parts”
+  const fd = new FormData();
+  fd.set("sdp", offerSDP);
+  fd.set("session", sessionJson);
 
   try {
-    const r = await fetch("https://api.openai.com/v1/realtime/calls", {
+    // Helpful debug: confirms the boundary header exists
+    const req = new Request("https://api.openai.com/v1/realtime/calls", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: { Authorization: `Bearer ${apiKey}` },
       body: fd,
     });
+
+    console.log("openai /realtime/calls outgoing content-type:", req.headers.get("content-type"));
+
+    const r = await fetch(req);
 
     console.log("openai /realtime/calls status:", r.status);
     const text = await r.text();
@@ -205,7 +195,6 @@ async function callRealtime({ apiKey, offerSDP, sessionConfig }) {
 }
 
 function readTextBody(req) {
-  // In some environments, req.body may already be present; prefer it if it's a string.
   if (typeof req.body === "string") return Promise.resolve(req.body);
 
   return new Promise((resolve, reject) => {
@@ -215,9 +204,7 @@ function readTextBody(req) {
     req.on("data", (c) => {
       chunks.push(c);
       size += c.length;
-      if (size > 2_000_000) {
-        reject(new Error("Body too large"));
-      }
+      if (size > 2_000_000) reject(new Error("Body too large"));
     });
 
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
