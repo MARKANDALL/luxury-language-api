@@ -3,6 +3,8 @@
 //
 // Uses OpenAI "unified interface" SDP exchange via /v1/realtime/calls.
 
+import { Blob } from "buffer";
+
 export const config = {
   api: {
     bodyParser: false, // we need the raw SDP text
@@ -94,7 +96,7 @@ async function handler(req, res) {
   const fallbackVoice = primaryVoice === "marin" ? null : "marin";
 
   // NOTE: Start in Tap (create_response: false). The frontend toggles per UI.
-  const sessionConfig = JSON.stringify({
+  const sessionConfig = {
     type: "realtime",
     model,
     max_output_tokens: maxOutputTokens,
@@ -103,13 +105,17 @@ async function handler(req, res) {
       input: {
         turn_detection: {
           type: "server_vad",
-          create_response: false, // default TAP; frontend toggles to true for AUTO
+          // Default to TAP (no auto-response). Your frontend toggles this per UI.
+          create_response: false,
           interrupt_response: true,
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 500,
         },
       },
     },
     output_modalities: ["audio"],
-  });
+  };
 
   const attempt1 = await callRealtime({
     apiKey,
@@ -120,12 +126,16 @@ async function handler(req, res) {
   let usedVoice = primaryVoice;
 
   if (!attempt1.ok && fallbackVoice) {
-    const base = JSON.parse(sessionConfig);
-    base.audio = { ...(base.audio || {}), output: { voice: fallbackVoice, speed } };
     const attempt2 = await callRealtime({
       apiKey,
       offerSDP,
-      sessionConfig: JSON.stringify(base),
+      sessionConfig: {
+        ...sessionConfig,
+        audio: {
+          ...(sessionConfig.audio || {}),
+          output: { voice: fallbackVoice, speed },
+        },
+      },
     });
     if (attempt2.ok) {
       final = attempt2;
@@ -152,36 +162,33 @@ async function handler(req, res) {
 
 export default handler;
 
-import { Blob } from "buffer";
-
 async function callRealtime({ apiKey, offerSDP, sessionConfig }) {
-  console.log("offerSDP length:", (offerSDP || "").length);
-
   const fd = new FormData();
+  const sessionJson = JSON.stringify(sessionConfig);
 
-  // REQUIRED: "sdp" must be present
+  // IMPORTANT: OpenAI expects multipart parts; send as blobs with filenames.
   fd.append("sdp", new Blob([offerSDP], { type: "application/sdp" }), "offer.sdp");
+  fd.append("session", new Blob([sessionJson], { type: "application/json" }), "session.json");
 
-  // Optional: session config
-  fd.append(
-    "session",
-    new Blob([sessionConfig], { type: "application/json" }),
-    "session.json"
-  );
+  try {
+    const r = await fetch("https://api.openai.com/v1/realtime/calls", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: fd,
+    });
 
-  const r = await fetch("https://api.openai.com/v1/realtime/calls", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      // IMPORTANT: Do NOT set Content-Type here. fetch sets the multipart boundary.
-      // Optional on some stacks:
-      // "OpenAI-Beta": "realtime=v1",
-    },
-    body: fd,
-  });
-
-  const text = await r.text();
-  return { ok: r.ok, status: r.status, text };
+    const text = await r.text();
+    return { ok: r.ok, status: r.status, text, voice: sessionConfig?.audio?.output?.voice };
+  } catch (e) {
+    return {
+      ok: false,
+      status: 500,
+      text: `Realtime call error: ${e?.message || String(e)}`,
+      voice: sessionConfig?.audio?.output?.voice,
+    };
+  }
 }
 
 function readTextBody(req) {
