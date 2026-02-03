@@ -39,125 +39,133 @@ async function handler(req, res) {
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
-  // ADMIN_TOKEN gate (cost-control)
-  const token =
-    (req.headers["x-admin-token"] || "").toString().trim() ||
-    (req.query?.token || "").toString().trim();
+  try {
+    // ADMIN_TOKEN gate (cost-control)
+    const token =
+      (req.headers["x-admin-token"] || "").toString().trim() ||
+      (req.query?.token || "").toString().trim();
 
-  const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
+    const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
 
-  console.log("webrtc/session auth", {
-    hasExpected: !!expected,
-    tokenLen: token ? token.length : 0,
-  });
+    console.log("webrtc/session auth", {
+      hasExpected: !!expected,
+      tokenLen: token ? token.length : 0,
+    });
 
-  // TEMP: If ADMIN_TOKEN is unset, keep the endpoint open for testing.
-  // When you set ADMIN_TOKEN later, token becomes required.
-  if (expected && token !== expected) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
+    // TEMP: If ADMIN_TOKEN is unset, keep the endpoint open for testing.
+    // When you set ADMIN_TOKEN later, token becomes required.
+    if (expected && token !== expected) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
 
-  const apiKey = (process.env.OPENAI_API_KEY || "").toString().trim();
-  if (!apiKey) {
-    return res.status(500).json({ error: "missing_openai_api_key" });
-  }
+    const apiKey = (process.env.OPENAI_API_KEY || "").toString().trim();
+    if (!apiKey) {
+      return res.status(500).json({ error: "missing_openai_api_key" });
+    }
 
-  // Read offer SDP as raw text
-  const offerSDP = await readTextBody(req);
-  if (!offerSDP || offerSDP.trim().length < 20) {
-    return res.status(400).json({ error: "missing_offer_sdp" });
-  }
+    // Read offer SDP as raw text
+    const offerSDP = await readTextBody(req);
+    if (!offerSDP || offerSDP.trim().length < 20) {
+      return res.status(400).json({ error: "missing_offer_sdp" });
+    }
 
-  // Config knobs (optional)
-  // Defaults: cost-controlled by default
-  const model =
-    (req.query?.model || "gpt-realtime-mini").toString().trim() ||
-    "gpt-realtime-mini";
+    // Config knobs (optional)
+    // Defaults: cost-controlled by default
+    const model =
+      (req.query?.model || "gpt-realtime-mini").toString().trim() ||
+      "gpt-realtime-mini";
 
-  const requestedVoice =
-    (req.query?.voice || "marin").toString().trim() || "marin";
+    const requestedVoice =
+      (req.query?.voice || "marin").toString().trim() || "marin";
 
-  // Realtime supports audio.output.speed: 0.25–1.5, default 1.0 (between turns only)
-  // Lux Streaming default is intentionally slower.
-  // NOTE: Realtime's documented default is 1.0, but we set 0.85 as our product default.
-  const speed = clampNumber(req.query?.speed, 0.85, 0.25, 1.5);
+    // Realtime supports audio.output.speed: 0.25–1.5, default 1.0 (between turns only)
+    // Lux Streaming default is intentionally slower.
+    // NOTE: Realtime's documented default is 1.0, but we set 0.85 as our product default.
+    const speed = clampNumber(req.query?.speed, 0.85, 0.25, 1.5);
 
-  // Hard cap tokens per assistant response (safety/cost control)
-  // Allow override, but clamp safely.
-  const maxOutputTokens = clampInt(
-    req.query?.max_output_tokens ?? req.query?.maxOutputTokens,
-    250,
-    1,
-    4096
-  );
+    // Hard cap tokens per assistant response (safety/cost control)
+    // Allow override, but clamp safely.
+    const maxOutputTokens = clampInt(
+      req.query?.max_output_tokens ?? req.query?.maxOutputTokens,
+      250,
+      1,
+      4096
+    );
 
-  // Voice fallback: try requested voice first; if it fails and it's not marin, retry marin.
-  const primaryVoice = requestedVoice;
-  const fallbackVoice = primaryVoice === "marin" ? null : "marin";
+    // Voice fallback: try requested voice first; if it fails and it's not marin, retry marin.
+    const primaryVoice = requestedVoice;
+    const fallbackVoice = primaryVoice === "marin" ? null : "marin";
 
-  // NOTE: Start in Tap (create_response: false). The frontend toggles per UI.
-  const sessionConfig = {
-    type: "realtime",
-    model,
-    max_output_tokens: maxOutputTokens,
-    audio: {
-      output: { voice: primaryVoice, speed },
-      input: {
-        turn_detection: {
-          type: "server_vad",
-          // Default to TAP (no auto-response). Your frontend toggles this per UI.
-          create_response: false,
-          interrupt_response: true,
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 500,
+    // NOTE: Start in Tap (create_response: false). The frontend toggles per UI.
+    const sessionConfig = {
+      type: "realtime",
+      model,
+      max_output_tokens: maxOutputTokens,
+      audio: {
+        output: { voice: primaryVoice, speed },
+        input: {
+          turn_detection: {
+            type: "server_vad",
+            // Default to TAP (no auto-response). Your frontend toggles this per UI.
+            create_response: false,
+            interrupt_response: true,
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 500,
+          },
         },
       },
-    },
-    output_modalities: ["audio"],
-  };
+      output_modalities: ["audio"],
+    };
 
-  const attempt1 = await callRealtime({
-    apiKey,
-    offerSDP,
-    sessionConfig,
-  });
-  let final = attempt1;
-  let usedVoice = primaryVoice;
-
-  if (!attempt1.ok && fallbackVoice) {
-    const attempt2 = await callRealtime({
+    const attempt1 = await callRealtime({
       apiKey,
       offerSDP,
-      sessionConfig: {
-        ...sessionConfig,
-        audio: {
-          ...(sessionConfig.audio || {}),
-          output: { voice: fallbackVoice, speed },
-        },
-      },
+      sessionConfig,
     });
-    if (attempt2.ok) {
-      final = attempt2;
-      usedVoice = fallbackVoice;
+    let final = attempt1;
+    let usedVoice = primaryVoice;
+
+    if (!attempt1.ok && fallbackVoice) {
+      const attempt2 = await callRealtime({
+        apiKey,
+        offerSDP,
+        sessionConfig: {
+          ...sessionConfig,
+          audio: {
+            ...(sessionConfig.audio || {}),
+            output: { voice: fallbackVoice, speed },
+          },
+        },
+      });
+      if (attempt2.ok) {
+        final = attempt2;
+        usedVoice = fallbackVoice;
+      }
     }
+
+    res.setHeader("X-Voice-Requested", primaryVoice);
+    res.setHeader("X-Voice-Used", usedVoice);
+    res.setHeader("X-Model-Used", model);
+
+    if (!final.ok) {
+      // Preserve status + text for debugging in the frontend error path
+      res.status(final.status || 500);
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.end(final.text || "Realtime SDP exchange failed");
+    }
+
+    // Success: return answer SDP text
+    res.status(200);
+    res.setHeader("Content-Type", "application/sdp; charset=utf-8");
+    return res.end(final.text);
+  } catch (err) {
+    console.error("webrtc/session fatal:", err);
+    return res.status(500).json({
+      error: "webrtc/session fatal",
+      message: err?.message || String(err),
+    });
   }
-
-  res.setHeader("X-Voice-Requested", primaryVoice);
-  res.setHeader("X-Voice-Used", usedVoice);
-  res.setHeader("X-Model-Used", model);
-
-  if (!final.ok) {
-    // Preserve status + text for debugging in the frontend error path
-    res.status(final.status || 500);
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    return res.end(final.text || "Realtime SDP exchange failed");
-  }
-
-  // Success: return answer SDP text
-  res.status(200);
-  res.setHeader("Content-Type", "application/sdp; charset=utf-8");
-  return res.end(final.text);
 }
 
 export default handler;
@@ -179,7 +187,10 @@ async function callRealtime({ apiKey, offerSDP, sessionConfig }) {
       body: fd,
     });
 
+    console.log("openai /realtime/calls status:", r.status);
     const text = await r.text();
+    console.log("openai /realtime/calls body:", text.slice(0, 500));
+
     return { ok: r.ok, status: r.status, text, voice: sessionConfig?.audio?.output?.voice };
   } catch (e) {
     return {
