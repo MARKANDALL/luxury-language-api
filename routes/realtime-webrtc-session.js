@@ -26,21 +26,27 @@ async function handler(req, res) {
   // quick “is this code deployed?” marker
   console.log("webrtc/session handler version: 2026-02-03 form-fields-v1");
 
-  // CORS
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-token");
-  res.setHeader(
-    "Access-Control-Expose-Headers",
-    "X-Voice-Requested, X-Voice-Used, X-Model-Used"
-  );
-
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method Not Allowed" });
-  }
-
   try {
+    console.log("webrtc/session", {
+      method: req.method,
+      ct: req.headers["content-type"],
+      url: req.url,
+    });
+
+    // CORS
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-token");
+    res.setHeader(
+      "Access-Control-Expose-Headers",
+      "X-Voice-Requested, X-Voice-Used, X-Model-Used"
+    );
+
+    if (req.method === "OPTIONS") return res.status(204).end();
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method Not Allowed" });
+    }
+
     // ADMIN_TOKEN gate (cost-control)
     const token =
       (req.headers["x-admin-token"] || "").toString().trim() ||
@@ -149,10 +155,11 @@ async function handler(req, res) {
     res.setHeader("Content-Type", "application/sdp; charset=utf-8");
     return res.end(final.text);
   } catch (err) {
-    console.error("webrtc/session fatal:", err);
-    return res.status(500).json({
+    console.error("webrtc/session fatal:", err?.stack || err);
+    res.status(500).json({
       error: "webrtc/session fatal",
       message: err?.message || String(err),
+      stack: err?.stack ? String(err.stack).slice(0, 2000) : null,
     });
   }
 }
