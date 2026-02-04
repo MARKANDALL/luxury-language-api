@@ -24,7 +24,7 @@ function clampInt(v, fallback, min, max) {
 
 async function handler(req, res) {
   // quick “is this code deployed?” marker
-  console.log("webrtc/session handler version: 2026-02-03 form-fields-v1");
+  console.log("webrtc/session handler version: 2026-02-04 hotfix-no-transcription");
 
   try {
     console.log("webrtc/session", {
@@ -102,7 +102,6 @@ async function handler(req, res) {
       type: "realtime",
       model,
       max_output_tokens: maxOutputTokens,
-      input_audio_transcription: { model: "whisper-1" },
       audio: {
         output: { voice: primaryVoice, speed },
         input: {
