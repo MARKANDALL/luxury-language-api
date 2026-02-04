@@ -102,6 +102,7 @@ async function handler(req, res) {
       type: "realtime",
       model,
       max_output_tokens: maxOutputTokens,
+      input_audio_transcription: { model: "whisper-1" },
       audio: {
         output: { voice: primaryVoice, speed },
         input: {
