@@ -2,10 +2,21 @@
 import { createClient } from '@supabase/supabase-js';
 
 const SUPABASE_URL   = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-const SERVICE_ROLE   = process.env.SUPABASE_SERVICE_ROLE;
+const SERVICE_ROLE   =
+  process.env.SUPABASE_SERVICE_ROLE ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_SECRET ||
+  '';
 const ADMIN_TOKEN    = process.env.ADMIN_TOKEN;
 
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+function getSupabaseClient() {
+  // IMPORTANT: never crash at import-time (router-wide outage)
+  const url = SUPABASE_URL;
+  const key = SERVICE_ROLE;
+  if (!url) throw new Error('SUPABASE_URL is required (set SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL)');
+  if (!key) throw new Error('SUPABASE_SERVICE_ROLE is required (set SUPABASE_SERVICE_ROLE or SUPABASE_SERVICE_ROLE_KEY)');
+  return createClient(url, key, { auth: { persistSession: false } });
+}
 
 function getAdminToken(req) {
   return req.headers['x-admin-token'] || req.query.token || '';
@@ -18,6 +29,14 @@ export default async function handler(req, res) {
     const token = getAdminToken(req);
     if (!token || (ADMIN_TOKEN && token !== ADMIN_TOKEN)) {
       return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    let supabase;
+    try {
+      supabase = getSupabaseClient();
+    } catch (e) {
+      const detail = e && e.message ? String(e.message) : String(e || 'supabase_init_error');
+      return res.status(500).json({ error: 'supabase_not_configured', detail });
     }
 
     // Inputs
@@ -117,6 +136,7 @@ export default async function handler(req, res) {
     });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: 'server_error' });
+    const detail = e && e.message ? String(e.message) : String(e || 'server_error');
+    return res.status(500).json({ error: 'server_error', detail });
   }
 }
