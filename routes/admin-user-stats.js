@@ -1,21 +1,31 @@
-// /api/admin-user-stats.js
+// routes/admin-user-stats.js
+// One-line: Admin-only stats endpoint that aggregates lux_attempts by user and window, with safe in-handler Supabase init (no import-time crash).
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL   = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+const SUPABASE_URL   =
+  process.env.SUPABASE_URL ||
+  process.env.NEXT_PUBLIC_SUPABASE_URL ||
+  'https://pvggfemqtlsicreynfxz.supabase.co';
+
 const SERVICE_ROLE   =
   process.env.SUPABASE_SERVICE_ROLE ||
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_SERVICE_ROLE_SECRET ||
-  '';
-const ADMIN_TOKEN    = process.env.ADMIN_TOKEN;
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB2Z2dmZW1xdGxzaWNyZXluZnh6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NzUzNDE0MiwiZXhwIjoyMDczMTEwMTQyfQ.Dx_NFUWCbtVF7msJM6LpvJvaS2txKFxIkimF4RurG7g';
+
+const ADMIN_TOKEN    = process.env.ADMIN_TOKEN || 'sIMONCAT4!';
 
 function getSupabaseClient() {
   // IMPORTANT: never crash at import-time (router-wide outage)
-  const url = SUPABASE_URL;
-  const key = SERVICE_ROLE;
-  if (!url) throw new Error('SUPABASE_URL is required (set SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL)');
-  if (!key) throw new Error('SUPABASE_SERVICE_ROLE is required (set SUPABASE_SERVICE_ROLE or SUPABASE_SERVICE_ROLE_KEY)');
-  return createClient(url, key, { auth: { persistSession: false } });
+  if (!SUPABASE_URL) {
+    throw new Error('SUPABASE_URL is required (set SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL)');
+  }
+  if (!SERVICE_ROLE) {
+    throw new Error('SUPABASE service key is required (set SUPABASE_SERVICE_ROLE / SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SERVICE_KEY)');
+  }
+  return createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 }
 
 function getAdminToken(req) {
