@@ -6,6 +6,7 @@ import adminRecent from "../routes/admin-recent.js";
 import adminUserStats from "../routes/admin-user-stats.js";
 import assess from "../routes/assess.js";
 import attempt from "../routes/attempt.js";
+import altMeaning from "../routes/alt-meaning.js";
 import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
 import evaluate from "../routes/evaluate.js";
@@ -20,6 +21,7 @@ const ROUTES = {
   "admin-label-user": adminLabelUser,
   "admin-recent": adminRecent,
   "admin-user-stats": adminUserStats,
+  "alt-meaning": altMeaning,
   assess,
   attempt,
   "convo-report": convoReport,
