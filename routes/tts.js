@@ -1,3 +1,8 @@
+/* =============================================================================
+   FILE: routes/tts.js
+   ONE-LINE: Prevent router-wide crashes by moving Speech SDK to dynamic import; if timings requested but SDK fails, fall back to REST and return JSON (no boundaries).
+============================================================================= */
+
 // /api/tts.js  — Azure REST v1 proxy with smart style fallbacks & rich headers
 export default async function handler(req, res) {
   // Basic CORS
@@ -29,6 +34,8 @@ if (!expected || token !== expected) {
 
   const endpoint = `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`;
   const voicesEndpoint = `https://${region}.tts.speech.microsoft.com/cognitiveservices/voices/list`;
+
+  const wantTimings = String(req.query?.timings || "") === "1";
 
   // GET ?voices=1 => proxy voice list with styles/roles
   if (req.method === "GET") {
@@ -114,7 +121,8 @@ if (!expected || token !== expected) {
       "User-Agent": "lux-pronunciation-tool",
     };
 
-    async function speak(ssmlXml) {
+
+    async function speakRest(ssmlXml) {
       const r = await fetch(endpoint, { method: "POST", headers: hdrBase, body: ssmlXml });
       let detail = "";
       if (!r.ok) {
@@ -126,6 +134,79 @@ if (!expected || token !== expected) {
       return { ok: true, buf };
     }
 
+    async function speakSDK(ssmlXml) {
+      let synthesizer = null;
+      try {
+        // IMPORTANT: dynamic import so router.js can always load even if SDK is missing/broken.
+        const mod = await import("microsoft-cognitiveservices-speech-sdk");
+        const sdk = mod?.default || mod;
+        if (!sdk?.SpeechConfig || !sdk?.SpeechSynthesizer) {
+          return { ok: false, status: 500, detail: "Speech SDK import succeeded but shape was unexpected" };
+        }
+
+        const speechConfig = sdk.SpeechConfig.fromSubscription(key, region);
+        // Match the REST output format you already use:
+        speechConfig.speechSynthesisOutputFormat =
+          sdk.SpeechSynthesisOutputFormat.Audio24Khz48KBitRateMonoMp3;
+
+        synthesizer = new sdk.SpeechSynthesizer(speechConfig);
+
+        const wordBoundaries = [];
+        synthesizer.wordBoundary = (_s, e) => {
+          try {
+            wordBoundaries.push({
+              text: e.text,
+              audioOffset: e.audioOffset,
+              duration: e.duration,
+              textOffset: e.textOffset,
+              wordLength: e.wordLength,
+              boundaryType: e.boundaryType,
+            });
+          } catch {}
+        };
+
+        const result = await new Promise((resolve, reject) => {
+          synthesizer.speakSsmlAsync(ssmlXml, resolve, reject);
+        });
+
+        if (synthesizer) synthesizer.close();
+        synthesizer = null;
+
+        if (
+          !result ||
+          result.reason !== sdk.ResultReason.SynthesizingAudioCompleted ||
+          !result.audioData
+        ) {
+          const detail = (result && result.errorDetails) ? String(result.errorDetails) : "synthesis failed";
+          return { ok: false, status: 400, detail };
+        }
+
+        const buf = Buffer.from(result.audioData);
+        return { ok: true, buf, wordBoundaries };
+      } catch (e) {
+        try { if (synthesizer) synthesizer.close(); } catch {}
+        const detail = e && e.message ? String(e.message) : String(e || "sdk error");
+        return { ok: false, status: 500, detail };
+      }
+    }
+
+    async function speak(ssmlXml) {
+      if (!wantTimings) return speakRest(ssmlXml);
+
+      // Timings requested: try SDK first; if it fails, fall back to REST but still return JSON (empty boundaries).
+      const sdkTry = await speakSDK(ssmlXml);
+      if (sdkTry?.ok) return sdkTry;
+
+      const restTry = await speakRest(ssmlXml);
+      if (restTry?.ok) {
+        restTry.wordBoundaries = [];
+        restTry.timingsFallback = true;
+        restTry.timingsError = sdkTry?.detail || "SDK unavailable";
+        return restTry;
+      }
+      return sdkTry; // SDK error is more informative at this point
+    }
+
     function baseSpeakTag(inner, withMstts = false) {
       // Put mstts on <speak> for max compatibility; keep xml:lang on both speak & voice
       const ns = withMstts
@@ -134,14 +215,33 @@ if (!expected || token !== expected) {
       return `<speak version="1.0" ${ns}><voice name="${voice}" xml:lang="en-US">${inner}</voice></speak>`;
     }
 
+
+    function sendAudio(buf, wordBoundaries = [], extra = null) {
+      res.setHeader("X-Azure-Region", region);
+      res.setHeader("Cache-Control", "no-store");
+      if (wantTimings) {
+        res.setHeader("Content-Type", "application/json");
+        if (extra?.timingsFallback) {
+          res.setHeader("X-TTS-Timings", "fallback");
+        } else {
+          res.setHeader("X-TTS-Timings", "sdk");
+        }
+        return res.status(200).json({
+          audioBase64: Buffer.from(buf).toString("base64"),
+          contentType: "audio/mpeg",
+          wordBoundaries: Array.isArray(wordBoundaries) ? wordBoundaries : [],
+          ...(extra?.timingsFallback ? { timingsFallback: true, timingsError: extra?.timingsError || "" } : {}),
+        });
+      }
+      res.setHeader("Content-Type", "audio/mpeg");
+      return res.status(200).send(buf);
+    }
+
     // If client provided raw SSML, just pass it through
     if (ssml) {
       const first = await speak(ssml);
       if (!first.ok) return res.status(first.status).json({ error: "Azure TTS error", detail: first.detail });
-      res.setHeader("X-Azure-Region", region);
-      res.setHeader("Cache-Control", "no-store");
-      res.setHeader("Content-Type", "audio/mpeg");
-      return res.status(200).send(first.buf);
+      return sendAudio(first.buf, first.wordBoundaries, first);
     }
 
     // Build expressive attempt (if style requested) with careful fallbacks
@@ -197,16 +297,14 @@ if (!expected || token !== expected) {
       if (success) {
         res.setHeader("X-Style-Requested", requestedStyle);
         res.setHeader("X-Style-Used", usedStyle || "neutral");
-        res.setHeader("X-Azure-Region", region);
-        res.setHeader("Cache-Control", "no-store");
-        res.setHeader("Content-Type", "audio/mpeg");
+        // Region/cache/content-type handled by sendAudio()
         if (usedStyle !== requestedStyle) {
           fallback = "variant";
           msg = `Using '${usedStyle}' (closest available) for ${voice}.`;
           res.setHeader("X-Style-Fallback", fallback);
           res.setHeader("X-Style-Message", msg);
         }
-        return res.status(200).send(success.buf);
+        return sendAudio(success.buf, success.wordBoundaries, success);
       }
 
       // 2) Expressive failed => neutral retry
@@ -222,10 +320,7 @@ if (!expected || token !== expected) {
         res.setHeader("X-Style-Used", usedStyle);
         res.setHeader("X-Style-Fallback", fallback);
         res.setHeader("X-Style-Message", msg);
-        res.setHeader("X-Azure-Region", region);
-        res.setHeader("Cache-Control", "no-store");
-        res.setHeader("Content-Type", "audio/mpeg");
-        return res.status(200).send(n.buf);
+        return sendAudio(n.buf, n.wordBoundaries, n);
       }
 
       // 3) Even neutral failed (very rare) — surface Azure error
@@ -241,10 +336,7 @@ if (!expected || token !== expected) {
 
     res.setHeader("X-Style-Requested", "");
     res.setHeader("X-Style-Used", "neutral");
-    res.setHeader("X-Azure-Region", region);
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("Content-Type", "audio/mpeg");
-    return res.status(200).send(r.buf);
+    return sendAudio(r.buf, r.wordBoundaries, r);
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "server error" });

@@ -1,3 +1,6 @@
+/api/router.js
+// Single Vercel Function router that dispatches /api/router?route=... requests to route handlers.
+
 // file: /api/router.js
 // Single Vercel Function router to avoid the Hobby 12-function limit.
 
@@ -37,6 +40,47 @@ const ROUTES = {
 
 export default async function handler(req, res) {
   const u = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+
+  // ============================================================
+  // CORS (dev-friendly, safe default)
+  // - Enables browser calls from your frontend dev server
+  // - Handles preflight OPTIONS
+  // ============================================================
+  const origin = req.headers.origin;
+  const allowList = new Set(
+    String(process.env.CORS_ORIGINS || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+
+  // Dev convenience: allow localhost origins automatically
+  const isLocalhost =
+    typeof origin === "string" && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+
+  const allowOrigin =
+    (origin && (isLocalhost || allowList.has(origin))) ? origin : "";
+
+  if (allowOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "content-type, x-admin-token"
+    );
+    res.setHeader(
+      "Access-Control-Allow-Methods",
+      "GET,POST,OPTIONS"
+    );
+  }
+
+  // Preflight
+  if (req.method === "OPTIONS") {
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
 
   // Route comes from vercel rewrite (see vercel.json below)
   const route = (u.searchParams.get("route") || "").replace(/^\/+|\/+$/g, "");

@@ -1,3 +1,5 @@
 node_modules
 repomix-output.xml
 repomix-*.xml
+.vercel
+.env*.local
