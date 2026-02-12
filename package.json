@@ -7,6 +7,9 @@
   "engines": {
     "node": ">=18"
   },
+  "scripts": {
+    "hygiene": "node scripts/hygiene-report.mjs"
+  },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@supabase/supabase-js": "^2.57.4",
