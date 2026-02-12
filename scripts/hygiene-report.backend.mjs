@@ -5,6 +5,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
+
+console.log([hygiene] BACKEND: luxury-language-api);
 const argv = process.argv.slice(2);
 
 // Flags:
@@ -203,3 +205,4 @@ main().catch((err) => {
   console.error("hygiene-report failed:", err);
   process.exit(1);
 });
+
