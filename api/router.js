@@ -30,7 +30,43 @@ import tts from "../routes/tts.js";
 import updateAttempt from "../routes/update-attempt.js";
 import userRecent from "../routes/user-recent.js";
 
+function mkReqId(req) {
+  const existing = req.headers?.["x-request-id"];
+  return (typeof existing === "string" && existing.trim()) ? existing : crypto.randomUUID();
+}
+
+// Dev/proxy sanity check endpoint:
+// GET /api/ping   -> { ok: true, ... }
+// GET /api/health -> alias of /api/ping
+// (Do NOT include secret values; only booleans.)
+function ping(req, res) {
+  const payload = {
+    ok: true,
+    service: "luxury-language-api",
+    ts: new Date().toISOString(),
+    node: process.version,
+    request: {
+      method: req?.method,
+      url: req?.url,
+      host: req?.headers?.host || null,
+    },
+    env: {
+      hasAdminToken: !!process.env.ADMIN_TOKEN,
+      hasAzureSpeechKey: !!process.env.AZURE_SPEECH_KEY,
+      hasAzureSpeechRegion: !!process.env.AZURE_SPEECH_REGION,
+      hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+      hasSupabaseUrl: !!process.env.SUPABASE_URL,
+    },
+  };
+
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(payload));
+}
+
 const ROUTES = {
+  ping,
+  health: ping,
   "admin-label-user": adminLabelUser,
   "admin-recent": adminRecent,
   "admin-user-stats": adminUserStats,
@@ -47,11 +83,6 @@ const ROUTES = {
   "update-attempt": updateAttempt,
   "user-recent": userRecent,
 };
-
-function mkReqId(req) {
-  const existing = req.headers?.["x-request-id"];
-  return (typeof existing === "string" && existing.trim()) ? existing : crypto.randomUUID();
-}
 
 async function hydrateJsonBodyIfNeeded(req, res) {
   const method = String(req.method || "GET").toUpperCase();
