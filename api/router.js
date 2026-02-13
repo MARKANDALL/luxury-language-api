@@ -22,7 +22,6 @@ import attempt from "../routes/attempt.js";
 import altMeaning from "../routes/alt-meaning.js";
 import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
-import evaluate from "../routes/evaluate.js";
 import migrate from "../routes/migrate.js";
 import pronunciationGpt from "../routes/pronunciation-gpt.js";
 import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
@@ -34,6 +33,53 @@ function mkReqId(req) {
   const existing = req.headers?.["x-request-id"];
   return (typeof existing === "string" && existing.trim()) ? existing : crypto.randomUUID();
 }
+
+function resolveHandler(mod) {
+  // Prefer default export, but tolerate named exports if you ever refactor.
+  return mod?.default || mod?.handler || null;
+}
+
+function lazyRoute(importer, name) {
+  let cached = null;
+  let cachedPromise = null;
+
+  return async function lazyLoadedHandler(req, res) {
+    try {
+      if (!cached) {
+        cachedPromise = cachedPromise || importer();
+        const mod = await cachedPromise;
+        cached = resolveHandler(mod);
+        if (!cached) throw new Error(`${name}: could not resolve handler export`);
+      }
+      return await cached(req, res);
+    } catch (err) {
+      // Reset so dev hot-reload / transient failures can retry.
+      cached = null;
+      cachedPromise = null;
+
+      console.error(`[router] ${name} lazy-load crash`, err);
+
+      if (res.headersSent) return;
+
+      const requestId =
+        (typeof res.getHeader === "function" && res.getHeader("x-request-id")) || null;
+
+      res.statusCode = 500;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.end(
+        JSON.stringify({
+          ok: false,
+          error: "route_failed",
+          where: name,
+          requestId,
+        })
+      );
+    }
+  };
+}
+
+// Risky/heavy routes: lazy-load so one bad import can't take down the whole router.
+const evaluate = lazyRoute(() => import("../routes/evaluate.js"), "routes/evaluate");
 
 // Dev/proxy sanity check endpoint:
 // GET /api/ping   -> { ok: true, ... }
@@ -178,7 +224,7 @@ export default async function handler(req, res) {
     const qs = u.searchParams.toString();
     req.url = `/api/${route}` + (qs ? `?${qs}` : "");
 
-    return fn(req, res);
+    return await fn(req, res);
   } catch (err) {
     console.error(`[router] requestId=${requestId}`, err);
     if (!res.headersSent) {
