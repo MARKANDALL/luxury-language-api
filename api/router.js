@@ -17,7 +17,6 @@ import crypto from "node:crypto";
 import adminLabelUser from "../routes/admin-label-user.js";
 import adminRecent from "../routes/admin-recent.js";
 import adminUserStats from "../routes/admin-user-stats.js";
-import assess from "../routes/assess.js";
 import attempt from "../routes/attempt.js";
 import altMeaning from "../routes/alt-meaning.js";
 import convoReport from "../routes/convo-report.js";
@@ -25,7 +24,6 @@ import convoTurn from "../routes/convo-turn.js";
 import migrate from "../routes/migrate.js";
 import pronunciationGpt from "../routes/pronunciation-gpt.js";
 import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
-import tts from "../routes/tts.js";
 import updateAttempt from "../routes/update-attempt.js";
 import userRecent from "../routes/user-recent.js";
 
@@ -80,6 +78,8 @@ function lazyRoute(importer, name) {
 
 // Risky/heavy routes: lazy-load so one bad import can't take down the whole router.
 const evaluate = lazyRoute(() => import("../routes/evaluate.js"), "routes/evaluate");
+const assess = lazyRoute(() => import("../routes/assess.js"), "routes/assess");
+const tts = lazyRoute(() => import("../routes/tts.js"), "routes/tts");
 
 // Dev/proxy sanity check endpoint:
 // GET /api/ping   -> { ok: true, ... }
