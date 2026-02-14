@@ -217,7 +217,7 @@ const u = new URL(req.url, `http://${getHeader(req, "host") || "localhost"}`);
     // - Enables browser calls from your frontend dev server
     // - Handles preflight OPTIONS
     // ============================================================
-    const origin = req.headers.origin;
+    const origin = getHeader(req, "origin");
     const allowList = new Set(
       String(process.env.CORS_ORIGINS || "")
         .split(",")
