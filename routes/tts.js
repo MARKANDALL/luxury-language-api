@@ -6,9 +6,6 @@
 // /api/tts.js  — Azure REST v1 proxy with smart style fallbacks & rich headers
 export default async function handler(req, res) {
   // Basic CORS
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-token");
   // Let browser JS read our custom headers:
   res.setHeader("Access-Control-Expose-Headers",
     "X-Style-Used, X-Style-Requested, X-Style-Fallback, X-Style-Message, X-Azure-Region"
