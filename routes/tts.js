@@ -30,11 +30,17 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
 
   // P0: ADMIN_TOKEN gate (cost-control for paid Azure TTS proxy)
-  const token =
-    (req.headers["x-admin-token"] || "").toString().trim() ||
-    (req.query?.token || "").toString().trim();
+  function normToken(v) {
+    const s = String(v || "").trim();
+    return s.replace(/^["'](.*)["']$/, "$1").trim();
+  }
 
-  const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
+  const token = normToken(
+    (req.headers["x-admin-token"] || "") ||
+    (req.query?.token || "")
+  );
+
+  const expected = normToken(process.env.ADMIN_TOKEN);
 
   if (!expected || token !== expected) {
     return res.status(401).json({ error: "unauthorized" });

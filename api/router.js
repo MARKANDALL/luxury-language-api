@@ -26,21 +26,35 @@ import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
 import updateAttempt from "../routes/update-attempt.js";
 import userRecent from "../routes/user-recent.js";
 
+function getHeader(req, name) {
+  const h = req?.headers;
+  if (!h) return "";
+  // Vercel / undici / fetch-style request
+  if (typeof h.get === "function") return String(h.get(name) || "").trim();
+  // Node/Express-style plain object
+  return String(h?.[name] ?? h?.[name.toLowerCase()] ?? "").trim();
+}
+
+function normToken(v) {
+  const s = String(v || "").trim();
+  // strip one pair of surrounding quotes if present
+  return s.replace(/^["'](.*)["']$/, "$1").trim();
+}
+
 function isAdminRequest(req, u) {
-  const token =
-    String(req.headers?.["x-admin-token"] || "").trim() ||
-    String(u?.searchParams?.get("token") || "").trim();
+  const token = normToken(
+    getHeader(req, "x-admin-token") ||
+    String(u?.searchParams?.get("token") || "")
+  );
 
-  const expected = String(process.env.ADMIN_TOKEN || "").trim();
+  const expected = normToken(process.env.ADMIN_TOKEN);
 
-  // If expected isn't set, treat as locked down (safer).
   if (!expected) return false;
-
   return token && token === expected;
 }
 
 function mkReqId(req) {
-  const existing = req.headers?.["x-request-id"];
+  const existing = getHeader(req, "x-request-id");
   return (typeof existing === "string" && existing.trim()) ? existing : crypto.randomUUID();
 }
 
@@ -110,7 +124,7 @@ function ping(req, res) {
     request: {
       method: req?.method,
       url: req?.url,
-      host: req?.headers?.host || null,
+      host: getHeader(req, "host") || null,
     },
     env: {
       hasAdminToken: !!process.env.ADMIN_TOKEN,
@@ -153,7 +167,7 @@ async function hydrateJsonBodyIfNeeded(req, res) {
   // If some runtime already set req.body, don’t touch it.
   if (typeof req.body !== "undefined") return true;
 
-  const ct = String(req.headers["content-type"] || "").toLowerCase();
+const ct = String(getHeader(req, "content-type") || "").toLowerCase();
   if (!ct.includes("application/json")) return true;
 
   try {
@@ -175,8 +189,7 @@ export default async function handler(req, res) {
   res.setHeader("x-request-id", requestId);
 
   try {
-    const u = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-
+const u = new URL(req.url, `http://${getHeader(req, "host") || "localhost"}`);
     const route = (u.searchParams.get("route") || "").replace(/^\/+|\/+$/g, "");
 
     // Router-level admin gating (cost-control)
@@ -268,4 +281,4 @@ export default async function handler(req, res) {
       res.end(JSON.stringify({ ok: false, error: "internal_error", requestId }));
     }
   }
-} 
+}
