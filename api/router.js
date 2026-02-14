@@ -26,6 +26,19 @@ import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
 import updateAttempt from "../routes/update-attempt.js";
 import userRecent from "../routes/user-recent.js";
 
+function isAdminRequest(req, u) {
+  const token =
+    String(req.headers?.["x-admin-token"] || "").trim() ||
+    String(u?.searchParams?.get("token") || "").trim();
+
+  const expected = String(process.env.ADMIN_TOKEN || "").trim();
+
+  // If expected isn't set, treat as locked down (safer).
+  if (!expected) return false;
+
+  return token && token === expected;
+}
+
 function mkReqId(req) {
   const existing = req.headers?.["x-request-id"];
   return (typeof existing === "string" && existing.trim()) ? existing : crypto.randomUUID();
@@ -164,6 +177,28 @@ export default async function handler(req, res) {
   try {
     const u = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
+    const route = (u.searchParams.get("route") || "").replace(/^\/+|\/+$/g, "");
+
+    // Router-level admin gating (cost-control)
+    const ADMIN_ONLY = new Set([
+      "tts",
+      "pronunciation-gpt",
+      "evaluate",
+      "assess",
+      // add more later if needed:
+      // "admin-label-user",
+      // "admin-recent",
+      // "admin-user-stats",
+      // "migrate",
+    ]);
+
+    if (ADMIN_ONLY.has(route) && !isAdminRequest(req, u)) {
+      res.statusCode = 401;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.end(JSON.stringify({ ok: false, error: "unauthorized", route, requestId }));
+      return;
+    }
+
     // ============================================================
     // CORS (dev-friendly, safe default)
     // - Enables browser calls from your frontend dev server
@@ -209,9 +244,6 @@ export default async function handler(req, res) {
     // If it's multipart (assess), we leave the stream untouched for formidable.
     const ok = await hydrateJsonBodyIfNeeded(req, res);
     if (!ok) return;
-
-    // Route comes from vercel rewrite (see vercel.json below)
-    const route = (u.searchParams.get("route") || "").replace(/^\/+|\/+$/g, "");
 
     const fn = ROUTES[route];
     if (!fn) {
