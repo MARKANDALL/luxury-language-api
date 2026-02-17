@@ -192,30 +192,12 @@ export default async function handler(req, res) {
 const u = new URL(req.url, `http://${getHeader(req, "host") || "localhost"}`);
     const route = (u.searchParams.get("route") || "").replace(/^\/+|\/+$/g, "");
 
-    // Router-level admin gating (cost-control)
-    const ADMIN_ONLY = new Set([
-      "tts",
-      "pronunciation-gpt",
-      "evaluate",
-      "assess",
-      // add more later if needed:
-      // "admin-label-user",
-      // "admin-recent",
-      // "admin-user-stats",
-      // "migrate",
-    ]);
-
-    if (ADMIN_ONLY.has(route) && !isAdminRequest(req, u)) {
-      res.statusCode = 401;
-      res.setHeader("Content-Type", "application/json; charset=utf-8");
-      res.end(JSON.stringify({ ok: false, error: "unauthorized", route, requestId }));
-      return;
-    }
-
     // ============================================================
     // CORS (dev-friendly, safe default)
     // - Enables browser calls from your frontend dev server
     // - Handles preflight OPTIONS
+    // NOTE: must run BEFORE any early returns (like auth), or the
+    // browser will report "CORS blocked" instead of the real status.
     // ============================================================
     const origin = getHeader(req, "origin");
     const allowList = new Set(
@@ -250,6 +232,26 @@ const u = new URL(req.url, `http://${getHeader(req, "host") || "localhost"}`);
     if (req.method === "OPTIONS") {
       res.statusCode = 204;
       res.end();
+      return;
+    }
+
+    // Router-level admin gating (cost-control)
+    const ADMIN_ONLY = new Set([
+      "tts",
+      "pronunciation-gpt",
+      "evaluate",
+      "assess",
+      // add more later if needed:
+      // "admin-label-user",
+      // "admin-recent",
+      // "admin-user-stats",
+      // "migrate",
+    ]);
+
+    if (ADMIN_ONLY.has(route) && !isAdminRequest(req, u)) {
+      res.statusCode = 401;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.end(JSON.stringify({ ok: false, error: "unauthorized", route, requestId }));
       return;
     }
 
