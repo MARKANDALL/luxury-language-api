@@ -19,21 +19,15 @@ const pool =
 globalThis.__lux_pool = pool;
 
 // ---------- CORS ----------
-const PROD_ORIGIN = "https://luxury-language-api.vercel.app";
-// allow any CodeSandbox preview in dev (e.g. https://abcd123.csb.app)
-function originAllowed(o) {
-  if (!o) return false;
-  if (o === PROD_ORIGIN) return true;
-  try {
-    const u = new URL(o);
-    return u.hostname.endsWith(".csb.app") || u.hostname === "localhost";
-  } catch {
-    return false;
-  }
-}
 function pickOrigin(req) {
-  const o = req.headers.origin || "";
-  return originAllowed(o) ? o : PROD_ORIGIN;
+  const o = String(req.headers?.origin || "");
+  const allowed = new Set(
+    String(process.env.CORS_ORIGINS || "")
+      .split(",").map(s => s.trim()).filter(Boolean)
+  );
+  const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o);
+  const isLuxVercel = /^https:\/\/lux-frontend(?:-[a-z0-9-]+)?\.vercel\.app$/i.test(o);
+  return (isLocalhost || isLuxVercel || allowed.has(o)) ? o : "";
 }
 
 // ---------- Helpers ----------

@@ -211,8 +211,12 @@ const u = new URL(req.url, `http://${getHeader(req, "host") || "localhost"}`);
     const isLocalhost =
       typeof origin === "string" && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
 
+    const isLuxFrontendVercel =
+      typeof origin === "string" &&
+      /^https:\/\/lux-frontend(?:-[a-z0-9-]+)?\.vercel\.app$/i.test(origin);
+
     const allowOrigin =
-      (origin && (isLocalhost || allowList.has(origin))) ? origin : "";
+      (origin && (isLocalhost || isLuxFrontendVercel || allowList.has(origin))) ? origin : "";
 
     if (allowOrigin) {
       res.setHeader("Access-Control-Allow-Origin", allowOrigin);
