@@ -1,4 +1,6 @@
-// api/pronunciation-gpt.js
+// routes/pronunciation-gpt.js
+// API route handler that generates structured pronunciation coaching (personas, chunking, optional history) using OpenAI + Azure assessment JSON.
+
 // Phase F: Structured Output + Personas + Hybrid Models (4o Logic / Mini Translation)
 // STATUS: Complete (All helpers + Chunking + Personas restored)
 
@@ -85,11 +87,20 @@ export default async function handler(req, res) {
   };
   const norm = (s) => (({ dh: "ð", th: "θ", r: "ɹ" })[s] || s);
 
+  // Canonical tiering (keep consistent with frontend: 80/60)
+  const scoreTier = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return "bad";
+    if (n >= 80) return "good";
+    if (n >= 60) return "warn";
+    return "bad";
+  };
+
   function worstPhoneme(json) {
     const tally = {};
     json?.NBest?.[0]?.Words?.forEach((w) =>
       w.Phonemes?.forEach((p) => {
-        if (p.AccuracyScore < 85) {
+        if (p.AccuracyScore != null && scoreTier(p.AccuracyScore) !== "good") {
           const k = norm(p.Phoneme);
           tally[k] = (tally[k] || 0) + 1;
         }
@@ -100,7 +111,7 @@ export default async function handler(req, res) {
 
   function worstWords(json, n = 3) {
     return (json?.NBest?.[0]?.Words || [])
-      .filter((w) => w.AccuracyScore < 70)
+      .filter((w) => scoreTier(w.AccuracyScore) !== "good")
       .sort((a, b) => a.AccuracyScore - b.AccuracyScore)
       .slice(0, n)
       .map((w) => w.Word);
