@@ -1,4 +1,6 @@
 // routes/pronunciation-gpt.js
+// ONE-LINE: API route handler that generates structured pronunciation coaching (personas, chunking, optional history) using OpenAI + Azure assessment JSON.
+
 // API route handler that generates structured pronunciation coaching (personas, chunking, optional history) using OpenAI + Azure assessment JSON.
 
 // Phase F: Structured Output + Personas + Hybrid Models (4o Logic / Mini Translation)
@@ -88,12 +90,33 @@ export default async function handler(req, res) {
   const norm = (s) => (({ dh: "ð", th: "θ", r: "ɹ" })[s] || s);
 
   // Canonical tiering (keep consistent with frontend: 80/60)
-  const scoreTier = (v) => {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return "bad";
-    if (n >= 80) return "good";
-    if (n >= 60) return "warn";
+  const scoreTier = (score) => {
+    const s = safeNum(score);
+    if (s == null) return "unknown";
+    if (s >= 80) return "good";
+    if (s >= 60) return "warn";
     return "bad";
+  };
+
+  // Keep this mapping aligned with frontend core/scoring/index.js (display-only).
+  const cefrBandFromScore = (score) => {
+    const s = safeNum(score);
+    if (s == null) return "";
+    if (s >= 95) return "C2";
+    if (s >= 90) return "C1";
+    if (s >= 85) return "B2";
+    if (s >= 75) return "B1";
+    if (s >= 60) return "A2";
+    return "A1";
+  };
+
+  const extractOverallPronScore = (azureResult) => {
+    const pa =
+      azureResult?.NBest?.[0]?.PronunciationAssessment ||
+      azureResult?.PronunciationAssessment ||
+      null;
+    if (!pa) return null;
+    return safeNum(pa.PronunciationScore);
   };
 
   function worstPhoneme(json) {
@@ -317,6 +340,10 @@ export default async function handler(req, res) {
     const worst = worstPhoneme(azureResult);
     const badList = worstWords(azureResult);
 
+    const overallScore = extractOverallPronScore(azureResult);
+    const overallTier = scoreTier(overallScore);
+    const overallCefr = cefrBandFromScore(overallScore);
+
     // --- SECTIONS DEFINITION (Restored) ---
     const ALL_SECTIONS = [
       { emoji: "🎯", en: "Quick Coaching", min: 80, max: 120 },
@@ -369,6 +396,8 @@ Stay under ~75 words.
 
 You are generating tip variant ${qIndex + 1}/${qCount} (kind: ${variantKind}).
 
+If overallScore is present, mention it ONCE in a compact way like: "Nice work (82% · B2) ..." (do not over-explain CEFR).
+
 Return pure JSON ONLY:
 {
   "sections":[{"title":"QuickTip","en":"string","emoji":"⚡"}],
@@ -406,6 +435,8 @@ Return pure JSON ONLY:
         ${selectedPersona.role}
         Tone: ${selectedPersona.style}
         ${persona === "drill" ? DRILL_CASING_GUARDRAILS : ""}
+        You may receive an overallScore (0–100) with an approximate CEFR band (A1–C2).
+        If overallScore is present, mention it ONCE in a compact way like: "Nice work (82% · B2) ..." (do not over-explain CEFR).
         Return pure JSON exactly like: { "sections":[ {"title":"","titleL1":"","en":"","l1":""} ] }
         Follow these ${targetSections.length} sections in order:
         ${ranges}
@@ -419,6 +450,10 @@ Return pure JSON ONLY:
       sampleText: referenceText,
       universal: universallyHard.has(worst),
       langCode,
+
+      overallScore,
+      overallTier,
+      overallCefr,
 
       // Optional history injection for DeepDive (kept compact)
       history: historySummary || undefined,
