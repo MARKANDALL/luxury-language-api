@@ -8,6 +8,7 @@
 
 import { getSupabaseAdmin } from '../lib/supabase.js';
 import { PERSONAS, DRILL_CASING_GUARDRAILS } from './pronunciation-gpt/personas.js';
+import { forceJson, parseJsonWithRepair } from './pronunciation-gpt/json.js';
 
 export const config = {
   api: {
@@ -116,11 +117,6 @@ export default async function handler(req, res) {
       .sort((a, b) => a.AccuracyScore - b.AccuracyScore)
       .slice(0, n)
       .map((w) => w.Word);
-  }
-
-  function forceJson(str) {
-    str = str.trim().replace(/^```json?\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "");
-    return JSON.parse(str.slice(str.indexOf("{"), str.lastIndexOf("}") + 1));
   }
 
   // 4. Translation Helper (Using Mini)
@@ -455,7 +451,7 @@ Return pure JSON ONLY:
     try {
       data = forceJson(gptRaw);
     } catch (e1) {
-      data = JSON.parse(jsonrepair(gptRaw));
+      data = parseJsonWithRepair(gptRaw, jsonrepair);
     }
 
     const finalSections = Array.isArray(data.sections) ? data.sections : [];
