@@ -217,6 +217,7 @@ export default async function handler(req, res) {
       process.env.SUPABASE_SERVICE_ROLE_KEY ||
       process.env.SUPABASE_SERVICE_KEY ||
       process.env.SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_SERVICE_KEY ||
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
       "";
 
@@ -397,6 +398,7 @@ Stay under ~75 words.
 You are generating tip variant ${qIndex + 1}/${qCount} (kind: ${variantKind}).
 
 If overallScore is present, mention it ONCE in a compact way like: "Nice work (82% · B2) ..." (do not over-explain CEFR).
+Do not label individual words/phonemes with CEFR; keep CEFR macro (overall only).
 
 Return pure JSON ONLY:
 {
@@ -437,6 +439,7 @@ Return pure JSON ONLY:
         ${persona === "drill" ? DRILL_CASING_GUARDRAILS : ""}
         You may receive an overallScore (0–100) with an approximate CEFR band (A1–C2).
         If overallScore is present, mention it ONCE in a compact way like: "Nice work (82% · B2) ..." (do not over-explain CEFR).
+        Do not label individual words/phonemes with CEFR; keep CEFR macro (overall only).
         Return pure JSON exactly like: { "sections":[ {"title":"","titleL1":"","en":"","l1":""} ] }
         Follow these ${targetSections.length} sections in order:
         ${ranges}
