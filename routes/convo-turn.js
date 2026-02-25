@@ -1,4 +1,6 @@
-// api/convo-turn.js
+// routes/convo-turn.js
+// Vercel/Next-style API route that validates an admin token, builds a scenario-driven system prompt, calls OpenAI chat completions, and returns an in-character reply plus 3 learner suggested replies as JSON.
+
 export const config = {
   api: { bodyParser: true, externalResolver: true },
 };
@@ -125,7 +127,7 @@ You're not shouting — just clearly on edge. The learner has to stay calm and d
   angry: `TONE: Angry.
 You are upset about something specific (related to the scenario). You raise your voice slightly,
 use shorter and sharper sentences, and show visible frustration.
-You're not abusive — but you're clearly angry and the learner has to de-escalate or hold firm.`,
+You're not abusive — but you're clearly angry and the learner has to de-escalate or hold firm.`, 
 
   emotional: `TONE: Emotional / Upset.
 You're going through something — stressed, sad, overwhelmed, or deeply moved.
@@ -168,9 +170,15 @@ function buildSystemPrompt(scenario, knobs) {
   const length = knobs?.length || "medium";
 
   const role = scenario.role;
+  const otherRole = scenario.otherRole;
   const levelBlock = LEVEL_INSTRUCTIONS[level] || LEVEL_INSTRUCTIONS.B1;
   const toneBlock = TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.neutral;
   const lengthBlock = LENGTH_INSTRUCTIONS[length] || LENGTH_INSTRUCTIONS.medium;
+
+  // Determine character descriptions with proper fallbacks
+  const aiCharDesc = role?.npc || "A realistic character appropriate for this scenario.";
+  const learnerLabel = role?.label || "The other person in this conversation.";
+  const learnerCharDesc = otherRole?.npc || "";
 
   return `
 You are acting as a character in a realistic American English conversation.
@@ -182,11 +190,13 @@ Title: ${scenario.title}
 Setting: ${scenario.desc}
 ${scenario.more ? `Detail: ${scenario.more}` : ""}
 
-═══ YOUR CHARACTER ═══
-${role?.npc || "A realistic character appropriate for this scenario."}
+═══ YOUR CHARACTER (the AI) ═══
+${aiCharDesc}
 
-═══ THE LEARNER IS PLAYING ═══
-${role?.label || "The other person in this conversation."}
+═══ THE LEARNER IS PLAYING: "${learnerLabel}" ═══
+${learnerCharDesc ? `Character description: ${learnerCharDesc}` : "The other person in this conversation."}
+IMPORTANT: The learner is the "${learnerLabel}" — they are NOT your character.
+The suggested_replies below must be things the "${learnerLabel}" would say, not your character.
 
 ═══ ${levelBlock} ═══
 
@@ -202,7 +212,8 @@ ${role?.label || "The other person in this conversation."}
 - Stay concise. Real people don't give speeches in conversation.
 
 ═══ SUGGESTED REPLIES ═══
-Provide exactly 3 options the learner could say next.
+Provide exactly 3 options THE LEARNER ("${learnerLabel}") could say next.
+- These are what the "${learnerLabel}" would say — NOT your character.
 - All three must be speakable out loud (natural spoken phrases, not written/literary).
 - Reply 1: A simpler, safer response (easy to say, low risk).
 - Reply 2: A natural, confident response (what a comfortable speaker would say).
@@ -212,8 +223,8 @@ Provide exactly 3 options the learner could say next.
 ═══ OUTPUT FORMAT ═══
 Respond with JSON ONLY, no other text:
 {
-  "assistant": "your in-character reply",
-  "suggested_replies": ["simpler option", "natural option", "ambitious option"]
+  "assistant": "your in-character reply (from YOUR character, not the learner)",
+  "suggested_replies": ["simpler ${learnerLabel} option", "natural ${learnerLabel} option", "ambitious ${learnerLabel} option"]
 }
 `.trim();
 }
