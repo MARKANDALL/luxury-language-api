@@ -8,7 +8,9 @@
     "node": ">=18"
   },
   "scripts": {
-    "hygiene": "node scripts/hygiene-report.backend.mjs"
+    "hygiene": "node scripts/hygiene-report.backend.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
