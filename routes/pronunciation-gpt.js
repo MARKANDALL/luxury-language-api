@@ -9,6 +9,13 @@
 import { getSupabaseAdmin } from '../lib/supabase.js';
 import { PERSONAS, DRILL_CASING_GUARDRAILS } from './pronunciation-gpt/personas.js';
 import { forceJson, parseJsonWithRepair } from './pronunciation-gpt/json.js';
+import {
+  safeNum,
+  scoreTier,
+  cefrBandFromScore,
+  extractOverallPronScore,
+  extractPronScore,
+} from './pronunciation-gpt/scoring.js';
 
 export const config = {
   api: {
@@ -68,36 +75,6 @@ export default async function handler(req, res) {
   };
   const norm = (s) => (({ dh: "ð", th: "θ", r: "ɹ" })[s] || s);
 
-  // Canonical tiering (keep consistent with frontend: 80/60)
-  const scoreTier = (score) => {
-    const s = safeNum(score);
-    if (s == null) return "unknown";
-    if (s >= 80) return "good";
-    if (s >= 60) return "warn";
-    return "bad";
-  };
-
-  // Keep this mapping aligned with frontend core/scoring/index.js (display-only).
-  const cefrBandFromScore = (score) => {
-    const s = safeNum(score);
-    if (s == null) return "";
-    if (s >= 95) return "C2";
-    if (s >= 90) return "C1";
-    if (s >= 85) return "B2";
-    if (s >= 75) return "B1";
-    if (s >= 60) return "A2";
-    return "A1";
-  };
-
-  const extractOverallPronScore = (azureResult) => {
-    const pa =
-      azureResult?.NBest?.[0]?.PronunciationAssessment ||
-      azureResult?.PronunciationAssessment ||
-      null;
-    if (!pa) return null;
-    return safeNum(pa.PronunciationScore);
-  };
-
   function worstPhoneme(json) {
     const tally = {};
     json?.NBest?.[0]?.Words?.forEach((w) =>
@@ -148,29 +125,6 @@ export default async function handler(req, res) {
   }
 
   // 4b. Optional History Summary Helper (DB-computed, guarded)
-  function safeNum(v) {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  }
-
-  function extractPronScore(summary) {
-    if (!summary || typeof summary !== "object") return null;
-    // tolerant: support a few likely shapes
-    const direct =
-      safeNum(summary.pron) ??
-      safeNum(summary.pronunciation) ??
-      safeNum(summary.pronScore) ??
-      safeNum(summary.PronunciationScore);
-
-    if (direct != null) return direct;
-
-    const scores = summary.scores && typeof summary.scores === "object" ? summary.scores : null;
-    if (scores) {
-      return safeNum(scores.pron) ?? safeNum(scores.pronunciation) ?? safeNum(scores.pronScore) ?? null;
-    }
-    return null;
-  }
-
   async function computeHistorySummaryIfNeeded({ mode, chunk, includeHistory, attemptId, uid }) {
     // Only for DeepDive and only on chunk 1
     if (mode === "simple") return null;
