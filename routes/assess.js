@@ -142,10 +142,14 @@ export default async function handler(req, res) {
   } finally {
     // cleanup temp files
     if (outputPath) {
-      try { await fs.rm(outputPath, { force: true }); } catch {}
-    }
+try { await fs.rm(outputPath, { force: true }); }
+      catch (err) { console.warn("[/api/assess] cleanup: failed to remove outputPath", err); }
+     }
+     if (inputPath) {    }
     if (inputPath) {
-      try { await fs.rm(inputPath, { force: true }); } catch {}
-    }
+try { await fs.rm(outputPath, { force: true }); }
+      catch (err) { console.warn("[/api/assess] cleanup: failed to remove outputPath", err); }
+     }
+     if (inputPath) {    }
   }
 }

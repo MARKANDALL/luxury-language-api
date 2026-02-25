@@ -38,7 +38,9 @@ export async function speakRest({ endpoint, hdrBase, ssmlXml }) {
   if (!r.ok) {
     try {
       detail = await r.text();
-    } catch {}
+    } catch (err) {
+      console.warn("[tts:speakRest] failed to read Azure error body", err);
+          }
     console.warn("🔻 AZURE ERROR", r.status, detail ? `(body ${detail.length}b)` : "(no body)");
     return { ok: false, status: r.status, detail };
   }
@@ -74,7 +76,9 @@ export async function speakSDK({ key, region, ssmlXml }) {
           wordLength: e.wordLength,
           boundaryType: e.boundaryType,
         });
-      } catch {}
+      } catch (err) {
+      console.warn("[tts:speakRest] failed to read Azure error body", err);
+    }
     };
 
     const result = await new Promise((resolve, reject) => {
@@ -94,7 +98,9 @@ export async function speakSDK({ key, region, ssmlXml }) {
   } catch (e) {
     try {
       if (synthesizer) synthesizer.close();
-    } catch {}
+    } catch (err) {
+      console.warn("[tts:speakRest] failed to read Azure error body", err);
+    }
     const detail = e && e.message ? String(e.message) : String(e || "sdk error");
     return { ok: false, status: 500, detail };
   }

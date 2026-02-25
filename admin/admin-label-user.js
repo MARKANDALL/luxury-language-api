@@ -23,7 +23,9 @@ export default async function handler(req, res) {
       uid     = u.searchParams.get('uid');
       label   = u.searchParams.get('label');
       note    = u.searchParams.get('note');
-    } catch {}
+    } catch (err) {
+      console.warn("[admin/admin-label-user] failed to parse query params", err);
+    }
 
     const token =
       req.headers['x-admin-token'] ||
