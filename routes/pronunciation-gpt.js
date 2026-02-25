@@ -23,6 +23,7 @@ import {
 import { translateMissing } from './pronunciation-gpt/translate.js';
 import { computeHistorySummaryIfNeeded } from './pronunciation-gpt/historySummary.js';
 import { buildCoachPrompt } from './pronunciation-gpt/prompt.js';
+import { runPronunciationCoach } from './pronunciation-gpt/runCoach.js';
 
 export const config = {
   api: {
@@ -73,136 +74,38 @@ export default async function handler(req, res) {
 
   const TRANSLATE_MODEL = process.env.LUX_AI_TRANSLATE_MODEL || "gpt-4o-mini";
 
-  // 3. Helpers (Restored)
-  const universallyHard = new Set(["θ", "ð", "ɹ"]);
-  const langs = {
-    es: "Spanish", fr: "French", pt: "Portuguese", zh: "Chinese",
-    ja: "Japanese", ko: "Korean", ar: "Arabic", ru: "Russian",
-    de: "German", hi: "Hindi", mr: "Marathi", universal: "Universal",
-  };
-
-  const norm = makeNorm();
-
-  // 5. Main Handler
   try {
-    const {
-      referenceText = "",
-      azureResult = {},
-      firstLang = "",
-      mode = "detailed",
-      chunk = 1,
-      persona = "tutor",
+    const result = await runPronunciationCoach({
+      openai,
+      jsonrepair,
 
-      // NEW: for speed + paging + history
-      uid = "",
-      attemptId = null,
-      tipIndex = 0,
-      tipCount = 3,
-      includeHistory = undefined
-    } = req.body || {};
-
-    const langRaw = firstLang.trim().toLowerCase();
-    const langCode = langRaw === "" ? "universal" : (langRaw.startsWith("zh") ? "zh" : langRaw);
-
-    const worst = worstPhoneme(azureResult, { scoreTier, norm });
-    const badList = worstWords(azureResult, { scoreTier }, 3);
-
-    const overallScore = extractOverallPronScore(azureResult);
-    const overallTier = scoreTier(overallScore);
-    const overallCefr = cefrBandFromScore(overallScore);
-
-    // History summary (only if DeepDive, chunk 1, and rule says include)
-    const historySummary = await computeHistorySummaryIfNeeded(
-      { safeNum, extractPronScore },
-      { mode, chunk, includeHistory, attemptId, uid }
-    );
-
-    let targetSections = [];
-    let systemPrompt = "";
-    let model = DEEP_MODEL;
-    let maxTokens = 1800;
-
-    const selectedPersona = PERSONAS[persona] || PERSONAS.tutor;
-
-    const built = buildCoachPrompt({
-      mode,
-      chunk,
-      persona,
-      tipIndex,
-      tipCount,
-      selectedPersona,
-      DRILL_CASING_GUARDRAILS,
+      QUICK_MODEL,
+      DEEP_MODEL,
       DEEP_REASONING_MODEL,
       DEEP_REASONING_EFFORT,
-      historySummary,
-    });
+      TRANSLATE_MODEL,
 
-    targetSections = built.targetSections;
-    systemPrompt = built.systemPrompt;
-    maxTokens = built.maxTokens;
+      PERSONAS,
+      DRILL_CASING_GUARDRAILS,
+      forceJson,
+      parseJsonWithRepair,
 
-    if (mode === "simple") {
-      model = QUICK_MODEL;
-    }
-    if (built.modelUpgrade) {
-      model = built.modelUpgrade;
-    }
+      safeNum,
+      scoreTier,
+      cefrBandFromScore,
+      extractOverallPronScore,
+      extractPronScore,
 
-    const userPrompt = JSON.stringify({
-      worstPhoneme: worst,
-      worstWords: badList,
-      sampleText: referenceText,
-      universal: universallyHard.has(worst),
-      langCode,
+      makeNorm,
+      worstPhoneme,
+      worstWords,
 
-      overallScore,
-      overallTier,
-      overallCefr,
+      translateMissing,
+      computeHistorySummaryIfNeeded,
+      buildCoachPrompt,
+    }, req.body || {});
 
-      history: historySummary || undefined,
-    });
-
-    const draft = await openai.chat.completions.create({
-      model,
-      temperature: 0.6,
-      response_format: { type: "json_object" },
-      max_tokens: maxTokens,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    });
-
-    let gptRaw = draft.choices[0].message.content || "";
-    let data;
-
-    try {
-      data = forceJson(gptRaw);
-    } catch (e1) {
-      data = parseJsonWithRepair(gptRaw, jsonrepair);
-    }
-
-    const finalSections = Array.isArray(data.sections) ? data.sections : [];
-
-    while (finalSections.length < targetSections.length) {
-      finalSections.push({ title: "Note", en: "Additional feedback unavailable.", emoji: "📝" });
-    }
-
-    if (mode !== "simple") {
-      await translateMissing({ openai, forceJson, langs, TRANSLATE_MODEL }, finalSections, langCode);
-    }
-
-    return res.status(200).json({
-      sections: finalSections,
-      meta: {
-        mode,
-        chunk: Number(chunk) || 1,
-        tipIndex: Number(tipIndex) || 0,
-        tipCount: Number(tipCount) || 3,
-        usedModel: model
-      }
-    });
-
+    return res.status(200).json(result);
   } catch (err) {
     console.error("[pronunciation-gpt] Fatal Error:", err);
     return res.status(200).json({
