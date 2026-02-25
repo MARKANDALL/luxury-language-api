@@ -6,6 +6,8 @@
 // Phase F: Structured Output + Personas + Hybrid Models (4o Logic / Mini Translation)
 // STATUS: Complete (All helpers + Chunking + Personas restored)
 
+import { getSupabaseAdmin } from '../lib/supabase.js';
+
 export const config = {
   api: {
     bodyParser: true,
@@ -224,9 +226,7 @@ export default async function handler(req, res) {
     if (!supabaseUrl || !supabaseKey) return null;
 
     try {
-      const mod = await import("@supabase/supabase-js");
-      const createClient = mod.createClient;
-      const supabase = createClient(supabaseUrl, supabaseKey);
+      const supabase = getSupabaseAdmin({ url: supabaseUrl, key: supabaseKey });
 
       // Pull last ~40 summaries for the user
       const { data, error } = await supabase

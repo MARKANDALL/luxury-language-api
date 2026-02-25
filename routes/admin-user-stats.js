@@ -1,6 +1,6 @@
 // routes/admin-user-stats.js
 // One-line: Admin-only stats endpoint that aggregates lux_attempts by user and window, with safe in-handler Supabase init (no import-time crash).
-import { createClient } from '@supabase/supabase-js';
+import { getSupabaseAdmin } from '../lib/supabase.js';
 
 const SUPABASE_URL   =
   process.env.SUPABASE_URL ||
@@ -25,7 +25,7 @@ function getSupabaseClient() {
   if (!SERVICE_ROLE) {
     throw new Error('SUPABASE service key is required (set SUPABASE_SERVICE_ROLE / SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SERVICE_KEY)');
   }
-  return createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+  return getSupabaseAdmin({ url: SUPABASE_URL, key: SERVICE_ROLE });
 }
 
 function getAdminToken(req) {

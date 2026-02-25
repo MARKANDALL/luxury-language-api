@@ -1,31 +1,34 @@
-// /api/admin-label-user.js  (ESM; POST/DELETE; Vercel Node runtime)
-import { createClient } from '@supabase/supabase-js';
+// /api/admin-label-user.js
+import { getSupabaseAdmin } from '../lib/supabase.js';
 
-function getQS(req) {
-  try { return new URL(req.url, 'http://localhost').searchParams; }
-  catch { return new URLSearchParams(); }
-}
-async function readBody(req) {
-  let body = '';
-  for await (const chunk of req) body += chunk;
-  return body;
+async function readJson(req) {
+  if (req.body && typeof req.body === 'object') return req.body;
+  return await new Promise((resolve) => {
+    let buf = '';
+    req.on('data', (c) => (buf += c));
+    req.on('end', () => {
+      try { resolve(JSON.parse(buf || '{}')); }
+      catch { resolve({}); }
+    });
+  });
 }
 
 export default async function handler(req, res) {
-  // CORS (handy if you ever open this from another origin)
-  if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'x-admin-token, content-type');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, DELETE, OPTIONS');
-    return res.status(204).end();
-  }
-
   try {
-    const qs = getQS(req);
+    // Support token in header or query
+    let qsToken = null, uid = null, label = null, note = null;
+    try {
+      const u = new URL(req.url, 'http://localhost');
+      qsToken = u.searchParams.get('token');
+      uid     = u.searchParams.get('uid');
+      label   = u.searchParams.get('label');
+      note    = u.searchParams.get('note');
+    } catch {}
+
     const token =
       req.headers['x-admin-token'] ||
       req.headers['x-admin-token'.toLowerCase()] ||
-      qs.get('token');
+      qsToken;
 
     if (!process.env.ADMIN_TOKEN) {
       return res.status(500).json({ error: 'missing ADMIN_TOKEN' });
@@ -34,40 +37,36 @@ export default async function handler(req, res) {
       return res.status(401).json({ error: 'unauthorized' });
     }
 
-    const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
-
-    // accept uid/label via either query string or JSON body
-    let uid = (qs.get('uid') || '').trim();
-    let label = (qs.get('label') || '').trim();
-    if (!uid) {
-      const raw = await readBody(req);
-      if (raw) {
-        try {
-          const j = JSON.parse(raw);
-          uid = (j.uid || uid || '').trim();
-          label = (j.label || label || '').trim();
-        } catch {}
-      }
+    // Allow POST body too
+    if (req.method === 'POST') {
+      const body = await readJson(req);
+      uid   = body.uid   ?? uid;
+      label = body.label ?? label;
+      note  = body.note  ?? note;
     }
 
-    if (!uid) return res.status(400).json({ error: 'uid required' });
+    uid = (uid || '').trim();
+    label = (label || '').trim();
+    note = (note || '').trim();
 
-    if (req.method === 'DELETE' || label === '') {
-      const { error } = await supa.from('lux_users').delete().eq('uid', uid);
-      if (error) return res.status(500).json({ error: error.message });
-      return res.status(200).json({ ok: true, action: 'deleted', uid });
+    if (!uid || !label) {
+      return res.status(400).json({ error: 'uid_and_label_required' });
     }
+    if (label.length > 120) {
+      return res.status(400).json({ error: 'label_too_long' });
+    }
+
+    const supa = getSupabaseAdmin();
 
     const { data, error } = await supa
       .from('lux_users')
-      .upsert({ uid, label }, { onConflict: 'uid' })
+      .upsert([{ uid, label, note }], { onConflict: 'uid' })
       .select()
-      .single();
+      .limit(1);
 
     if (error) return res.status(500).json({ error: error.message });
-    return res.status(200).json({ ok: true, user: data });
+
+    return res.status(200).json({ ok: true, row: data?.[0] || { uid, label, note } });
   } catch (err) {
     console.error('[admin-label-user] Crash:', err);
     return res.status(500).json({ error: 'server_error', message: err?.message || String(err) });

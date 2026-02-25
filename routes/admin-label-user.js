@@ -1,5 +1,7 @@
-// /api/admin-label-user.js
-import { createClient } from '@supabase/supabase-js';
+// routes/admin-label-user.js
+// One-line: Admin-only endpoint to upsert a user's label/note in lux_users using a centralized Supabase admin client.
+
+import { getSupabaseAdmin } from '../lib/supabase.js';
 
 async function readJson(req) {
   if (req.body && typeof req.body === 'object') return req.body;
@@ -56,9 +58,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'label_too_long' });
     }
 
-    const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+    const supa = getSupabaseAdmin();
 
     const { data, error } = await supa
       .from('lux_users')
