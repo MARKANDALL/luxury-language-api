@@ -16,6 +16,11 @@ import {
   extractOverallPronScore,
   extractPronScore,
 } from './pronunciation-gpt/scoring.js';
+import {
+  makeNorm,
+  worstPhoneme,
+  worstWords,
+} from './pronunciation-gpt/azureExtract.js';
 
 export const config = {
   api: {
@@ -73,28 +78,8 @@ export default async function handler(req, res) {
     ja: "Japanese", ko: "Korean", ar: "Arabic", ru: "Russian",
     de: "German", hi: "Hindi", mr: "Marathi", universal: "Universal",
   };
-  const norm = (s) => (({ dh: "ð", th: "θ", r: "ɹ" })[s] || s);
 
-  function worstPhoneme(json) {
-    const tally = {};
-    json?.NBest?.[0]?.Words?.forEach((w) =>
-      w.Phonemes?.forEach((p) => {
-        if (p.AccuracyScore != null && scoreTier(p.AccuracyScore) !== "good") {
-          const k = norm(p.Phoneme);
-          tally[k] = (tally[k] || 0) + 1;
-        }
-      })
-    );
-    return Object.entries(tally).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
-  }
-
-  function worstWords(json, n = 3) {
-    return (json?.NBest?.[0]?.Words || [])
-      .filter((w) => scoreTier(w.AccuracyScore) !== "good")
-      .sort((a, b) => a.AccuracyScore - b.AccuracyScore)
-      .slice(0, n)
-      .map((w) => w.Word);
-  }
+  const norm = makeNorm();
 
   // 4. Translation Helper (Using Mini)
   async function translateMissing(arr, lang) {
@@ -264,8 +249,9 @@ export default async function handler(req, res) {
 
     const langRaw = firstLang.trim().toLowerCase();
     const langCode = langRaw === "" ? "universal" : (langRaw.startsWith("zh") ? "zh" : langRaw);
-    const worst = worstPhoneme(azureResult);
-    const badList = worstWords(azureResult);
+
+    const worst = worstPhoneme(azureResult, { scoreTier, norm });
+    const badList = worstWords(azureResult, { scoreTier }, 3);
 
     const overallScore = extractOverallPronScore(azureResult);
     const overallTier = scoreTier(overallScore);
