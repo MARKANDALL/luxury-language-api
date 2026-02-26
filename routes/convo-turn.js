@@ -175,10 +175,11 @@ function buildSystemPrompt(scenario, knobs) {
   const toneBlock = TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.neutral;
   const lengthBlock = LENGTH_INSTRUCTIONS[length] || LENGTH_INSTRUCTIONS.medium;
 
-  // Determine character descriptions with proper fallbacks
-  const aiCharDesc = role?.npc || "A realistic character appropriate for this scenario.";
+  // npc now describes THAT role's own character (not the partner),
+  // so the AI's character comes from otherRole (the role the AI plays).
+  const aiCharDesc = otherRole?.npc || "A realistic character appropriate for this scenario.";
   const learnerLabel = role?.label || "The other person in this conversation.";
-  const learnerCharDesc = otherRole?.npc || "";
+  const learnerCharDesc = role?.npc || "";
 
   return `
 You are acting as a character in a realistic American English conversation.
