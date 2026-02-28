@@ -1,7 +1,21 @@
 // api/update-attempt.js
 // Updates an existing attempt (e.g. to add AI feedback later)
 
-import { pool } from "../lib/pool.js";
+import { Pool } from "pg";
+
+const pool =
+  globalThis.__lux_pool ||
+  new Pool({
+    connectionString:
+      process.env.POSTGRES_URL ||
+      process.env.POSTGRES_CONNECTION ||
+      process.env.DATABASE_URL,
+    ssl:
+      process.env.PGSSLMODE === "disable"
+        ? false
+        : { rejectUnauthorized: false },
+  });
+globalThis.__lux_pool = pool;
 
 export default async function handler(req, res) {
   // CORS

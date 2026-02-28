@@ -3,21 +3,7 @@ export const config = {
   api: { bodyParser: true, externalResolver: true },
 };
 
-import { Pool } from "pg";
-
-const pool =
-  globalThis.__lux_pool ||
-  new Pool({
-    connectionString:
-      process.env.POSTGRES_URL ||
-      process.env.POSTGRES_CONNECTION ||
-      process.env.DATABASE_URL,
-    ssl:
-      process.env.PGSSLMODE === "disable"
-        ? false
-        : { rejectUnauthorized: false },
-  });
-globalThis.__lux_pool = pool;
+import { pool } from "../lib/pool.js";
 
 function mean(nums) {
   const xs = (nums || []).filter((n) => Number.isFinite(n));

@@ -2,7 +2,22 @@
 // PUBLIC ENDPOINT: Fetches history for a specific user.
 // Security: Validates UID format (UUID) to prevent abuse. No admin token required.
 
-import { pool } from "../lib/pool.js";
+import { Pool } from "pg";
+
+// 1. Reuse the connection pool (Standard Vercel/Serverless pattern)
+const pool =
+  globalThis.__lux_pool ||
+  new Pool({
+    connectionString:
+      process.env.POSTGRES_URL ||
+      process.env.POSTGRES_CONNECTION ||
+      process.env.DATABASE_URL,
+    ssl:
+      process.env.PGSSLMODE === "disable"
+        ? false
+        : { rejectUnauthorized: false },
+  });
+globalThis.__lux_pool = pool;
 
 // 2. Helper to validate UUIDs (Prevents SQL Injection / garbage data)
 function isUUID(str) {
