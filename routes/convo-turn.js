@@ -5,12 +5,6 @@ export const config = {
   api: { bodyParser: true, externalResolver: true },
 };
 
-function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-token");
-}
-
 /* ── CEFR level instructions ─────────────────────────────────── */
 
 const LEVEL_INSTRUCTIONS = {
@@ -233,7 +227,6 @@ Respond with JSON ONLY, no other text:
 /* ── Handler ──────────────────────────────────────────────────── */
 
 export default async function handler(req, res) {
-  cors(res);
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "method_not_allowed" });

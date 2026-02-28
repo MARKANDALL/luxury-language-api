@@ -19,12 +19,6 @@ const pool =
   });
 globalThis.__lux_pool = pool;
 
-function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-token");
-}
-
 function mean(nums) {
   const xs = (nums || []).filter((n) => Number.isFinite(n));
   if (!xs.length) return null;
@@ -125,7 +119,6 @@ Avoid shaming. Avoid long explanations.
 }
 
 export default async function handler(req, res) {
-  cors(res);
 
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "method_not_allowed" });
