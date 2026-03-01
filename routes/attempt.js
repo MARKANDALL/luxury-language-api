@@ -2,18 +2,7 @@
 // Accept attempt payloads and insert into Postgres (table: public.lux_attempts)
 
 import { pool } from "../lib/pool.js";
-
-// ---------- CORS ----------
-function pickOrigin(req) {
-  const o = String(req.headers?.origin || "");
-  const allowed = new Set(
-    String(process.env.CORS_ORIGINS || "")
-      .split(",").map(s => s.trim()).filter(Boolean)
-  );
-  const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o);
-  const isLuxVercel = /^https:\/\/lux-frontend(?:-[a-z0-9-]+)?\.vercel\.app$/i.test(o);
-  return (isLocalhost || isLuxVercel || allowed.has(o)) ? o : "";
-}
+import { safeNum } from "./pronunciation-gpt/scoring.js";
 
 // ---------- Helpers ----------
 function toIso(x) {
@@ -24,11 +13,6 @@ function toIso(x) {
   }
 }
 
-function numOrNull(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
 // Build a compact summary for admin UI from Azure JSON
 function toSummaryFromAzure(result) {
   // Defensive defaults
@@ -37,10 +21,10 @@ function toSummaryFromAzure(result) {
   const ca = nb?.ContentAssessment || result?.ContentAssessment || {};
 
   const pron =
-    numOrNull(nb?.PronScore ?? pa?.PronunciationScore ?? pa?.PronScore) ?? null;
-  const acc = numOrNull(nb?.AccuracyScore ?? pa?.AccuracyScore) ?? null;
-  const flu = numOrNull(nb?.FluencyScore ?? pa?.FluencyScore) ?? null;
-  const comp = numOrNull(nb?.CompletenessScore ?? pa?.CompletenessScore) ?? null;
+    safeNum(nb?.PronScore ?? pa?.PronunciationScore ?? pa?.PronScore) ?? null;
+  const acc = safeNum(nb?.AccuracyScore ?? pa?.AccuracyScore) ?? null;
+  const flu = safeNum(nb?.FluencyScore ?? pa?.FluencyScore) ?? null;
+  const comp = safeNum(nb?.CompletenessScore ?? pa?.CompletenessScore) ?? null;
 
   const words = Array.isArray(nb?.Words) ? nb.Words : [];
 
@@ -50,7 +34,7 @@ function toSummaryFromAzure(result) {
     const phs = Array.isArray(w?.Phonemes) ? w.Phonemes : [];
     for (const p of phs) {
       const key = String(p?.Phoneme || "").trim();
-      const score = numOrNull(p?.AccuracyScore);
+      const score = safeNum(p?.AccuracyScore);
       if (!key || score == null) continue;
       phScores.push({ p: key, s: score });
     }
@@ -62,7 +46,7 @@ function toSummaryFromAzure(result) {
   const wordAgg = new Map();
   for (const w of words) {
     const key = String(w?.Word || w?.word || "").trim().toLowerCase();
-    const s = numOrNull(w?.AccuracyScore);
+    const s = safeNum(w?.AccuracyScore);
     if (!key || s == null) continue;
     const cur = wordAgg.get(key) || { sum: 0, n: 0 };
     cur.sum += s;
@@ -81,18 +65,6 @@ function toSummaryFromAzure(result) {
 }
 
 export default async function handler(req, res) {
-  // CORS headers
-  const origin = pickOrigin(req);
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
-
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method Not Allowed" });
     return;
@@ -130,10 +102,10 @@ export default async function handler(req, res) {
 
     // Back-compat fallback shape (used when no Azure and/or when client sends flat fields)
     const flatBaseline = {
-      pron: numOrNull(body.pron),
-      acc: numOrNull(body.acc),
-      flu: numOrNull(body.flu),
-      comp: numOrNull(body.comp),
+      pron: safeNum(body.pron),
+      acc: safeNum(body.acc),
+      flu: safeNum(body.flu),
+      comp: safeNum(body.comp),
       lows: Array.isArray(body.lows) ? body.lows : [],
       words: Array.isArray(body.words) ? body.words : [],
     };
