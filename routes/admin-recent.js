@@ -1,21 +1,5 @@
 // file: /api/admin-recent.js
-import { Pool } from "pg";
-
-// --- Connection pooling (re-use across invocations)
-const pool =
-  globalThis.__lux_pool ||
-  new Pool({
-    connectionString:
-      process.env.POSTGRES_URL ||
-      process.env.POSTGRES_CONNECTION ||
-      process.env.DATABASE_URL,
-    // Works on most hosted Postgres; adjust if you use a self-managed instance
-    ssl:
-      process.env.PGSSLMODE === "disable"
-        ? false
-        : { rejectUnauthorized: false },
-  });
-globalThis.__lux_pool = pool;
+import { pool } from "../lib/pool.js";
 
 const ALLOWED_PASSAGES = new Set([
   "rainbow",

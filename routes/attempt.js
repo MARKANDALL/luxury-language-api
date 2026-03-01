@@ -1,34 +1,7 @@
 // file: /api/attempt.js
 // Accept attempt payloads and insert into Postgres (table: public.lux_attempts)
 
-import { Pool } from "pg";
-
-// ---------- Connection pool (singleton across invocations) ----------
-const pool =
-  globalThis.__lux_pool ||
-  new Pool({
-    connectionString:
-      process.env.POSTGRES_URL ||
-      process.env.POSTGRES_CONNECTION ||
-      process.env.DATABASE_URL,
-    ssl:
-      process.env.PGSSLMODE === "disable"
-        ? false
-        : { rejectUnauthorized: false },
-  });
-globalThis.__lux_pool = pool;
-
-// ---------- CORS ----------
-function pickOrigin(req) {
-  const o = String(req.headers?.origin || "");
-  const allowed = new Set(
-    String(process.env.CORS_ORIGINS || "")
-      .split(",").map(s => s.trim()).filter(Boolean)
-  );
-  const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o);
-  const isLuxVercel = /^https:\/\/lux-frontend(?:-[a-z0-9-]+)?\.vercel\.app$/i.test(o);
-  return (isLocalhost || isLuxVercel || allowed.has(o)) ? o : "";
-}
+import { pool } from "../lib/pool.js";
 
 // ---------- Helpers ----------
 function toIso(x) {
@@ -96,13 +69,7 @@ function toSummaryFromAzure(result) {
 }
 
 export default async function handler(req, res) {
-  // CORS headers
-  const origin = pickOrigin(req);
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Vary", "Origin");
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
+  // CORS handled by router (api/router.js)
   if (req.method === "OPTIONS") {
     res.status(204).end();
     return;

@@ -2,22 +2,7 @@
 // PUBLIC ENDPOINT: Fetches history for a specific user.
 // Security: Validates UID format (UUID) to prevent abuse. No admin token required.
 
-import { Pool } from "pg";
-
-// 1. Reuse the connection pool (Standard Vercel/Serverless pattern)
-const pool =
-  globalThis.__lux_pool ||
-  new Pool({
-    connectionString:
-      process.env.POSTGRES_URL ||
-      process.env.POSTGRES_CONNECTION ||
-      process.env.DATABASE_URL,
-    ssl:
-      process.env.PGSSLMODE === "disable"
-        ? false
-        : { rejectUnauthorized: false },
-  });
-globalThis.__lux_pool = pool;
+import { pool } from "../lib/pool.js";
 
 // 2. Helper to validate UUIDs (Prevents SQL Injection / garbage data)
 function isUUID(str) {
@@ -27,11 +12,7 @@ function isUUID(str) {
 }
 
 export default async function handler(req, res) {
-  // Allow CORS (So your frontend can call this)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
+  // CORS handled by router (api/router.js)
   if (req.method === "OPTIONS") return res.status(204).end();
 
   try {
