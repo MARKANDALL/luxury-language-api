@@ -1,0 +1,229 @@
+// file: /api/attempt.js
+// Accept attempt payloads and insert into Postgres (table: public.lux_attempts)
+
+import { Pool } from "pg";
+
+// ---------- Connection pool (singleton across invocations) ----------
+const pool =
+  globalThis.__lux_pool ||
+  new Pool({
+    connectionString:
+      process.env.POSTGRES_URL ||
+      process.env.POSTGRES_CONNECTION ||
+      process.env.DATABASE_URL,
+    ssl:
+      process.env.PGSSLMODE === "disable"
+        ? false
+        : { rejectUnauthorized: false },
+  });
+globalThis.__lux_pool = pool;
+
+// ---------- CORS ----------
+function pickOrigin(req) {
+  const o = String(req.headers?.origin || "");
+  const allowed = new Set(
+    String(process.env.CORS_ORIGINS || "")
+      .split(",").map(s => s.trim()).filter(Boolean)
+  );
+  const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o);
+  const isLuxVercel = /^https:\/\/lux-frontend(?:-[a-z0-9-]+)?\.vercel\.app$/i.test(o);
+  return (isLocalhost || isLuxVercel || allowed.has(o)) ? o : "";
+}
+
+// ---------- Helpers ----------
+function toIso(x) {
+  try {
+    return x ? new Date(x).toISOString() : new Date().toISOString();
+  } catch {
+    return new Date().toISOString();
+  }
+}
+
+function numOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Build a compact summary for admin UI from Azure JSON
+function toSummaryFromAzure(result) {
+  // Defensive defaults
+  const nb = result?.NBest?.[0] || {};
+  const pa = nb?.PronunciationAssessment || result?.PronunciationAssessment || {};
+  const ca = nb?.ContentAssessment || result?.ContentAssessment || {};
+
+  const pron =
+    numOrNull(nb?.PronScore ?? pa?.PronunciationScore ?? pa?.PronScore) ?? null;
+  const acc = numOrNull(nb?.AccuracyScore ?? pa?.AccuracyScore) ?? null;
+  const flu = numOrNull(nb?.FluencyScore ?? pa?.FluencyScore) ?? null;
+  const comp = numOrNull(nb?.CompletenessScore ?? pa?.CompletenessScore) ?? null;
+
+  const words = Array.isArray(nb?.Words) ? nb.Words : [];
+
+  // trouble phonemes (lowest 6 by score)
+  const phScores = [];
+  for (const w of words) {
+    const phs = Array.isArray(w?.Phonemes) ? w.Phonemes : [];
+    for (const p of phs) {
+      const key = String(p?.Phoneme || "").trim();
+      const score = numOrNull(p?.AccuracyScore);
+      if (!key || score == null) continue;
+      phScores.push({ p: key, s: score });
+    }
+  }
+  phScores.sort((a, b) => a.s - b.s);
+  const lows = phScores.slice(0, 6).map((x) => [x.p, x.s]);
+
+  // trouble words (aggregate avg by word, lowest 10)
+  const wordAgg = new Map();
+  for (const w of words) {
+    const key = String(w?.Word || w?.word || "").trim().toLowerCase();
+    const s = numOrNull(w?.AccuracyScore);
+    if (!key || s == null) continue;
+    const cur = wordAgg.get(key) || { sum: 0, n: 0 };
+    cur.sum += s;
+    cur.n += 1;
+    wordAgg.set(key, cur);
+  }
+  const wordRows = Array.from(wordAgg.entries()).map(([w, { sum, n }]) => ({
+    w,
+    s: Math.round(sum / Math.max(1, n)),
+    n,
+  }));
+  wordRows.sort((a, b) => a.s - b.s);
+  const wordsLow = wordRows.slice(0, 10).map((r) => [r.w, r.s, r.n]);
+
+  return { pron, acc, flu, comp, lows, words: wordsLow };
+}
+
+export default async function handler(req, res) {
+  // CORS headers
+  const origin = pickOrigin(req);
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Method Not Allowed" });
+    return;
+  }
+
+  try {
+    const body =
+      typeof req.body === "string" ? JSON.parse(req.body || "{}") : req.body || {};
+
+    // ---- Accept both legacy and new shapes ----
+    const uid = body.uid || body.userId || null;
+    const passageKey =
+      body.passageKey || body.passage_key || body.passage || "unknown";
+    const partIndex =
+      body.partIndex != null ? Number(body.partIndex) : Number(body.part ?? 0);
+    const text =
+      body.text ||
+      body.referenceText ||
+      body.azureResult?.DisplayText ||
+      body.azureResult?.NBest?.[0]?.Display ||
+      "";
+
+    // --- NEW: accept sessionId (both shapes) ---
+    const sessionId = body.sessionId || body.session_id || null;
+
+    // Prefer client-sent localTime if present
+    const ts = toIso(body.localTime || body.ts);
+
+    // summary:
+    // Merge server-derived base summary (Azure) with client extensions (meta/stats/AI artifacts).
+    const azureObj =
+      body.azureResult && typeof body.azureResult === "object"
+        ? body.azureResult
+        : null;
+
+    // Back-compat fallback shape (used when no Azure and/or when client sends flat fields)
+    const flatBaseline = {
+      pron: numOrNull(body.pron),
+      acc: numOrNull(body.acc),
+      flu: numOrNull(body.flu),
+      comp: numOrNull(body.comp),
+      lows: Array.isArray(body.lows) ? body.lows : [],
+      words: Array.isArray(body.words) ? body.words : [],
+    };
+    const hasFlat =
+      flatBaseline.pron != null ||
+      flatBaseline.acc != null ||
+      flatBaseline.flu != null ||
+      flatBaseline.comp != null ||
+      (flatBaseline.lows && flatBaseline.lows.length) ||
+      (flatBaseline.words && flatBaseline.words.length);
+
+    // Start with the server-derived summary when we have Azure, else fall back to the flat baseline.
+    let summary = azureObj ? toSummaryFromAzure(azureObj) : flatBaseline;
+
+    // Prefer merging client summary (meta/stats/etc) on top of base summary.
+    if (body.summary && typeof body.summary === "object") {
+      summary = { ...summary, ...body.summary };
+    } else if (azureObj && hasFlat) {
+      // Rare: allow flat fields to extend/override when Azure exists but no summary object was sent
+      summary = { ...summary, ...flatBaseline };
+    }
+
+    // Optional: persist raw Azure only when explicitly requested (never returned by user-recent).
+    if (body.storeRawAzure === true && azureObj) {
+      const raw = summary.raw && typeof summary.raw === "object" ? summary.raw : {};
+      if (!raw.azure) raw.azure = azureObj;
+      summary.raw = raw;
+    }
+
+    if (!uid) return res.status(400).json({ ok: false, error: "missing_uid" });
+
+    const row = {
+      uid,
+      ts,
+      passage_key: passageKey,
+      part_index: Number.isFinite(partIndex) ? partIndex : 0,
+      text,
+      summary: summary || {},
+      session_id: sessionId,
+    };
+
+    // Insert
+    const sql = `
+      INSERT INTO public.lux_attempts
+        (uid, ts, passage_key, part_index, text, summary, session_id)
+      VALUES
+        ($1, $2::timestamptz, $3, $4, $5, $6::jsonb, $7)
+      RETURNING id
+    `;
+    const params = [
+      row.uid,
+      row.ts,
+      row.passage_key,
+      row.part_index,
+      row.text,
+      JSON.stringify(row.summary),
+      row.session_id,
+    ];
+
+    const { rows } = await pool.query(sql, params);
+    const insertedId = rows?.[0]?.id || null;
+
+    console.log("[attempt] inserted", {
+      uid: row.uid,
+      passage: row.passage_key,
+      session_id: row.session_id,
+      part_index: row.part_index,
+      id: insertedId,
+    });
+
+    res.status(200).json({ ok: true, id: insertedId });
+  } catch (err) {
+    console.error("attempt handler error:", err);
+    res
+      .status(500)
+      .json({ ok: false, error: "server_error", detail: String(err?.message || err) });
+  }
+}
