@@ -33,10 +33,7 @@ async function handler(req, res) {
       url: req.url,
     });
 
-    // CORS
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-admin-token");
+    // CORS handled by router (api/router.js); only add Expose-Headers
     res.setHeader(
       "Access-Control-Expose-Headers",
       "X-Voice-Requested, X-Voice-Used, X-Model-Used"

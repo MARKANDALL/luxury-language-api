@@ -2,22 +2,48 @@
 // One-line: Admin-only stats endpoint that aggregates lux_attempts by user and window, with safe in-handler Supabase init (no import-time crash).
 import { getSupabaseAdmin } from '../lib/supabase.js';
 
+const SUPABASE_URL   =
+  process.env.SUPABASE_URL ||
+  process.env.NEXT_PUBLIC_SUPABASE_URL ||
+  'https://pvggfemqtlsicreynfxz.supabase.co';
+
+const SERVICE_ROLE   =
+  process.env.SUPABASE_SERVICE_ROLE ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB2Z2dmZW1xdGxzaWNyZXluZnh6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NzUzNDE0MiwiZXhwIjoyMDczMTEwMTQyfQ.Dx_NFUWCbtVF7msJM6LpvJvaS2txKFxIkimF4RurG7g';
+
+const ADMIN_TOKEN    = process.env.ADMIN_TOKEN || 'sIMONCAT4!';
+
+function getSupabaseClient() {
+  // IMPORTANT: never crash at import-time (router-wide outage)
+  if (!SUPABASE_URL) {
+    throw new Error('SUPABASE_URL is required (set SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL)');
+  }
+  if (!SERVICE_ROLE) {
+    throw new Error('SUPABASE service key is required (set SUPABASE_SERVICE_ROLE / SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SERVICE_KEY)');
+  }
+  return getSupabaseAdmin({ url: SUPABASE_URL, key: SERVICE_ROLE });
+}
+
+function getAdminToken(req) {
+  return req.headers['x-admin-token'] || req.query.token || '';
+}
+
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 
 export default async function handler(req, res) {
   try {
-    // --- Admin token gate (consistent with other routes) ---
-    const token =
-      (req.headers['x-admin-token'] || '').toString().trim() ||
-      (req.query?.token || '').toString().trim();
-    const expected = (process.env.ADMIN_TOKEN || '').toString().trim();
-    if (!expected || token !== expected) {
+    const token = getAdminToken(req);
+    if (!token || (ADMIN_TOKEN && token !== ADMIN_TOKEN)) {
       return res.status(401).json({ error: 'unauthorized' });
     }
 
     let supabase;
     try {
-      supabase = getSupabaseAdmin();
+      supabase = getSupabaseClient();
     } catch (e) {
       const detail = e && e.message ? String(e.message) : String(e || 'supabase_init_error');
       return res.status(500).json({ error: 'supabase_not_configured', detail });
