@@ -1,7 +1,7 @@
 // routes/pronunciation-gpt/historySummary.js
 // ONE-LINE: Optional Supabase-powered history summary injection (every 3rd attempt / includeHistory) for coaching prompts.
 
-import { getSupabaseAdmin } from '../lib/supabase.js';
+import { getSupabaseAdmin } from '../../lib/supabase.js';
 
 export async function computeHistorySummaryIfNeeded(
   { safeNum, extractPronScore },
