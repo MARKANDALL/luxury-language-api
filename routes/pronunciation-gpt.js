@@ -67,7 +67,7 @@ export default async function handler(req, res) {
   const DEEP_REASONING_MODEL  = process.env.LUX_AI_DEEP_REASONING_MODEL || "";
   const DEEP_REASONING_EFFORT = process.env.LUX_AI_DEEP_REASONING_EFFORT || "medium";
 
-  const TRANSLATE_MODEL = process.env.LUX_AI_TRANSLATE_MODEL || "gpt-4o-mini";
+const TRANSLATE_MODEL = process.env.LUX_AI_TRANSLATE_MODEL || "gpt-4.1-mini";
 
   try {
     const result = await runPronunciationCoach({

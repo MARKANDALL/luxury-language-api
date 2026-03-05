@@ -91,7 +91,7 @@ Output MUST be valid JSON only.
   const MODEL =
     (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
     (process.env.LUX_AI_MODEL || "").toString().trim() ||
-    "gpt-4o-mini";
+"gpt-4.1-mini";
 
   try {
     const resp = await openai.chat.completions.create({

@@ -254,8 +254,11 @@ export default async function handler(req, res) {
       .slice(-24);
 
     const rsp = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.7,
+model:
+  (process.env.LUX_AI_CONVO_MODEL || "").toString().trim() ||
+  (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
+  "gpt-4.1-mini",
+        temperature: 0.7,
       response_format: { type: "json_object" },
       messages: [{ role: "system", content: sys }, ...trimmed],
     });
