@@ -240,17 +240,16 @@ const u = new URL(req.url, `http://${getHeader(req, "host") || "localhost"}`);
     }
 
     // Router-level admin gating (cost-control)
-    const ADMIN_ONLY = new Set([
-      "tts",
-      "pronunciation-gpt",
-      "evaluate",
-      "assess",
-      // add more later if needed:
-      // "admin-label-user",
-      // "admin-recent",
-      // "admin-user-stats",
-      // "migrate",
-    ]);
+const ADMIN_ONLY = new Set([
+  "tts",
+  "pronunciation-gpt",
+  "evaluate",
+  "assess",
+  "convo-turn",
+  "convo-report",
+  "alt-meaning",
+  "realtime/webrtc/session",
+]);
 
     if (ADMIN_ONLY.has(route) && !isAdminRequest(req, u)) {
       res.statusCode = 401;

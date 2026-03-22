@@ -57,11 +57,9 @@ async function handler(req, res) {
       tokenLen: token ? token.length : 0,
     });
 
-    // TEMP: If ADMIN_TOKEN is unset, keep the endpoint open for testing.
-    // When you set ADMIN_TOKEN later, token becomes required.
-    if (expected && token !== expected) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
+ if (!expected || token !== expected) {
+  return res.status(401).json({ error: "unauthorized" });
+}
 
     const apiKey = (process.env.OPENAI_API_KEY || "").toString().trim();
     if (!apiKey) {
