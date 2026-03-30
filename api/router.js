@@ -10,7 +10,7 @@
 // This is the ONLY Vercel function. It must support BOTH:
 // - multipart/form-data uploads (assess) -> requires bodyParser: false
 // - application/json bodies (most routes) -> we hydrate req.body ourselves.
-export const config = { api: { bodyParser: false, externalResolver: true } };
+export const config = { api: { bodyParser: false, externalResolver: true }, maxDuration: 30 };
 
 import crypto from "node:crypto";
 
