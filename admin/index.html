@@ -384,6 +384,22 @@
     document.querySelector('#troubleWord tbody').innerHTML = top(wd).map(r => `<tr><td>${r.k}</td><td>${r.n}</td><td>${r.avg.toFixed(1)}</td></tr>`).join('');
   }
 
+  function updateNavLinks() {
+    const uid = uidEl.value.trim();
+    if (!uid) return;
+    const from = fromEl.value || '';
+    const to = toEl.value || '';
+    const navLinks = document.querySelectorAll('.nav a.nav-link');
+    navLinks.forEach(a => {
+      const base = a.getAttribute('href').split('?')[0];
+      const p = new URLSearchParams();
+      p.set('uid', uid);
+      if (from) p.set('from', from);
+      if (to) p.set('to', to);
+      a.href = base + '?' + p.toString();
+    });
+  }
+
   async function loadData() {
     const uid = uidEl.value.trim();
     if (!uid) { alert('Enter a UID'); return; }
@@ -403,6 +419,9 @@
 
       // Build passage checkboxes from the actual data
       buildPassageCheckboxes(allRows);
+
+      // Update nav links to carry UID + dates to other admin pages
+      updateNavLinks();
 
       // Apply client-side filter (respects checkbox state)
       applyClientFilter();
