@@ -166,8 +166,11 @@ export default async function handler(req, res) {
     const { scenario, knobs, messages } = req.body || {};
     if (!scenario?.title) return res.status(400).json({ error: "Missing scenario" });
 
-    const { OpenAI } = await import("openai");
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const { OpenAI } = await import("openai");
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      timeout: 20000,
+    });
 
     const sys = buildSystemPrompt(scenario, knobs);
 
@@ -176,7 +179,7 @@ export default async function handler(req, res) {
       .filter(m => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
       .slice(-16);
 
-    const rsp = await openai.chat.completions.create({
+const rsp = await openai.chat.completions.create({
       model:
         (process.env.LUX_AI_CONVO_MODEL || "").toString().trim() ||
         (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
@@ -184,7 +187,6 @@ export default async function handler(req, res) {
       temperature: 0.7,
       response_format: { type: "json_object" },
       messages: [{ role: "system", content: sys }, ...trimmed],
-      timeout: 20000,
     });
 
     const raw = rsp?.choices?.[0]?.message?.content || "{}";
