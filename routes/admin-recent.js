@@ -1,13 +1,6 @@
 // file: /api/admin-recent.js
 import { pool } from "../lib/pool.js";
 
-const ALLOWED_PASSAGES = new Set([
-  "rainbow",
-  "grandfather",
-  "sentences",
-  "wordList",
-]);
-
 function parseISO(d) {
   if (!d) return null;
   const t = Date.parse(d);
@@ -96,18 +89,18 @@ export default async function handler(req, res) {
       : null;
 
     // passages filter (supports BOTH: passages=a,b,c  AND legacy: passage=a)
+    // No whitelist — any passage_key in the database is valid.
     let passages = null;
 
     if (q.passages) {
       const list = String(q.passages)
         .split(",")
         .map((s) => s.trim())
-        .filter(Boolean)
-        .filter((p) => ALLOWED_PASSAGES.has(p));
+        .filter(Boolean);
       if (list.length) passages = list;
     } else if (q.passage) {
       const one = String(q.passage).trim();
-      if (ALLOWED_PASSAGES.has(one)) passages = [one];
+      if (one) passages = [one];
     }
 
     // --- Build SQL safely
