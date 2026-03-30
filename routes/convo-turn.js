@@ -133,14 +133,19 @@ TONE: ${toneBlock}
 ${lengthBlock}
 
 RULES:
+- Naturalness beats target coverage. If any target guidance in the Setting or Detail would make the line sound forced, choose the more natural line.
 - React naturally — respond, agree, disagree, share info. Don't just ask questions.
-- Keep the conversation moving with purpose.
+- Keep the conversation moving, but do not force abrupt topic shifts just to fit a target word.
+- It is fine if some turns use none of the target words.
+- Do not repeatedly recycle the same target word across consecutive turns unless the situation genuinely calls for it.
 - NEVER correct grammar or vocabulary mistakes. Respond as a real person would.
 - Match vocabulary and complexity to the CEFR level above.
+- Keep your turn conversational and speakable out loud. Avoid list-like or overly “designed” sentences.
 
 SUGGESTED REPLIES: Provide exactly 3 options "${learnerLabel}" could say next.
-- All must be speakable out loud (natural spoken phrases).
-- Reply 1: simpler/safer. Reply 2: natural/confident. Reply 3: slightly ambitious (stretches above level).
+- All must be short, ordinary spoken responses "${learnerLabel}" would realistically say out loud.
+- Let the replies lean toward the targets when natural, but do not force every option to carry a target.
+- Reply 1: simpler/safer. Reply 2: natural/confident. Reply 3: slightly more expressive, but still believable and speakable.
 
 OUTPUT: JSON only, no other text:
 {"assistant":"your reply","suggested_replies":["option 1","option 2","option 3"]}
@@ -184,7 +189,7 @@ const rsp = await openai.chat.completions.create({
         (process.env.LUX_AI_CONVO_MODEL || "").toString().trim() ||
         (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
         "gpt-4.1-mini",
-      temperature: 0.7,
+      temperature: 0.6,
       response_format: { type: "json_object" },
       messages: [{ role: "system", content: sys }, ...trimmed],
     });
