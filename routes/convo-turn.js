@@ -86,23 +86,153 @@ const TONE_INSTRUCTIONS = {
 /* ── Response length instructions ────────────────────────────── */
 
 const LENGTH_INSTRUCTIONS = {
-  terse: `LENGTH: Terse — 1 sentence max, sometimes just a few words. Quick nod, one-word answer, "yep" / "nope."`,
+  terse: `LENGTH: Terse — usually 1–2 brief sentences, sometimes less. Keep it compact and natural, not robotic. On opening turns, skew extra short.`,
 
-  short: `LENGTH: Short — 1–2 sentences max. Quick, realistic exchange.`,
+  short: `LENGTH: Short — usually 2–3 short sentences. A quick, natural exchange.`,
 
-  medium: `LENGTH: Medium — 2–4 sentences. Natural conversational turn.`,
+  medium: `LENGTH: Medium — a normal conversational turn, often around 3–5 sentences.`,
 
-  long: `LENGTH: Long — up to a full paragraph (4–6 sentences) when the scenario needs explanation. Stay conversational, never lecture.`,
+  long: `LENGTH: Long — a fuller response when needed, often around 5–8 sentences, but still conversational and never a lecture.`,
 
-  extended: `LENGTH: Extended — no artificial limit. Speak as long as the situation naturally requires. Stay conversational, don't cut yourself short.`,
+  extended: `LENGTH: Extended — no artificial limit. Speak as long as the situation naturally requires, while staying conversational.`,
 };
+
+function normalizeLength(length) {
+  const s = String(length || "").trim().toLowerCase();
+  return ["terse", "short", "medium", "long", "extended"].includes(s) ? s : "medium";
+}
+
+function sentenceCount(text) {
+  const parts = String(text || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .match(/[^.!?]+[.!?]+|[^.!?]+$/g);
+  return parts ? parts.filter(Boolean).length : 0;
+}
+
+function wordCount(text) {
+  const words = String(text || "").trim().match(/\b[\w’'-]+\b/g);
+  return words ? words.length : 0;
+}
+
+function getLengthOutlierThresholds(length, { isOpeningTurn = false } = {}) {
+  const l = normalizeLength(length);
+
+  if (l === "extended") {
+    return { maxSentences: Infinity, maxWords: Infinity };
+  }
+
+  const openingMap = {
+    terse:  { maxSentences: 2, maxWords: 26 },
+    short:  { maxSentences: 3, maxWords: 40 },
+    medium: { maxSentences: 5, maxWords: 75 },
+    long:   { maxSentences: 7, maxWords: 120 },
+  };
+
+  const normalMap = {
+    terse:  { maxSentences: 3, maxWords: 34 },
+    short:  { maxSentences: 4, maxWords: 55 },
+    medium: { maxSentences: 6, maxWords: 95 },
+    long:   { maxSentences: 8, maxWords: 150 },
+  };
+
+  return (isOpeningTurn ? openingMap : normalMap)[l] || normalMap.medium;
+}
+
+function isLengthOutlier(text, length, opts = {}) {
+  const { maxSentences, maxWords } = getLengthOutlierThresholds(length, opts);
+  return sentenceCount(text) > maxSentences || wordCount(text) > maxWords;
+}
+
+function buildLengthRepairPrompt(scenario, knobs, { isOpeningTurn = false } = {}) {
+  const level = knobs?.level || "B1";
+  const tone = knobs?.tone || knobs?.mood || "neutral";
+  const length = normalizeLength(knobs?.length || "medium");
+
+  const levelBlock = LEVEL_INSTRUCTIONS[level] || LEVEL_INSTRUCTIONS.B1;
+  const toneBlock = TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.neutral;
+  const lengthBlock = LENGTH_INSTRUCTIONS[length] || LENGTH_INSTRUCTIONS.medium;
+
+  const otherRole = scenario?.otherRole;
+  const aiCharDesc =
+    otherRole?.npc || "A realistic character appropriate for this scenario.";
+
+  return `
+You are revising ONE assistant line from a realistic American English roleplay conversation.
+
+Keep the same intent, tone, CEFR level, and scenario realism.
+Shorten only as much as needed so the line better fits the requested length.
+Length is a strong preference, not a robotic exact cap.
+Keep the rewrite natural, speakable, and in character.
+
+${isOpeningTurn ? `This is the opening turn.
+Start small.
+Usually use a brief greeting plus one focused question or one focused piece of information.
+Do not front-load the whole explanation or process unless the learner has already asked for it.` : ""}
+
+SCENARIO: "${scenario?.title || "Conversation"}"
+Setting: ${scenario?.desc || ""}
+${scenario?.more ? `Detail: ${scenario.more}` : ""}
+
+YOUR CHARACTER: ${aiCharDesc}
+
+${levelBlock}
+
+TONE: ${toneBlock}
+
+${lengthBlock}
+
+OUTPUT: JSON only, no other text:
+{"assistant":"revised line"}
+`.trim();
+}
+
+async function maybeRepairAssistantLength({
+  openai,
+  model,
+  scenario,
+  knobs,
+  assistant,
+  isOpeningTurn,
+}) {
+  const original = String(assistant || "").trim();
+  if (!original) return "";
+
+  if (!isLengthOutlier(original, knobs?.length, { isOpeningTurn })) {
+    return original;
+  }
+
+  try {
+    const repairSys = buildLengthRepairPrompt(scenario, knobs, { isOpeningTurn });
+
+    const rsp = await openai.chat.completions.create({
+      model,
+      temperature: 0.3,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: repairSys },
+        { role: "user", content: `Original assistant line:\n${original}` },
+      ],
+    });
+
+    const raw = rsp?.choices?.[0]?.message?.content || "{}";
+    let json;
+    try { json = JSON.parse(raw); }
+    catch { json = {}; }
+
+    const repaired = String(json?.assistant || "").trim();
+    return repaired || original;
+  } catch {
+    return original;
+  }
+}
 
 /* ── Build the system prompt ─────────────────────────────────── */
 
-function buildSystemPrompt(scenario, knobs) {
+function buildSystemPrompt(scenario, knobs, messages = []) {
   const level = knobs?.level || "B1";
   const tone = knobs?.tone || knobs?.mood || "neutral";   // tone (v3) with mood fallback
-  const length = knobs?.length || "medium";
+  const length = normalizeLength(knobs?.length || "medium");
 
   const role = scenario.role;
   const otherRole = scenario.otherRole;
@@ -113,6 +243,9 @@ function buildSystemPrompt(scenario, knobs) {
   const aiCharDesc = otherRole?.npc || "A realistic character appropriate for this scenario.";
   const learnerLabel = role?.label || "The other person";
   const learnerCharDesc = role?.npc || "";
+
+  const safeMsgs = Array.isArray(messages) ? messages : [];
+  const isOpeningTurn = safeMsgs.length === 0;
 
   return `
 You are a character in a realistic American English conversation. Stay in character always. Never reveal you are an AI or that this is practice.
@@ -132,7 +265,14 @@ TONE: ${toneBlock}
 
 ${lengthBlock}
 
+${isOpeningTurn ? `OPENING TURN:
+- This is the start of the conversation, so start small.
+- Usually open with a brief greeting plus one focused question or one focused piece of information.
+- Do not front-load the full explanation or process unless the learner has already asked for it.
+- Let the conversation unfold over multiple turns.` : ""}
+
 RULES:
+- Treat the length setting as a strong target band, not a robotic exact quota.
 - Naturalness beats target coverage. If any target guidance in the Setting or Detail would make the line sound forced, choose the more natural line.
 - React naturally — respond, agree, disagree, share info. Don't just ask questions.
 - Keep the conversation moving, but do not force abrupt topic shifts just to fit a target word.
@@ -177,18 +317,21 @@ const { OpenAI } = await import("openai");
       timeout: 20000,
     });
 
-    const sys = buildSystemPrompt(scenario, knobs);
-
     const safeMsgs = Array.isArray(messages) ? messages : [];
     const trimmed = safeMsgs
       .filter(m => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
       .slice(-16);
 
-const rsp = await openai.chat.completions.create({
-      model:
-        (process.env.LUX_AI_CONVO_MODEL || "").toString().trim() ||
-        (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
-        "gpt-4.1-mini",
+    const isOpeningTurn = trimmed.length === 0;
+    const sys = buildSystemPrompt(scenario, knobs, trimmed);
+
+    const model =
+      (process.env.LUX_AI_CONVO_MODEL || "").toString().trim() ||
+      (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
+      "gpt-4.1-mini";
+
+    const rsp = await openai.chat.completions.create({
+      model,
       temperature: 0.6,
       response_format: { type: "json_object" },
       messages: [{ role: "system", content: sys }, ...trimmed],
@@ -199,9 +342,18 @@ const rsp = await openai.chat.completions.create({
     try { json = JSON.parse(raw); }
     catch { json = { assistant: raw, suggested_replies: [] }; }
 
+    const assistant = await maybeRepairAssistantLength({
+      openai,
+      model,
+      scenario,
+      knobs,
+      assistant: json.assistant || "",
+      isOpeningTurn,
+    });
+
     return res.status(200).json({
       ok: true,
-      assistant: json.assistant || "",
+      assistant,
       suggested_replies: Array.isArray(json.suggested_replies) ? json.suggested_replies : [],
     });
 
