@@ -25,6 +25,8 @@ import migrate from "../routes/migrate.js";
 import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
 import updateAttempt from "../routes/update-attempt.js";
 import userRecent from "../routes/user-recent.js";
+import voiceClone from "../routes/voice-clone.js";
+import voiceMirror from "../routes/voice-mirror.js";
 
 function getHeader(req, name) {
   const h = req?.headers;
@@ -158,6 +160,8 @@ const ROUTES = {
   tts,
   "update-attempt": updateAttempt,
   "user-recent": userRecent,
+  "voice-clone": voiceClone,
+  "voice-mirror": voiceMirror,
 };
 
 async function hydrateJsonBodyIfNeeded(req, res) {
@@ -249,6 +253,8 @@ const ADMIN_ONLY = new Set([
   "convo-report",
   "alt-meaning",
   "realtime/webrtc/session",
+  "voice-clone",
+  "voice-mirror",
 ]);
 
     if (ADMIN_ONLY.has(route) && !isAdminRequest(req, u)) {
