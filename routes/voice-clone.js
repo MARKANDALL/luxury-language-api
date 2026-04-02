@@ -13,8 +13,7 @@ export default async function handler(req, res) {
   const uid = body.uid || body.userId || null;
   const supabase = getSupabaseAdmin();
 
-  // ── GET-style: check status (POST with action:"status") ──────────────
-  // (We use POST for everything since the router dispatches POST requests)
+  // ── STATUS: check if user has a voice profile ────────────────────────
   if (body.action === 'status') {
     if (!uid) return res.status(400).json({ ok: false, error: 'missing uid' });
 
@@ -51,12 +50,10 @@ export default async function handler(req, res) {
       return res.status(404).json({ ok: false, error: 'no active voice profile found' });
     }
 
-    // Delete from ElevenLabs (best-effort)
     try {
       await deleteVoiceClone(profile.voice_id);
     } catch (err) {
       console.error('[voice-clone] ElevenLabs delete failed:', err.message);
-      // Continue — still mark as deleted in our DB
     }
 
     await supabase
@@ -74,21 +71,34 @@ export default async function handler(req, res) {
   }
 
   const { audioBase64, userName } = body;
+  // audioBase64 can be a single string OR an array of strings (multi-sample)
 
   if (!uid) return res.status(400).json({ ok: false, error: 'missing uid' });
   if (!audioBase64) return res.status(400).json({ ok: false, error: 'missing audioBase64' });
   if (!userName) return res.status(400).json({ ok: false, error: 'missing userName' });
 
-  // Reject tiny samples (< ~3 seconds of 16kHz mono WAV)
-  const buf = Buffer.from(audioBase64, 'base64');
-  if (buf.length < 80_000) {
-    return res.status(400).json({
-      ok: false,
-      error: 'Audio sample too short. Record at least 15 seconds of clear speech.',
-    });
+  // Validate samples
+  const samples = Array.isArray(audioBase64) ? audioBase64 : [audioBase64];
+
+  if (samples.length === 0) {
+    return res.status(400).json({ ok: false, error: 'No audio samples provided.' });
+  }
+  if (samples.length > 10) {
+    return res.status(400).json({ ok: false, error: 'Too many samples. Max 10.' });
   }
 
-  // Check for existing active profile
+  // Check each sample has reasonable size (> ~3 seconds)
+  for (let i = 0; i < samples.length; i++) {
+    const buf = Buffer.from(samples[i], 'base64');
+    if (buf.length < 30_000) {
+      return res.status(400).json({
+        ok: false,
+        error: `Sample ${i + 1} is too short. Each recording should be at least 10 seconds.`,
+      });
+    }
+  }
+
+  // Check for existing active profile — delete it first (re-clone)
   const { data: existing } = await supabase
     .from('voice_profiles')
     .select('voice_id')
@@ -97,17 +107,23 @@ export default async function handler(req, res) {
     .maybeSingle();
 
   if (existing) {
-    return res.status(409).json({
-      ok: false,
-      error: 'Voice profile already exists. Delete it first to create a new one.',
-      voiceId: existing.voice_id,
-    });
+    // Auto-delete old profile to allow re-cloning with better samples
+    try {
+      await deleteVoiceClone(existing.voice_id);
+    } catch (err) {
+      console.error('[voice-clone] old clone cleanup failed:', err.message);
+    }
+    await supabase
+      .from('voice_profiles')
+      .update({ status: 'deleted' })
+      .eq('uid', uid)
+      .eq('status', 'active');
   }
 
-  // Create the clone via ElevenLabs
+  // Create the clone via ElevenLabs (sends all samples)
   try {
     const { voiceId, requiresVerification } = await createVoiceClone({
-      audioBase64,
+      audioBase64: samples,
       name: `lux-${uid}-${userName.replace(/\s+/g, '-').toLowerCase()}`,
     });
 
@@ -119,7 +135,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Store in Supabase
     const { error: dbErr } = await supabase.from('voice_profiles').upsert({
       uid,
       voice_id: voiceId,
@@ -132,7 +147,11 @@ export default async function handler(req, res) {
 
     if (dbErr) console.error('[voice-clone] Supabase insert error:', dbErr);
 
-    return res.status(200).json({ ok: true, voiceId });
+    return res.status(200).json({
+      ok: true,
+      voiceId,
+      samplesUsed: samples.length,
+    });
   } catch (err) {
     console.error('[voice-clone] creation failed:', err.message);
     return res.status(500).json({ ok: false, error: 'Voice clone creation failed', detail: err.message });
