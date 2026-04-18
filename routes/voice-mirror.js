@@ -48,13 +48,13 @@ export default async function handler(req, res) {
       text: targetText,
     });
 
-    // Update last_used_at (fire-and-forget)
+    // Update last_used_at (fire-and-forget; log failures but don't block response)
     supabase
       .from('voice_profiles')
       .update({ last_used_at: new Date().toISOString() })
       .eq('uid', uid)
       .then(() => {})
-      .catch(() => {});
+      .catch((err) => console.warn('[voice-mirror] last_used_at update failed:', err?.message));
 
     // Return audio as base64 in JSON (matches your tts.js pattern when timings are requested)
     return res.status(200).json({
