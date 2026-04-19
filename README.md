@@ -57,7 +57,7 @@ This makes feedback structured and maintainable, and keeps the coaching behavior
 - **Platform:** Vercel serverless (single-function router)
 - **Data:** Postgres via `pg` pool (`lib/pool.js`), Supabase admin client (`lib/supabase.js`)
 - **Speech:** Azure Cognitive Services Speech SDK, formidable for multipart, fluent-ffmpeg + @ffmpeg-installer/ffmpeg + node-wav for audio handling
-- **AI:** OpenAI for coaching and realtime, `jsonrepair` and `gpt-tokenizer` for structured model output
+- **AI:** OpenAI for coaching and realtime, `jsonrepair` for structured model output
 - **Voice cloning:** ElevenLabs (`lib/voice.js`)
 - **Testing:** Vitest with supertest for contract tests on router, attempt insertion, and assess-route behavior
 
