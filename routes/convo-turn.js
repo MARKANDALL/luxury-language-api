@@ -335,6 +335,8 @@ const { OpenAI } = await import("openai");
       (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
       "gpt-4.1-mini";
 
+      console.log("[convo-turn] Using model:", model);
+
     const rsp = await openai.chat.completions.create({
       model,
       temperature: 0.6,
