@@ -111,7 +111,7 @@ function sentenceCount(text) {
 }
 
 function wordCount(text) {
-  const words = String(text || "").trim().match(/\b[\w’'-]+\b/g);
+  const words = String(text || "").trim().match(/\b[\w''-]+\b/g);
   return words ? words.length : 0;
 }
 
@@ -241,6 +241,7 @@ function buildSystemPrompt(scenario, knobs, messages = []) {
   const lengthBlock = LENGTH_INSTRUCTIONS[length] || LENGTH_INSTRUCTIONS.medium;
 
   const aiCharDesc = otherRole?.npc || "A realistic character appropriate for this scenario.";
+  const aiLabel = otherRole?.label || "The other character";
   const learnerLabel = role?.label || "The other person";
   const learnerCharDesc = role?.npc || "";
 
@@ -254,7 +255,7 @@ SCENARIO: "${scenario.title}"
 Setting: ${scenario.desc}
 ${scenario.more ? `Detail: ${scenario.more}` : ""}
 
-YOUR CHARACTER: ${aiCharDesc}
+YOUR CHARACTER: You are "${aiLabel}". ${aiCharDesc}
 
 THE LEARNER plays "${learnerLabel}".${learnerCharDesc ? ` (${learnerCharDesc})` : ""}
 suggested_replies must be things "${learnerLabel}" would say — not your character.
@@ -266,6 +267,8 @@ TONE: ${toneBlock}
 ${lengthBlock}
 
 ${isOpeningTurn ? `OPENING TURN:
+- You are "${aiLabel}". Speak ONLY as "${aiLabel}".
+- Do NOT speak as "${learnerLabel}" — that is the learner's role.
 - This is the start of the conversation, so start small.
 - Usually open with a brief greeting plus one focused question or one focused piece of information.
 - Do not front-load the full explanation or process unless the learner has already asked for it.
@@ -280,7 +283,7 @@ RULES:
 - Do not repeatedly recycle the same target word across consecutive turns unless the situation genuinely calls for it.
 - NEVER correct grammar or vocabulary mistakes. Respond as a real person would.
 - Match vocabulary and complexity to the CEFR level above.
-- Keep your turn conversational and speakable out loud. Avoid list-like or overly “designed” sentences.
+- Keep your turn conversational and speakable out loud. Avoid list-like or overly "designed" sentences.
 
 SUGGESTED REPLIES: Provide exactly 3 options "${learnerLabel}" could say next.
 - All must be short, ordinary spoken responses "${learnerLabel}" would realistically say out loud.
