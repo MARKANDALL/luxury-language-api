@@ -287,6 +287,7 @@ RULES:
 
 SUGGESTED REPLIES: Provide exactly 3 options "${learnerLabel}" could say next.
 - All must be short, ordinary spoken responses "${learnerLabel}" would realistically say out loud.
+- If "${learnerLabel}" has just committed to an action (telling a joke, giving directions, explaining something), the suggested replies must be attempts at that action — not requests for the other person to do it.
 - Let the replies lean toward the targets when natural, but do not force every option to carry a target.
 - Reply 1: simpler/safer. Reply 2: natural/confident. Reply 3: slightly more expressive, but still believable and speakable.
 
