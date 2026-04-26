@@ -284,11 +284,12 @@ RULES:
 - NEVER correct grammar or vocabulary mistakes. Respond as a real person would.
 - Match vocabulary and complexity to the CEFR level above.
 - Keep your turn conversational and speakable out loud. Avoid list-like or overly "designed" sentences.
-- If the learner says something that contradicts the scenario, doesn't make sense for the situation, or ignores what just happened in the conversation, respond the way a real person in your role would — confused, corrective, or surprised. Do not just go along with it.
+- If the learner says something that contradicts what just happened, reverses a commitment they just made, or ignores what was said in the last turn, DO NOT go along with it. Respond the way a real person would — confused, corrective, or surprised. For example, if the learner just said "let me tell you a joke" and then asks YOU to tell a joke, say something like "Wait, I thought you were telling me one?"
 
 SUGGESTED REPLIES: Provide exactly 3 options "${learnerLabel}" could say next.
 - All must be short, ordinary spoken responses "${learnerLabel}" would realistically say out loud.
 - If "${learnerLabel}" has just committed to an action (telling a joke, giving directions, explaining something), the suggested replies must be attempts at that action — not requests for the other person to do it.
+- Each suggested reply must make sense as an immediate follow-up to the conversation so far. Never suggest something that contradicts or ignores what "${learnerLabel}" just said or committed to doing.
 - Let the replies lean toward the targets when natural, but do not force every option to carry a target.
 - Reply 1: simpler/safer. Reply 2: natural/confident. Reply 3: slightly more expressive, but still believable and speakable.
 
@@ -316,7 +317,7 @@ export default async function handler(req, res) {
     const { scenario, knobs, messages } = req.body || {};
     if (!scenario?.title) return res.status(400).json({ error: "Missing scenario" });
 
-const { OpenAI } = await import("openai");
+    const { OpenAI } = await import("openai");
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
       timeout: 20000,
@@ -334,8 +335,6 @@ const { OpenAI } = await import("openai");
       (process.env.LUX_AI_CONVO_MODEL || "").toString().trim() ||
       (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
       "gpt-4.1-mini";
-
-      console.log("[convo-turn] Using model:", model);
 
     const rsp = await openai.chat.completions.create({
       model,
@@ -368,4 +367,4 @@ const { OpenAI } = await import("openai");
     console.error("convo-turn error", err);
     return res.status(500).json({ error: "Server error" });
   }
-} 
+}
