@@ -284,6 +284,7 @@ RULES:
 - NEVER correct grammar or vocabulary mistakes. Respond as a real person would.
 - Match vocabulary and complexity to the CEFR level above.
 - Keep your turn conversational and speakable out loud. Avoid list-like or overly "designed" sentences.
+- If the learner says something that contradicts the scenario, doesn't make sense for the situation, or ignores what just happened in the conversation, respond the way a real person in your role would — confused, corrective, or surprised. Do not just go along with it.
 
 SUGGESTED REPLIES: Provide exactly 3 options "${learnerLabel}" could say next.
 - All must be short, ordinary spoken responses "${learnerLabel}" would realistically say out loud.
