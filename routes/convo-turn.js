@@ -245,6 +245,10 @@ function buildSystemPrompt(scenario, knobs, messages = []) {
   const learnerLabel = role?.label || "The other person";
   const learnerCharDesc = role?.npc || "";
 
+  // ── Character Card System v1 fields (additive — graceful fallback to empty) ──
+  const aiPersonality = otherRole?.personality || "";
+  const aiHidden = otherRole?.npcHidden || "";
+
   const safeMsgs = Array.isArray(messages) ? messages : [];
   const isOpeningTurn = safeMsgs.length === 0;
 
@@ -255,7 +259,7 @@ SCENARIO: "${scenario.title}"
 Setting: ${scenario.desc}
 ${scenario.more ? `Detail: ${scenario.more}` : ""}
 
-YOUR CHARACTER: You are "${aiLabel}". ${aiCharDesc}
+YOUR CHARACTER: You are "${aiLabel}". ${aiCharDesc}${aiPersonality ? `\nPersonality: ${aiPersonality}` : ""}
 
 THE LEARNER plays "${learnerLabel}".${learnerCharDesc ? ` (${learnerCharDesc})` : ""}
 suggested_replies must be things "${learnerLabel}" would say — not your character.
@@ -273,7 +277,7 @@ You are "${aiLabel}" — a real person, not an AI. Stay anchored in this identit
 - When the learner says something impossible or absurd ("I flew to the moon"), react like a real person — skeptical, amused, or confused: "Uh, sure you did. Seriously though, what's up?"
 - When the learner says something disturbing or inappropriate, respond the way a real person in your setting would — uncomfortable, concerned, or redirecting: "Whoa, that's a bit much. Let's talk about something else."
 - When the learner contradicts what they just said, reverses a commitment, or ignores what was said in the last turn, respond with natural confusion: "Wait, I thought you were going to tell me a joke? What happened to that?"
-- Use natural human language at all times. Phrases like "I can't provide," "I don't have access to," or "As an AI" are things real people never say — use real-person equivalents instead.
+- Use natural human language at all times. Phrases like "I can't provide," "I don't have access to," or "As an AI" are things real people never say — use real-person equivalents instead.${aiHidden ? `\n\nCHARACTER DETAIL:\n${aiHidden}` : ""}
 
 ${isOpeningTurn ? `OPENING TURN:
 - You are "${aiLabel}". Speak ONLY as "${aiLabel}".
@@ -345,11 +349,20 @@ export default async function handler(req, res) {
       (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
       "gpt-4.1-mini";
 
+    // ── Character Card System v1: post-history anchor ──
+    // npcAnchor is injected AFTER the conversation history as a system message.
+    // Per SillyTavern research, post-history instructions carry stronger weight
+    // than pre-history instructions for maintaining character consistency.
+    const aiAnchor = scenario?.otherRole?.npcAnchor || "";
+    const postHistory = aiAnchor
+      ? [{ role: "system", content: `REMINDER: ${aiAnchor}` }]
+      : [];
+
     const rsp = await openai.chat.completions.create({
       model,
       temperature: 0.6,
       response_format: { type: "json_object" },
-      messages: [{ role: "system", content: sys }, ...trimmed],
+      messages: [{ role: "system", content: sys }, ...trimmed, ...postHistory],
     });
 
     const raw = rsp?.choices?.[0]?.message?.content || "{}";
