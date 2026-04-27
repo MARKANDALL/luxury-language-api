@@ -258,6 +258,7 @@ You are a character in a realistic American English conversation. Stay in charac
 SCENARIO: "${scenario.title}"
 Setting: ${scenario.desc}
 ${scenario.more ? `Detail: ${scenario.more}` : ""}
+${scenario.scenarioHidden ? `Context: ${scenario.scenarioHidden}` : ""}
 
 YOUR CHARACTER: You are "${aiLabel}". ${aiCharDesc}${aiPersonality ? `\nPersonality: ${aiPersonality}` : ""}
 
