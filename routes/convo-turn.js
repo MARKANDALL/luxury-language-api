@@ -386,7 +386,7 @@ export default async function handler(req, res) {
     const isOpeningTurn = trimmed.length === 0;
     const sys = buildSystemPrompt(scenario, knobs, trimmed);
 
-    const model =
+const model =
       (process.env.LUX_AI_CONVO_MODEL || "").toString().trim() ||
       (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
       "gpt-4.1-mini";
@@ -421,9 +421,10 @@ export default async function handler(req, res) {
       isOpeningTurn,
     });
 
-    return res.status(200).json({
-      ok: true,
-      assistant,
+return res.status(200).json({
+  ok: true,
+  model,
+  assistant,
       suggested_replies: Array.isArray(json.suggested_replies) ? json.suggested_replies : [],
     });
 
