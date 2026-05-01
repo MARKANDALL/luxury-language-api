@@ -31,8 +31,6 @@ export default async function handler(req, res) {
   const enableProsody =
     String(process.env.ENABLE_PROSODY || "").toLowerCase() === "true";
 
-  console.log("[FeatureFlag] ENABLE_PROSODY:", enableProsody);
-
   let inputPath = null;
   let outputPath = null;
 

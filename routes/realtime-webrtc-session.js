@@ -23,16 +23,7 @@ function clampInt(v, fallback, min, max) {
 }
 
 async function handler(req, res) {
-  // quick “is this code deployed?” marker
-  console.log("webrtc/session handler version: 2026-02-04 hotfix-no-transcription");
-
   try {
-    console.log("webrtc/session", {
-      method: req.method,
-      ct: req.headers["content-type"],
-      url: req.url,
-    });
-
     // CORS
 
     res.setHeader(
@@ -51,11 +42,6 @@ async function handler(req, res) {
       (req.query?.token || "").toString().trim();
 
     const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
-
-    console.log("webrtc/session auth", {
-      hasExpected: !!expected,
-      tokenLen: token ? token.length : 0,
-    });
 
  if (!expected || token !== expected) {
   return res.status(401).json({ error: "unauthorized" });
@@ -171,20 +157,15 @@ async function callRealtime({ apiKey, offerSDP, sessionConfig }) {
   fd.set("session", sessionJson);
 
   try {
-    // Helpful debug: confirms the boundary header exists
     const req = new Request("https://api.openai.com/v1/realtime/calls", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}` },
       body: fd,
     });
 
-    console.log("openai /realtime/calls outgoing content-type:", req.headers.get("content-type"));
-
     const r = await fetch(req);
 
-    console.log("openai /realtime/calls status:", r.status);
     const text = await r.text();
-    console.log("openai /realtime/calls body:", text.slice(0, 500));
 
     return { ok: r.ok, status: r.status, text, voice: sessionConfig?.audio?.output?.voice };
   } catch (e) {

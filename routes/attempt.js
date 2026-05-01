@@ -168,14 +168,6 @@ export default async function handler(req, res) {
     const { rows } = await pool.query(sql, params);
     const insertedId = rows?.[0]?.id || null;
 
-    console.log("[attempt] inserted", {
-      uid: row.uid,
-      passage: row.passage_key,
-      session_id: row.session_id,
-      part_index: row.part_index,
-      id: insertedId,
-    });
-
     res.status(200).json({ ok: true, id: insertedId });
   } catch (err) {
     console.error("attempt handler error:", err);
