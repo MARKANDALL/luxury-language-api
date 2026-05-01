@@ -384,8 +384,10 @@ export default async function handler(req, res) {
 
   let scenario;
   try {
-    ({ scenario } = req.body || {});
-    const { knobs, messages } = req.body || {};
+    const body = req.body || {};
+    scenario = body.scenario;
+    const knobs = body.knobs;
+    const messages = body.messages;
     if (!scenario?.title) return res.status(400).json({ error: "Missing scenario" });
 
     const { OpenAI } = await import("openai");
@@ -471,8 +473,6 @@ return res.status(200).json({
 
   } catch (err) {
     console.error("convo-turn error", err);
-    retur} catch (err) {
-    console.error("convo-turn error", err);
 
     // OpenAI content policy refusal — throws instead of returning empty
     const isContentFilter =
@@ -506,6 +506,5 @@ return res.status(200).json({
     }
 
     return res.status(500).json({ error: "Server error" });
-  }n res.status(500).json({ error: "Server error" });
   }
 }
