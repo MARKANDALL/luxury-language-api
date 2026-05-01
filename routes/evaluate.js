@@ -1,9 +1,7 @@
 // /api/evaluate.js
 
 import formidable from "formidable";
-import fs from "fs/promises";
 import { createReadStream } from "fs";
-import wav from "node-wav";
 import sdk from "microsoft-cognitiveservices-speech-sdk";
 
 export const config = { api: { bodyParser: false } };
@@ -92,19 +90,6 @@ export default async function handler(req, res) {
     if (!referenceText.trim()) {
       res.status(400).json({ error: "No reference text provided" });
       return;
-    }
-
-    try {
-      const buf = await fs.readFile(audioFile);
-      const info = wav.decode(buf);
-      console.log(
-        "[AUDIO INFO]",
-        `Sample rate: ${info.sampleRate} Hz, Channels: ${info.channelData.length}, Bit depth: ${
-          info.bitDepth || "unknown"
-        }, Duration: ${(buf.length / (info.sampleRate * info.channelData.length * 2)).toFixed(2)} s`
-      );
-    } catch (e) {
-      console.warn("[AUDIO INFO] Could not decode WAV header:", e);
     }
 
     let azureResultRaw;

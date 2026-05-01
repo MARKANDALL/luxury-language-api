@@ -177,7 +177,6 @@ export default async function handler(req, res) {
         const xml = baseSpeakTag({ voice, inner, withMstts: true });
 
         const r = await doSpeak(xml);
-        console.log("🔸 SSML SENT TO AZURE:", xml);
 
         if (r.ok) {
           usedStyle = v.style;
@@ -209,7 +208,6 @@ export default async function handler(req, res) {
       });
       const neutralXml = baseSpeakTag({ voice, inner: neutralInner, withMstts: true }); // keep mstts ns harmlessly
       const n = await doSpeak(neutralXml);
-      console.log("↩️  Retrying neutral…\n", neutralXml);
 
       if (n.ok) {
         usedStyle = "neutral";
@@ -231,7 +229,6 @@ export default async function handler(req, res) {
     const neutralXml = baseSpeakTag({ voice, inner: content, withMstts: false });
 
     const r = await doSpeak(neutralXml);
-    console.log("🔸 SSML SENT TO AZURE:", neutralXml);
 
     if (!r.ok) return res.status(r.status).json({ error: "Azure TTS error", detail: r.detail });
 

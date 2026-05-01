@@ -41,7 +41,6 @@ export async function speakRest({ endpoint, hdrBase, ssmlXml }) {
     } catch (err) {
       console.warn("[tts:speakRest] failed to read Azure error body", err);
           }
-    console.warn("🔻 AZURE ERROR", r.status, detail ? `(body ${detail.length}b)` : "(no body)");
     return { ok: false, status: r.status, detail };
   }
   const buf = Buffer.from(await r.arrayBuffer());
