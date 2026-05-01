@@ -426,6 +426,31 @@ const model =
     try { json = JSON.parse(raw); }
     catch { json = { assistant: raw, suggested_replies: [] }; }
 
+    // Graceful hard cutoff — OpenAI safety layer returned empty content
+    if (!json.assistant || json.assistant.trim() === "") {
+      const aiLabel = scenario?.otherRole?.label || "The other person";
+      const narrations = [
+        `${aiLabel} went silent, then turned and walked away without another word.`,
+        `${aiLabel} backed away slowly, eyes wide, and left without looking back.`,
+        `${aiLabel} stared for a long moment, then quietly ended the conversation.`,
+        `${aiLabel} shook their head, stepped back, and was gone.`,
+        `${aiLabel} froze, then turned and hurried away.`,
+        `Something in the air shifted. ${aiLabel} stopped talking and left.`,
+        `${aiLabel} put up a hand, said nothing, and walked away.`,
+        `${aiLabel}'s expression changed. They turned and left immediately.`,
+      ];
+      const narration = narrations[Math.floor(Math.random() * narrations.length)];
+
+      return res.status(200).json({
+        ok: true,
+        model,
+        assistant: "",
+        narration,
+        status: "ended",
+        suggested_replies: [],
+      });
+    }
+
     const assistant = await maybeRepairAssistantLength({
       openai,
       model,
@@ -446,4 +471,4 @@ return res.status(200).json({
     console.error("convo-turn error", err);
     return res.status(500).json({ error: "Server error" });
   }
-} 
+}
