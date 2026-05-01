@@ -382,8 +382,10 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: "unauthorized" });
   }
 
+  let scenario;
   try {
-    const { scenario, knobs, messages } = req.body || {};
+    ({ scenario } = req.body || {});
+    const { knobs, messages } = req.body || {};
     if (!scenario?.title) return res.status(400).json({ error: "Missing scenario" });
 
     const { OpenAI } = await import("openai");
@@ -469,6 +471,41 @@ return res.status(200).json({
 
   } catch (err) {
     console.error("convo-turn error", err);
+    retur} catch (err) {
+    console.error("convo-turn error", err);
+
+    // OpenAI content policy refusal — throws instead of returning empty
+    const isContentFilter =
+      err?.code === "content_filter" ||
+      err?.error?.code === "content_filter" ||
+      err?.status === 400 ||
+      /content.?policy|content.?filter|safety|refus/i.test(err?.message || "");
+
+    if (isContentFilter) {
+      const aiLabel = scenario?.otherRole?.label || "The other person";
+      const narrations = [
+        `${aiLabel} went silent, then turned and walked away without another word.`,
+        `${aiLabel} backed away slowly, eyes wide, and left without looking back.`,
+        `${aiLabel} stared for a long moment, then quietly ended the conversation.`,
+        `${aiLabel} shook their head, stepped back, and was gone.`,
+        `${aiLabel} froze, then turned and hurried away.`,
+        `Something in the air shifted. ${aiLabel} stopped talking and left.`,
+        `${aiLabel} put up a hand, said nothing, and walked away.`,
+        `${aiLabel}'s expression changed. They turned and left immediately.`,
+      ];
+      const narration = narrations[Math.floor(Math.random() * narrations.length)];
+
+      return res.status(200).json({
+        ok: true,
+        model: "",
+        assistant: "",
+        narration,
+        status: "ended",
+        suggested_replies: [],
+      });
+    }
+
     return res.status(500).json({ error: "Server error" });
+  }n res.status(500).json({ error: "Server error" });
   }
 }
