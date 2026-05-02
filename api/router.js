@@ -19,6 +19,7 @@ import adminRecent from "../routes/admin-recent.js";
 import adminUserStats from "../routes/admin-user-stats.js";
 import attempt from "../routes/attempt.js";
 import altMeaning from "../routes/alt-meaning.js";
+import convoImage from "../routes/convo-image.js";
 import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
 import migrate from "../routes/migrate.js";
@@ -40,7 +41,7 @@ function getHeader(req, name) {
 function normToken(v) {
   const s = String(v || "").trim();
   // strip one pair of surrounding quotes if present
-  return s.replace(/^["'](.*)["']$/, "$1").trim();
+  return s.replace(/^["'](.*?)["']$/, "$1").trim();
 }
 
 function isAdminRequest(req, u) {
@@ -151,6 +152,7 @@ const ROUTES = {
   "alt-meaning": altMeaning,
   assess,
   attempt,
+  "convo-image": convoImage,
   "convo-report": convoReport,
   "convo-turn": convoTurn,
   evaluate,
@@ -168,7 +170,7 @@ async function hydrateJsonBodyIfNeeded(req, res) {
   const method = String(req.method || "GET").toUpperCase();
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return true;
 
-  // If some runtime already set req.body, don’t touch it.
+  // If some runtime already set req.body, don't touch it.
   if (typeof req.body !== "undefined") return true;
 
 const ct = String(getHeader(req, "content-type") || "").toLowerCase();
@@ -249,6 +251,7 @@ const ADMIN_ONLY = new Set([
   "pronunciation-gpt",
   "evaluate",
   "assess",
+  "convo-image",
   "convo-turn",
   "convo-report",
   "alt-meaning",
