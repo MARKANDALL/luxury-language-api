@@ -1,5 +1,5 @@
 // routes/convo-image.js
-// Generates a mid-conversation illustration via Gemini (Nano Banana Pro).
+// Generates a mid-conversation illustration via Gemini (Nano Banana).
 // Accepts character portrait references for face/style consistency.
 // Endpoint: POST /api/convo-image
 
@@ -10,10 +10,6 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 // ── Portrait cache (avoids refetching the same image every request) ─────────
 const _portraitCache = new Map();
 
-/**
- * Fetch an image from a URL and return base64 + mime type.
- * Caches results in memory for the lifetime of the serverless instance.
- */
 async function fetchImageAsBase64(url) {
   if (_portraitCache.has(url)) return _portraitCache.get(url);
 
@@ -33,19 +29,7 @@ async function fetchImageAsBase64(url) {
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-// Where to fetch character portraits from.
-// In production this should be your deployed frontend URL.
-// Falls back to localhost for dev.
 const FRONTEND_BASE = process.env.FRONTEND_URL || "http://localhost:3000";
-
-const SAFETY_PROMPT = `STRICT RULES for the image:
-- Show the characters described below in the scene, maintaining their appearance from the reference photos provided
-- Never depict violence, weapons, blood, or injury
-- Never depict sexual or suggestive content
-- Never depict drugs, alcohol, or illegal activity
-- No text overlays or lettering of any kind
-- Include sensory details: light quality, textures, objects on surfaces
-- Keep the scene grounded in the scenario's physical environment`;
 
 // ── Handler ─────────────────────────────────────────────────────────────────
 
@@ -57,13 +41,13 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { scenarioHidden, roles, transcript, tone, scenarioId, roleIds } = req.body;
+    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds } = req.body;
 
     if (!scenarioHidden || !transcript) {
       return res.status(400).json({ error: "Missing scenarioHidden or transcript" });
     }
 
-    // ── Build reference image parts (character portraits) ─────────────────
+    // ── Build reference image parts ─────────────────────────────────────
     const imageParts = [];
 
     if (scenarioId && roleIds && Array.isArray(roleIds)) {
@@ -72,57 +56,69 @@ export default async function handler(req, res) {
         const imgData = await fetchImageAsBase64(portraitUrl);
         if (imgData) {
           imageParts.push({
-            inlineData: {
-              mimeType: imgData.mimeType,
-              data: imgData.base64,
-            },
+            inlineData: { mimeType: imgData.mimeType, data: imgData.base64 },
           });
         }
       }
     }
 
-    // Also try to fetch the scene image
+    // Scene image
     if (scenarioId) {
-      // Scene images can be .webp or .jpg — try webp first
       for (const ext of ["webp", "jpg"]) {
         const sceneUrl = `${FRONTEND_BASE}/convo-img/${scenarioId}.${ext}`;
         const sceneData = await fetchImageAsBase64(sceneUrl);
         if (sceneData) {
           imageParts.push({
-            inlineData: {
-              mimeType: sceneData.mimeType,
-              data: sceneData.base64,
-            },
+            inlineData: { mimeType: sceneData.mimeType, data: sceneData.base64 },
           });
           break;
         }
       }
     }
 
-    // ── Build the text prompt ─────────────────────────────────────────────
-    const characterDescriptions = (roles || [])
-      .map(r => `${r.label}: ${r.personality || ""}`)
-      .join("\n");
+    // ── Build character descriptions ────────────────────────────────────
+    const characterBlock = (roles || [])
+      .map(r => {
+        const lines = [`${r.label}:`];
+        if (r.npc) lines.push(`  Appearance: ${r.npc}`);
+        if (r.personality) lines.push(`  Personality: ${r.personality}`);
+        return lines.join("\n");
+      })
+      .join("\n\n");
 
-    const textPrompt = [
-      `Generate an image for a language learning app conversation scene.`,
-      ``,
-      `Scenario: ${scenarioHidden.slice(0, 800)}`,
-      ``,
-      `Characters in the scene:`,
-      characterDescriptions,
-      ``,
-      `Tone of the conversation: ${tone || "neutral"}`,
-      ``,
-      `What's happening in the conversation right now:`,
-      transcript.slice(-1500),
-      ``,
-      imageParts.length > 0
-        ? `Use the reference photos provided to maintain the characters' appearances. Place them in the scene described above, interacting naturally.`
-        : `Show the characters described above in the scene, interacting naturally.`,
-      ``,
-      SAFETY_PROMPT,
-    ].join("\n");
+    // ── Build the prompt ────────────────────────────────────────────────
+    const textPrompt = `Create a photorealistic image for a language learning app.
+
+SCENE SETTING:
+${scenarioHidden.slice(0, 1000)}
+
+ENVIRONMENT DETAILS:
+${(more || "").slice(0, 600)}
+
+CHARACTERS IN THIS SCENE:
+${characterBlock}
+
+WHAT IS HAPPENING RIGHT NOW:
+${transcript.slice(-1500)}
+
+Conversation tone: ${tone || "neutral"}
+
+${imageParts.length > 0 ? "Reference photos of the characters are provided. Match their faces, hair, clothing style, and approximate age from the reference photos as closely as possible." : ""}
+
+IMAGE RULES:
+- Photorealistic style, natural lighting, as if captured by a professional photographer
+- Characters must be positioned logically within the physical space:
+  * Customers stay on the customer side of counters, desks, and service areas
+  * Workers stay on the worker side of counters, desks, and service areas
+  * Drivers sit in the driver's seat, passengers in the passenger seat
+  * Patients sit on exam tables or chairs, doctors stand or sit across from them
+  * People in phone calls are shown in their own environment, not merged into one scene
+- Show the characters interacting naturally — eye contact, gestures, body language
+- Include environmental details from the scene setting: furniture, objects, lighting, weather
+- Camera angle: medium shot, slightly above eye level, showing both characters and their surroundings
+- No text, words, letters, signs with readable text, or watermarks
+- No violence, weapons, blood, sexual content, or anything inappropriate
+- No extra fingers, no distorted hands — if hands are not central to the scene, keep them out of frame or naturally positioned at sides`;
 
     // ── Call Gemini ──────────────────────────────────────────────────────
     const contents = [
@@ -156,7 +152,6 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Gemini returned no image" });
     }
 
-    // Return as a data URI — frontend img.src accepts this directly
     const dataUri = `data:${imageData.mimeType || "image/png"};base64,${imageData.data}`;
 
     res.json({ imageUrl: dataUri, description });
