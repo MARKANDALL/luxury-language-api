@@ -1,80 +1,166 @@
 // routes/convo-image.js
-// Generates a mid-conversation illustration via GPT prompt → DALL-E 3.
+// Generates a mid-conversation illustration via Gemini (Nano Banana Pro).
+// Accepts character portrait references for face/style consistency.
 // Endpoint: POST /api/convo-image
 
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 
-const openai = new OpenAI();
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Locked art style — single source of truth for visual consistency
-const ART_STYLE = "warm watercolor illustration with soft lighting, gentle brushstrokes, muted natural palette";
+// ── Portrait cache (avoids refetching the same image every request) ─────────
+const _portraitCache = new Map();
 
-const SAFETY_SYSTEM = `You are an art director for a language learning app called Lux. Given a conversation scenario and recent dialogue, write a 1–2 sentence image description that captures the current mood and setting.
+/**
+ * Fetch an image from a URL and return base64 + mime type.
+ * Caches results in memory for the lifetime of the serverless instance.
+ */
+async function fetchImageAsBase64(url) {
+  if (_portraitCache.has(url)) return _portraitCache.get(url);
 
-Style: ${ART_STYLE}. No text overlays or lettering of any kind.
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
 
-STRICT RULES:
-- Never include human faces, heads, or identifiable people
-- Show hands, objects, environments, textures, and atmosphere instead
+    const contentType = res.headers.get("content-type") || "image/jpeg";
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const result = { base64: buffer.toString("base64"), mimeType: contentType };
+    _portraitCache.set(url, result);
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+// ── Config ──────────────────────────────────────────────────────────────────
+
+// Where to fetch character portraits from.
+// In production this should be your deployed frontend URL.
+// Falls back to localhost for dev.
+const FRONTEND_BASE = process.env.FRONTEND_URL || "http://localhost:3000";
+
+const SAFETY_PROMPT = `STRICT RULES for the image:
+- Show the characters described below in the scene, maintaining their appearance from the reference photos provided
 - Never depict violence, weapons, blood, or injury
 - Never depict sexual or suggestive content
 - Never depict drugs, alcohol, or illegal activity
-- Focus on the SETTING and EMOTIONAL TONE, not the people
-- Include sensory details: light quality, textures, objects on surfaces, weather
-- Keep descriptions grounded in the scenario's physical environment`;
+- No text overlays or lettering of any kind
+- Include sensory details: light quality, textures, objects on surfaces
+- Keep the scene grounded in the scenario's physical environment`;
+
+// ── Handler ─────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
+  if (!process.env.GEMINI_API_KEY) {
+    return res.status(500).json({ error: "GEMINI_API_KEY not configured" });
+  }
+
   try {
-    const { scenarioHidden, roles, transcript, tone } = req.body;
+    const { scenarioHidden, roles, transcript, tone, scenarioId, roleIds } = req.body;
 
     if (!scenarioHidden || !transcript) {
       return res.status(400).json({ error: "Missing scenarioHidden or transcript" });
     }
 
-    // Step 1: GPT writes a safe image description
-    const promptResponse = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      max_tokens: 120,
-      temperature: 0.8,
-      messages: [
-        { role: "system", content: SAFETY_SYSTEM },
-        {
-          role: "user",
-          content: [
-            `Scenario setting: ${scenarioHidden.slice(0, 600)}`,
-            `Characters: ${(roles || []).map(r => `${r.label}: ${r.personality || ""}`).join("; ").slice(0, 300)}`,
-            `Tone of conversation: ${tone || "neutral"}`,
-            `Recent dialogue:\n${transcript.slice(-1200)}`,
-            `\nDescribe one scene for a ${ART_STYLE}.`,
-          ].join("\n\n"),
-        },
-      ],
-    });
+    // ── Build reference image parts (character portraits) ─────────────────
+    const imageParts = [];
 
-    const imageDescription = promptResponse.choices?.[0]?.message?.content;
-    if (!imageDescription) {
-      return res.status(500).json({ error: "GPT returned empty description" });
+    if (scenarioId && roleIds && Array.isArray(roleIds)) {
+      for (const roleId of roleIds) {
+        const portraitUrl = `${FRONTEND_BASE}/assets/characters/${scenarioId}-${roleId}.jpg`;
+        const imgData = await fetchImageAsBase64(portraitUrl);
+        if (imgData) {
+          imageParts.push({
+            inlineData: {
+              mimeType: imgData.mimeType,
+              data: imgData.base64,
+            },
+          });
+        }
+      }
     }
 
-    // Step 2: DALL-E generates the image
-    const imageResponse = await openai.images.generate({
-      model: "dall-e-3",
-      prompt: `${ART_STYLE}. ${imageDescription}. No text, no words, no letters, no faces.`,
-      n: 1,
-      size: "1024x1024",
-      quality: "standard",
-    });
-
-    const imageUrl = imageResponse.data?.[0]?.url;
-    if (!imageUrl) {
-      return res.status(500).json({ error: "DALL-E returned no image" });
+    // Also try to fetch the scene image
+    if (scenarioId) {
+      // Scene images can be .webp or .jpg — try webp first
+      for (const ext of ["webp", "jpg"]) {
+        const sceneUrl = `${FRONTEND_BASE}/convo-img/${scenarioId}.${ext}`;
+        const sceneData = await fetchImageAsBase64(sceneUrl);
+        if (sceneData) {
+          imageParts.push({
+            inlineData: {
+              mimeType: sceneData.mimeType,
+              data: sceneData.base64,
+            },
+          });
+          break;
+        }
+      }
     }
 
-    res.json({ imageUrl, description: imageDescription });
+    // ── Build the text prompt ─────────────────────────────────────────────
+    const characterDescriptions = (roles || [])
+      .map(r => `${r.label}: ${r.personality || ""}`)
+      .join("\n");
+
+    const textPrompt = [
+      `Generate an image for a language learning app conversation scene.`,
+      ``,
+      `Scenario: ${scenarioHidden.slice(0, 800)}`,
+      ``,
+      `Characters in the scene:`,
+      characterDescriptions,
+      ``,
+      `Tone of the conversation: ${tone || "neutral"}`,
+      ``,
+      `What's happening in the conversation right now:`,
+      transcript.slice(-1500),
+      ``,
+      imageParts.length > 0
+        ? `Use the reference photos provided to maintain the characters' appearances. Place them in the scene described above, interacting naturally.`
+        : `Show the characters described above in the scene, interacting naturally.`,
+      ``,
+      SAFETY_PROMPT,
+    ].join("\n");
+
+    // ── Call Gemini ──────────────────────────────────────────────────────
+    const contents = [
+      ...imageParts,
+      { text: textPrompt },
+    ];
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-preview-04-17",
+      contents: contents,
+      config: {
+        responseModalities: ["TEXT", "IMAGE"],
+      },
+    });
+
+    // ── Extract image from response ─────────────────────────────────────
+    const parts = response?.candidates?.[0]?.content?.parts || [];
+    let imageData = null;
+    let description = "";
+
+    for (const part of parts) {
+      if (part.inlineData?.data) {
+        imageData = part.inlineData;
+      }
+      if (part.text) {
+        description = part.text;
+      }
+    }
+
+    if (!imageData) {
+      return res.status(500).json({ error: "Gemini returned no image" });
+    }
+
+    // Return as a data URI — frontend img.src accepts this directly
+    const dataUri = `data:${imageData.mimeType || "image/png"};base64,${imageData.data}`;
+
+    res.json({ imageUrl: dataUri, description });
   } catch (err) {
-    // Content policy rejection or other OpenAI error — fail silently for the user
     console.error("[convo-image] generation failed:", err?.message || err);
     res.status(500).json({ error: "Image generation failed" });
   }
