@@ -1,17 +1,17 @@
 // routes/convo-image.js
 // Generates a mid-conversation illustration via Gemini (Nano Banana).
-// Accepts character portrait references for face/style consistency.
+// Accepts character portrait references + video stills for spatial/style consistency.
 // Endpoint: POST /api/convo-image
 
 import { GoogleGenAI } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// ── Portrait cache (avoids refetching the same image every request) ─────────
-const _portraitCache = new Map();
+// ── Image cache (avoids refetching the same image every request) ────────────
+const _imageCache = new Map();
 
 async function fetchImageAsBase64(url) {
-  if (_portraitCache.has(url)) return _portraitCache.get(url);
+  if (_imageCache.has(url)) return _imageCache.get(url);
 
   try {
     const res = await fetch(url);
@@ -20,11 +20,18 @@ async function fetchImageAsBase64(url) {
     const contentType = res.headers.get("content-type") || "image/jpeg";
     const buffer = Buffer.from(await res.arrayBuffer());
     const result = { base64: buffer.toString("base64"), mimeType: contentType };
-    _portraitCache.set(url, result);
+    _imageCache.set(url, result);
     return result;
   } catch {
     return null;
   }
+}
+
+/** Fetch an image and return it as an inline data part for Gemini, or null */
+async function fetchAsPart(url) {
+  const data = await fetchImageAsBase64(url);
+  if (!data) return null;
+  return { inlineData: { mimeType: data.mimeType, data: data.base64 } };
 }
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -41,7 +48,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds } = req.body;
+    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds, imageCount } = req.body;
 
     if (!scenarioHidden || !transcript) {
       return res.status(400).json({ error: "Missing scenarioHidden or transcript" });
@@ -51,26 +58,25 @@ export default async function handler(req, res) {
     const imageParts = [];
 
     if (scenarioId && roleIds && Array.isArray(roleIds)) {
+      // Character portraits
       for (const roleId of roleIds) {
-        const portraitUrl = `${FRONTEND_BASE}/assets/characters/${scenarioId}-${roleId}.jpg`;
-        const imgData = await fetchImageAsBase64(portraitUrl);
-        if (imgData) {
-          imageParts.push({
-            inlineData: { mimeType: imgData.mimeType, data: imgData.base64 },
-          });
-        }
+        const part = await fetchAsPart(`${FRONTEND_BASE}/assets/characters/${scenarioId}-${roleId}.jpg`);
+        if (part) imageParts.push(part);
+      }
+
+      // Video stills (3 per scenario: 1s, 4s, 7s)
+      for (const n of [1, 2, 3]) {
+        const part = await fetchAsPart(`${FRONTEND_BASE}/assets/stills/${scenarioId}-${n}.jpg`);
+        if (part) imageParts.push(part);
       }
     }
 
     // Scene image
     if (scenarioId) {
       for (const ext of ["webp", "jpg"]) {
-        const sceneUrl = `${FRONTEND_BASE}/convo-img/${scenarioId}.${ext}`;
-        const sceneData = await fetchImageAsBase64(sceneUrl);
-        if (sceneData) {
-          imageParts.push({
-            inlineData: { mimeType: sceneData.mimeType, data: sceneData.base64 },
-          });
+        const part = await fetchAsPart(`${FRONTEND_BASE}/convo-img/${scenarioId}.${ext}`);
+        if (part) {
+          imageParts.push(part);
           break;
         }
       }
@@ -86,39 +92,68 @@ export default async function handler(req, res) {
       })
       .join("\n\n");
 
+    // ── Shot direction based on image count ─────────────────────────────
+    const shotNum = imageCount || 0;
+    let shotDirection;
+    if (shotNum === 0) {
+      shotDirection = "SHOT DIRECTION: Wide establishing shot. Show the full environment — both characters, the space between them, and the setting. Pull the camera back to orient the viewer.";
+    } else if (shotNum === 1) {
+      shotDirection = "SHOT DIRECTION: Medium two-shot. Both characters visible, focused on the interaction. Emphasize body language and the space between them.";
+    } else if (shotNum === 2) {
+      shotDirection = "SHOT DIRECTION: Close-up on the AI character. Focus on their facial expression and what their hands are doing — writing, pouring, checking, gesturing.";
+    } else if (shotNum === 3) {
+      shotDirection = "SHOT DIRECTION: Over-the-shoulder from the learner's perspective. Show what they see — the other person's face, the objects between them, the environment from their viewpoint.";
+    } else if (shotNum === 4) {
+      shotDirection = "SHOT DIRECTION: Wide shot showing the scene has progressed. If documents were exchanged, show them. If the setting shifted, reflect that. Environmental storytelling.";
+    } else {
+      // Alternate between close-ups and medium shots for shots 5+
+      const altShots = [
+        "SHOT DIRECTION: Close-up on hands or objects central to the scene — documents, coffee cups, medical instruments, phone screens. The characters' faces may be partially visible.",
+        "SHOT DIRECTION: Medium shot from a new angle. Show both characters but from a different perspective than earlier — side angle, slightly lower, or slightly higher.",
+        "SHOT DIRECTION: Focus on the emotional tone. If the conversation is tense, show tight framing and shadows. If warm, show open body language and soft lighting.",
+      ];
+      shotDirection = altShots[shotNum % altShots.length];
+    }
+
+    // ── Adjust context weighting based on image count ────────────────────
+    const scenarioSlice = shotNum === 0 ? 1000 : shotNum <= 2 ? 400 : 200;
+    const transcriptSlice = shotNum === 0 ? 200 : shotNum <= 2 ? 1500 : 2000;
+
     // ── Build the prompt ────────────────────────────────────────────────
     const textPrompt = `Create a photorealistic image for a language learning app.
 
 SCENE SETTING:
-${scenarioHidden.slice(0, 1000)}
+${scenarioHidden.slice(0, scenarioSlice)}
 
 ENVIRONMENT DETAILS:
-${(more || "").slice(0, 600)}
+${(more || "").slice(0, shotNum === 0 ? 600 : 200)}
 
 CHARACTERS IN THIS SCENE:
 ${characterBlock}
 
 WHAT IS HAPPENING RIGHT NOW:
-${transcript.slice(-1500)}
+${transcript.slice(-transcriptSlice)}
 
 Conversation tone: ${tone || "neutral"}
 
-${imageParts.length > 0 ? "Reference photos of the characters are provided. Match their faces, hair, clothing style, and approximate age from the reference photos as closely as possible." : ""}
+${shotDirection}
+
+${imageParts.length > 0 ? "Reference photos and video stills of the characters and scene are provided. Match the characters' faces, clothing, and the environment's layout, lighting, and camera angles from these references as closely as possible." : ""}
 
 IMAGE RULES:
-- Photorealistic style, natural lighting, as if captured by a professional photographer
+- Photorealistic style matching the reference photos provided, natural lighting
 - Characters must be positioned logically within the physical space:
   * Customers stay on the customer side of counters, desks, and service areas
   * Workers stay on the worker side of counters, desks, and service areas
   * Drivers sit in the driver's seat, passengers in the passenger seat
   * Patients sit on exam tables or chairs, doctors stand or sit across from them
-  * People in phone calls are shown in their own environment, not merged into one scene
+  * People in phone calls are shown in their own environment, NOT merged into one scene
 - Show the characters interacting naturally — eye contact, gestures, body language
 - Include environmental details from the scene setting: furniture, objects, lighting, weather
-- Camera angle: medium shot, slightly above eye level, showing both characters and their surroundings
-- No text, words, letters, signs with readable text, or watermarks
+- No text, words, letters, signs with readable text, watermarks, chat bubbles, or UI elements
 - No violence, weapons, blood, sexual content, or anything inappropriate
-- No extra fingers, no distorted hands — if hands are not central to the scene, keep them out of frame or naturally positioned at sides`;
+- Hands should be in natural resting positions — at sides, holding relevant objects, or out of frame
+- Do NOT render text messages, chat interfaces, phone screens showing text, or any UI overlay`;
 
     // ── Call Gemini ──────────────────────────────────────────────────────
     const contents = [
