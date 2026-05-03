@@ -1,6 +1,7 @@
 // routes/convo-image.js
-// Generates a mid-conversation illustration via Gemini (Nano Banana).
+// Generates a mid-conversation illustration via Gemini.
 // Accepts character portrait references + video stills for spatial/style consistency.
+// Visual continuity: receives accumulated narrator lines to maintain scene coherence.
 // Endpoint: POST /api/convo-image
 
 import { GoogleGenAI } from "@google/genai";
@@ -48,30 +49,44 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds, imageCount } = req.body;
+    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds, imageCount, visualHistory } = req.body;
 
     if (!scenarioHidden || !transcript) {
       return res.status(400).json({ error: "Missing scenarioHidden or transcript" });
     }
 
+    const shotNum = imageCount || 0;
+
     // ── Build reference image parts ─────────────────────────────────────
     const imageParts = [];
 
     if (scenarioId && roleIds && Array.isArray(roleIds)) {
-      // Character portraits
+      // Character portraits — ALWAYS include for face consistency
       for (const roleId of roleIds) {
         const part = await fetchAsPart(`${FRONTEND_BASE}/assets/characters/${scenarioId}-${roleId}.jpg`);
         if (part) imageParts.push(part);
       }
 
-      // Video stills (3 per scenario: 1s, 4s, 7s)
-      for (const n of [1, 2, 3]) {
+      // Video stills — reduce on later images so text-based shot directions take effect
+      // Opening + first 2 images: all 3 stills (strong spatial anchoring)
+      // Images 3-4: only 1 still (maintain setting, allow composition freedom)
+      // Images 5+: no stills (text directions fully control composition)
+      let stillsToInclude;
+      if (shotNum <= 2) {
+        stillsToInclude = [1, 2, 3];
+      } else if (shotNum <= 4) {
+        stillsToInclude = [1];
+      } else {
+        stillsToInclude = [];
+      }
+
+      for (const n of stillsToInclude) {
         const part = await fetchAsPart(`${FRONTEND_BASE}/assets/stills/${scenarioId}-${n}.jpg`);
         if (part) imageParts.push(part);
       }
     }
 
-    // Scene image
+    // Scene image — always include for environment reference
     if (scenarioId) {
       for (const ext of ["webp", "jpg"]) {
         const part = await fetchAsPart(`${FRONTEND_BASE}/convo-img/${scenarioId}.${ext}`);
@@ -93,24 +108,23 @@ export default async function handler(req, res) {
       .join("\n\n");
 
     // ── Shot direction based on image count ─────────────────────────────
-    const shotNum = imageCount || 0;
     let shotDirection;
     if (shotNum === 0) {
-      shotDirection = "SHOT DIRECTION: Wide establishing shot. Show the full environment — both characters, the space between them, and the setting. Pull the camera back to orient the viewer.";
+      shotDirection = "SHOT DIRECTION: Wide establishing shot. Show the full environment — both characters, the space between them, and the setting. Pull the camera back to orient the viewer. Shot on Hasselblad, natural daylight, Kodak Portra 400 color palette.";
     } else if (shotNum === 1) {
-      shotDirection = "SHOT DIRECTION: Medium two-shot. Both characters visible, focused on the interaction. Emphasize body language and the space between them.";
+      shotDirection = "SHOT DIRECTION: Medium two-shot. Both characters visible, focused on the interaction. Emphasize body language and the space between them. Rule of thirds composition, shallow depth of field on the characters.";
     } else if (shotNum === 2) {
-      shotDirection = "SHOT DIRECTION: Close-up on the AI character. Focus on their facial expression and what their hands are doing — writing, pouring, checking, gesturing.";
+      shotDirection = "SHOT DIRECTION: Close-up on the AI character. Focus on their facial expression and what their hands are doing — writing, pouring, checking, gesturing. Tight framing, bokeh background.";
     } else if (shotNum === 3) {
-      shotDirection = "SHOT DIRECTION: Over-the-shoulder from the learner's perspective. Show what they see — the other person's face, the objects between them, the environment from their viewpoint.";
+      shotDirection = "SHOT DIRECTION: Over-the-shoulder from the learner's perspective. Show what they see — the other person's face, the objects between them, the environment from their viewpoint. Leading lines toward the AI character.";
     } else if (shotNum === 4) {
-      shotDirection = "SHOT DIRECTION: Wide shot showing the scene has progressed. If documents were exchanged, show them. If the setting shifted, reflect that. Environmental storytelling.";
+      shotDirection = "SHOT DIRECTION: Wide shot showing the scene has progressed. If documents were exchanged, show them. If the setting shifted, reflect that. Environmental storytelling. Pull back to show the full scene from a new angle.";
     } else {
       // Alternate between close-ups and medium shots for shots 5+
       const altShots = [
-        "SHOT DIRECTION: Close-up on hands or objects central to the scene — documents, coffee cups, medical instruments, phone screens. The characters' faces may be partially visible.",
-        "SHOT DIRECTION: Medium shot from a new angle. Show both characters but from a different perspective than earlier — side angle, slightly lower, or slightly higher.",
-        "SHOT DIRECTION: Focus on the emotional tone. If the conversation is tense, show tight framing and shadows. If warm, show open body language and soft lighting.",
+        "SHOT DIRECTION: Close-up on hands or objects central to the scene — documents, coffee cups, medical instruments, phone screens. The characters' faces may be partially visible. Macro-style detail, shallow depth of field.",
+        "SHOT DIRECTION: Medium shot from a new angle. Show both characters but from a different perspective than earlier — side angle, slightly lower, or slightly higher. Fresh composition, avoid repeating any previous framing.",
+        "SHOT DIRECTION: Focus on the emotional tone. If the conversation is tense, show tight framing and shadows. If warm, show open body language and soft lighting. Cinematic color grading matching the mood.",
       ];
       shotDirection = altShots[shotNum % altShots.length];
     }
@@ -118,6 +132,16 @@ export default async function handler(req, res) {
     // ── Adjust context weighting based on image count ────────────────────
     const scenarioSlice = shotNum === 0 ? 1000 : shotNum <= 2 ? 400 : 200;
     const transcriptSlice = shotNum === 0 ? 200 : shotNum <= 2 ? 1500 : 2000;
+
+    // ── Visual continuity block ─────────────────────────────────────────
+    let visualContinuityBlock = "";
+    if (visualHistory && visualHistory.trim()) {
+      visualContinuityBlock = `
+VISUAL CONTINUITY — WHAT HAS ALREADY HAPPENED IN PREVIOUS IMAGES:
+${visualHistory}
+
+IMPORTANT: Maintain visual continuity with the above. If a bandage was applied, it should still be visible. If a document was handed over, it should be in the recipient's hands or on the surface. If a character moved to a new position, they should still be there. Do NOT revert to an earlier state of the scene.`;
+    }
 
     // ── Build the prompt ────────────────────────────────────────────────
     const textPrompt = `Create a photorealistic image for a language learning app.
@@ -137,11 +161,12 @@ ${transcript.slice(-transcriptSlice)}
 Conversation tone: ${tone || "neutral"}
 
 ${shotDirection}
+${visualContinuityBlock}
 
-${imageParts.length > 0 ? "Reference photos and video stills of the characters and scene are provided. Match the characters' faces, clothing, and the environment's layout, lighting, and camera angles from these references as closely as possible." : ""}
+${imageParts.length > 0 ? `Reference photos of the characters and scene are provided. Match the characters' faces and clothing from the portrait references. Use the scene/environment references for spatial layout and lighting.${shotNum <= 2 ? " Match camera angles from the video stills closely." : " You have creative freedom for camera angle and composition — follow the SHOT DIRECTION above."}` : ""}
 
 IMAGE RULES:
-- Photorealistic style matching the reference photos provided, natural lighting
+- Photorealistic style, natural lighting, cinematic quality
 - Characters must be positioned logically within the physical space:
   * Customers stay on the customer side of counters, desks, and service areas
   * Workers stay on the worker side of counters, desks, and service areas
@@ -153,7 +178,7 @@ IMAGE RULES:
 - No text, words, letters, signs with readable text, watermarks, chat bubbles, or UI elements
 - No violence, weapons, blood, sexual content, or anything inappropriate
 - Hands should be in natural resting positions — at sides, holding relevant objects, or out of frame
-- Do NOT render text messages, chat interfaces, phone screens showing text, or any UI overlay`;
+- Do NOT render text messages, chat interfaces, phone screens showing text, whiteboards with readable text, or any UI overlay`;
 
     // ── Call Gemini ──────────────────────────────────────────────────────
     const contents = [
