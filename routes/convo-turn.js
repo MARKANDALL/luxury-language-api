@@ -229,7 +229,7 @@ async function maybeRepairAssistantLength({
 
 /* ── Build the system prompt ─────────────────────────────────── */
 
-function buildSystemPrompt(scenario, knobs, messages = []) {
+function buildSystemPrompt(scenario, knobs, messages = [], turnCount = 0) {
   const level = knobs?.level || "B1";
   const tone = knobs?.tone || knobs?.mood || "neutral";   // tone (v3) with mood fallback
   const length = normalizeLength(knobs?.length || "medium");
@@ -252,6 +252,46 @@ function buildSystemPrompt(scenario, knobs, messages = []) {
   const safeMsgs = Array.isArray(messages) ? messages : [];
   const isOpeningTurn = safeMsgs.length === 0;
 
+  // ── Narration + Phase system ──
+  // targetTurns comes from the scenario if defined; otherwise default 10-14
+  const targetTurns = scenario.targetTurns || 12;
+  const windDownAt = Math.max(1, Math.floor(targetTurns * 0.7));
+
+  let phaseInstruction = "";
+  if (isOpeningTurn) {
+    phaseInstruction = `CURRENT PHASE: "opening" — This is the very start. Set the scene.`;
+  } else if (turnCount >= targetTurns) {
+    phaseInstruction = `CURRENT PHASE: "closing" — The conversation has reached its natural end. Wrap up NOW. Say goodbye, finish the transaction, or close the encounter. This is the last exchange.`;
+  } else if (turnCount >= windDownAt) {
+    phaseInstruction = `CURRENT PHASE: "winding_down" — The conversation is nearing its end. Start steering toward a natural conclusion. Don't abruptly stop, but begin wrapping up. At least 1 of your 3 suggested_replies should be a natural farewell or closing remark from "${learnerLabel}".`;
+  } else if (turnCount <= 2) {
+    phaseInstruction = `CURRENT PHASE: "opening" — Still early in the conversation. Characters are establishing the interaction.`;
+  } else {
+    phaseInstruction = `CURRENT PHASE: "active" — Mid-conversation. The interaction is in full swing.`;
+  }
+
+  const narrationInstructions = `
+NARRATOR SYSTEM:
+You are also the narrator of this scene. In addition to your dialogue, you may include a short narration line that describes what is physically happening — actions, gestures, movements, environmental changes. Think of it like stage directions in a screenplay.
+
+NARRATION RULES:
+- Narration is OPTIONAL on any given turn. Only include it when something physical, visual, or spatially meaningful happens. Not every turn needs narration.
+- Narration should be 1 sentence, max 2. Short and visual.
+- Narration is written in third person, present tense. Example: "She slides the document across the counter."
+- Narration describes YOUR character's actions, the environment, or things happening around the scene. It does NOT describe the learner's actions — the learner controls their own character.
+- Do NOT use narration for internal thoughts or emotions that aren't visible. Only observable actions.
+- On the opening turn, narration should set the scene briefly — where we are, what's happening as the conversation begins.
+- On a "closing" phase turn, narration should describe the final physical beat — walking away, hanging up, closing a door, etc.
+
+${phaseInstruction}
+
+PHASE VALUES for your response:
+- "opening" — first 1-2 turns
+- "active" — main body of conversation
+- "winding_down" — nearing the end, start wrapping up
+- "closing" — final exchange, conversation ends after this
+`;
+
   return `
 You are a character in a realistic American English conversation. Stay in character always. Never reveal you are an AI or that this is practice.
 
@@ -270,6 +310,8 @@ ${levelBlock}
 TONE: ${toneBlock}
 
 ${lengthBlock}
+
+${narrationInstructions}
 
 CHARACTER ANCHOR:
 You are "${aiLabel}" — a real person, not an AI. You have a body, a life, real feelings, and real limits. Stay anchored in this identity no matter what the learner says. Use your character's own motivations, judgments, and emotional compass to react to everything.
@@ -362,8 +404,12 @@ CRITICAL — ROLE CHECK: You are "${aiLabel}". The suggested replies are NOT thi
 - When "${learnerLabel}" has just committed to an action (telling a joke, giving directions, explaining something), the suggested replies must be attempts at that action — not requests for the other person to do it.
 - Reply 1: simpler/safer. Reply 2: natural/confident. Reply 3: slightly more expressive, but still believable and speakable.
 
+SUGGESTED REPLIES — WINDING DOWN / CLOSING:
+- When the phase is "winding_down," at least 1 of the 3 suggested_replies should be a natural farewell or closing remark.
+- When the phase is "closing," all 3 suggested_replies should be farewell variants — different ways to say goodbye or wrap up.
+
 OUTPUT: JSON only, no other text:
-{"assistant":"your reply","suggested_replies":["option 1","option 2","option 3"]}
+{"assistant":"your reply","narration":"optional stage direction or null","phase":"opening|active|winding_down|closing","suggested_replies":["option 1","option 2","option 3"]}
 `.trim();
 }
 
@@ -402,7 +448,11 @@ export default async function handler(req, res) {
       .slice(-16);
 
     const isOpeningTurn = trimmed.length === 0;
-    const sys = buildSystemPrompt(scenario, knobs, trimmed);
+
+    // Count user turns for phase calculation
+    const turnCount = trimmed.filter(m => m.role === "user").length;
+
+    const sys = buildSystemPrompt(scenario, knobs, trimmed, turnCount);
 
 const model =
       (process.env.LUX_AI_CONVO_MODEL || "").toString().trim() ||
@@ -450,6 +500,7 @@ const model =
         model,
         assistant: "",
         narration,
+        phase: "closing",
         status: "ended",
         suggested_replies: [],
       });
@@ -464,10 +515,16 @@ const model =
       isOpeningTurn,
     });
 
-return res.status(200).json({
-  ok: true,
-  model,
-  assistant,
+    // Extract narration and phase from GPT response (graceful fallback)
+    const narration = json.narration && json.narration !== "null" ? json.narration : null;
+    const phase = json.phase || (isOpeningTurn ? "opening" : "active");
+
+    return res.status(200).json({
+      ok: true,
+      model,
+      assistant,
+      narration: narration || null,
+      phase,
       suggested_replies: Array.isArray(json.suggested_replies) ? json.suggested_replies : [],
     });
 
@@ -500,6 +557,7 @@ return res.status(200).json({
         model: "",
         assistant: "",
         narration,
+        phase: "closing",
         status: "ended",
         suggested_replies: [],
       });
