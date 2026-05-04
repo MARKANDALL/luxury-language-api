@@ -70,14 +70,12 @@ export default async function handler(req, res) {
       // Video stills — reduce on later images so text-based shot directions take effect
       // Opening + first 2 images: all 3 stills (strong spatial anchoring)
       // Images 3-4: only 1 still (maintain setting, allow composition freedom)
-      // Images 5+: no stills (text directions fully control composition)
+      // Images 5+: 1 still (face/clothing anchor only)
       let stillsToInclude;
       if (shotNum <= 2) {
         stillsToInclude = [1, 2, 3];
-      } else if (shotNum <= 4) {
-        stillsToInclude = [1];
       } else {
-        stillsToInclude = [];
+        stillsToInclude = [1];
       }
 
       for (const n of stillsToInclude) {
