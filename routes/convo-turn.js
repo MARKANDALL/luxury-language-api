@@ -86,15 +86,15 @@ const TONE_INSTRUCTIONS = {
 /* ── Response length instructions ────────────────────────────── */
 
 const LENGTH_INSTRUCTIONS = {
-  terse: `LENGTH: Terse — usually 1–2 brief sentences, sometimes less. Keep it compact and natural, not robotic. On opening turns, skew extra short.`,
+  terse: `LENGTH: Terse — 1 to 5 words. A grunt, a nod, barely verbal. "Mmhm." / "Yeah." / "Over there." / "Name?" This is someone who does NOT want to talk. On opening turns, one or two words max.`,
 
-  short: `LENGTH: Short — usually 2–3 short sentences. A quick, natural exchange.`,
+  short: `LENGTH: Short — 1 sentence, sometimes 2. Clipped, efficient, no elaboration. A busy person giving you what you need and nothing more.`,
 
-  medium: `LENGTH: Medium — a normal conversational turn, often around 3–5 sentences.`,
+  medium: `LENGTH: Medium — 1 to 3 sentences. A normal conversational turn. Say what needs saying, then stop. Do NOT fill space.`,
 
-  long: `LENGTH: Long — a fuller response when needed, often around 5–8 sentences, but still conversational and never a lecture.`,
+  long: `LENGTH: Long — 2 to 4 sentences. A fuller response when the moment calls for it, but still conversational and never a monologue or lecture.`,
 
-  extended: `LENGTH: Extended — no artificial limit. Speak as long as the situation naturally requires, while staying conversational.`,
+  extended: `LENGTH: Extended — up to 5 or 6 sentences when the situation genuinely requires it. Still conversational. If you catch yourself writing a paragraph, stop and cut.`,
 };
 
 function normalizeLength(length) {
@@ -119,21 +119,21 @@ function getLengthOutlierThresholds(length, { isOpeningTurn = false } = {}) {
   const l = normalizeLength(length);
 
   if (l === "extended") {
-    return { maxSentences: Infinity, maxWords: Infinity };
+    return { maxSentences: 6, maxWords: 150 };
   }
 
   const openingMap = {
-    terse:  { maxSentences: 2, maxWords: 26 },
-    short:  { maxSentences: 3, maxWords: 40 },
-    medium: { maxSentences: 5, maxWords: 75 },
-    long:   { maxSentences: 7, maxWords: 120 },
+    terse:  { maxSentences: 1, maxWords: 8 },
+    short:  { maxSentences: 2, maxWords: 22 },
+    medium: { maxSentences: 3, maxWords: 45 },
+    long:   { maxSentences: 4, maxWords: 70 },
   };
 
   const normalMap = {
-    terse:  { maxSentences: 3, maxWords: 34 },
-    short:  { maxSentences: 4, maxWords: 55 },
-    medium: { maxSentences: 6, maxWords: 95 },
-    long:   { maxSentences: 8, maxWords: 150 },
+    terse:  { maxSentences: 1, maxWords: 12 },
+    short:  { maxSentences: 2, maxWords: 30 },
+    medium: { maxSentences: 3, maxWords: 55 },
+    long:   { maxSentences: 5, maxWords: 95 },
   };
 
   return (isOpeningTurn ? openingMap : normalMap)[l] || normalMap.medium;
@@ -272,19 +272,19 @@ function buildSystemPrompt(scenario, knobs, messages = [], turnCount = 0) {
 
   const narrationInstructions = `
 NARRATOR SYSTEM:
-You are also the narrator of this scene. In addition to your dialogue, you may include a short narration line that describes what is physically happening — actions, gestures, movements, environmental changes. Think of it like stage directions in a screenplay.
+You are also the narrator of this scene. You may include a short narration line — like a stage direction — before your dialogue. Narration is a spice, not a staple. Most turns should have NONE.
 
 NARRATION RULES:
-- Narration is OPTIONAL and should appear on roughly 30-40% of turns. Most turns need NO narration.
-- ONLY narrate when something genuinely NEW happens physically — a new gesture, movement, object exchange, position change, or environmental shift.
-- NEVER repeat or paraphrase a previous narration. If the character is still doing the same thing (pointing, holding, standing), do NOT narrate it again. Silence is better than redundancy.
-- If nothing new is physically happening, set narration to null. Two characters talking without moving does not need narration.
-- Narration should be 1 sentence, max 2. Short and visual.
-- Narration is written in third person, present tense. Example: "She slides the document across the counter."
-- Narration describes YOUR character's actions, the environment, or things happening around the scene. It does NOT describe the learner's actions.
-- Do NOT use narration for internal thoughts or emotions that aren't visible. Only observable actions.
-- On the opening turn, narration should set the scene briefly — where we are, what's happening as the conversation begins.
-- On a "closing" phase turn, narration should describe the final physical beat — walking away, hanging up, closing a door, etc.
+- Narration should appear on roughly 20% of turns — about 1 in 5. The majority of turns need NO narration at all. When in doubt, set narration to null.
+- Every narration MUST pass this test: "Does this tell the user something new and meaningful that they couldn't already gather from the dialogue?" If no, set narration to null.
+- NEVER repeat, echo, or slightly rephrase a previous narration. If you already narrated the character smiling, reaching for something, or looking at something — do NOT narrate a variation of the same action. Once is enough.
+- Make it unambiguous who is doing what. If there are two people of the same gender, use the character's name or a clear descriptor (e.g., "the barista," "the officer"), not just "she" or "he." When there's no ambiguity (one man, one woman), pronouns are fine.
+- Narration should be 1 sentence. Rarely 2. Tight and visual.
+- Written in third person, present tense. Example: "Rosa slides the ticket across the counter."
+- Narration describes YOUR character's actions, the environment, or things happening around the scene. NOT the learner's actions.
+- Smiles, expressions, and tone of voice are fine to narrate IF they reveal something new about the emotional state. "She frowns, setting down her pen" adds something. "She speaks calmly" on a phone call where she's been calm the whole time adds nothing.
+- On the opening turn, narration should set the physical scene briefly — where we are, what's happening as the conversation begins.
+- On a "closing" phase turn, narration should describe the final physical beat — walking away, hanging up, closing a door.
 
 IMAGE DIRECTION SYSTEM:
 In addition to narration (which the user sees), you MUST always provide an "imageDirection" field. This is a rich visual description that the user NEVER sees — it is used exclusively by the image generation system to create accurate illustrations.
