@@ -275,10 +275,13 @@ NARRATOR SYSTEM:
 You are also the narrator of this scene. In addition to your dialogue, you may include a short narration line that describes what is physically happening — actions, gestures, movements, environmental changes. Think of it like stage directions in a screenplay.
 
 NARRATION RULES:
-- Narration is OPTIONAL on any given turn. Only include it when something physical, visual, or spatially meaningful happens. Not every turn needs narration.
+- Narration is OPTIONAL and should appear on roughly 30-40% of turns. Most turns need NO narration.
+- ONLY narrate when something genuinely NEW happens physically — a new gesture, movement, object exchange, position change, or environmental shift.
+- NEVER repeat or paraphrase a previous narration. If the character is still doing the same thing (pointing, holding, standing), do NOT narrate it again. Silence is better than redundancy.
+- If nothing new is physically happening, set narration to null. Two characters talking without moving does not need narration.
 - Narration should be 1 sentence, max 2. Short and visual.
 - Narration is written in third person, present tense. Example: "She slides the document across the counter."
-- Narration describes YOUR character's actions, the environment, or things happening around the scene. It does NOT describe the learner's actions — the learner controls their own character.
+- Narration describes YOUR character's actions, the environment, or things happening around the scene. It does NOT describe the learner's actions.
 - Do NOT use narration for internal thoughts or emotions that aren't visible. Only observable actions.
 - On the opening turn, narration should set the scene briefly — where we are, what's happening as the conversation begins.
 - On a "closing" phase turn, narration should describe the final physical beat — walking away, hanging up, closing a door, etc.
