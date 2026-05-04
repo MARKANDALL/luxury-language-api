@@ -183,41 +183,93 @@ IMAGE RULES:
 - Hands should be in natural resting positions — at sides, holding relevant objects, or out of frame
 - Do NOT render text messages, chat interfaces, phone screens showing text, whiteboards with readable text, or any UI overlay`;
 
-    // ── Call Gemini ──────────────────────────────────────────────────────
+    // ── Call Gemini with retry + fallback ──────────────────────────────
     const contents = [
       ...imageParts,
       { text: textPrompt },
     ];
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3-pro-image-preview",
-      contents: contents,
-      config: {
-        responseModalities: ["TEXT", "IMAGE"],
-      },
-    });
+    const PRIMARY_MODEL = "gemini-3-pro-image-preview";
+    const FALLBACK_MODEL = "gemini-2.5-flash-image";
+    const MAX_PRIMARY_RETRIES = 2;
+    const RETRY_DELAY_MS = 2000;
 
-    // ── Extract image from response ─────────────────────────────────────
-    const parts = response?.candidates?.[0]?.content?.parts || [];
-    let imageData = null;
-    let description = "";
+    /** Attempt one Gemini image generation call. Returns { response, model } or throws. */
+    async function tryGenerate(model) {
+      return {
+        response: await ai.models.generateContent({
+          model,
+          contents,
+          config: { responseModalities: ["TEXT", "IMAGE"] },
+        }),
+        model,
+      };
+    }
 
-    for (const part of parts) {
-      if (part.inlineData?.data) {
-        imageData = part.inlineData;
+    /** Extract imageData + description from a Gemini response. Returns { imageData, description } or null. */
+    function extractImage(response) {
+      const parts = response?.candidates?.[0]?.content?.parts || [];
+      let imageData = null;
+      let description = "";
+      for (const part of parts) {
+        if (part.inlineData?.data) imageData = part.inlineData;
+        if (part.text) description = part.text;
       }
-      if (part.text) {
-        description = part.text;
+      return imageData ? { imageData, description } : null;
+    }
+
+    let result = null;
+    let usedModel = PRIMARY_MODEL;
+
+    // ── Primary model: retry up to MAX_PRIMARY_RETRIES times ──
+    for (let attempt = 1; attempt <= MAX_PRIMARY_RETRIES; attempt++) {
+      try {
+        const { response, model } = await tryGenerate(PRIMARY_MODEL);
+        const extracted = extractImage(response);
+        if (extracted) {
+          result = extracted;
+          usedModel = model;
+          break;
+        }
+        console.warn(`[convo-image] ${PRIMARY_MODEL} attempt ${attempt}: no image in response`);
+      } catch (err) {
+        const code = err?.status || err?.code || "";
+        const msg = err?.message || JSON.stringify(err);
+        console.warn(`[convo-image] ${PRIMARY_MODEL} attempt ${attempt} failed (${code}): ${msg}`);
+      }
+      // Wait before next retry (but not after the last attempt)
+      if (!result && attempt < MAX_PRIMARY_RETRIES) {
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
       }
     }
 
-    if (!imageData) {
-      return res.status(500).json({ error: "Gemini returned no image" });
+    // ── Fallback model: single attempt if primary exhausted ──
+    if (!result) {
+      console.log(`[convo-image] Primary model exhausted. Falling back to ${FALLBACK_MODEL}`);
+      try {
+        const { response, model } = await tryGenerate(FALLBACK_MODEL);
+        const extracted = extractImage(response);
+        if (extracted) {
+          result = extracted;
+          usedModel = model;
+        }
+      } catch (err) {
+        const msg = err?.message || JSON.stringify(err);
+        console.error(`[convo-image] Fallback ${FALLBACK_MODEL} also failed: ${msg}`);
+      }
     }
 
-    const dataUri = `data:${imageData.mimeType || "image/png"};base64,${imageData.data}`;
+    if (!result) {
+      return res.status(500).json({ error: "All image models failed" });
+    }
 
-    res.json({ imageUrl: dataUri, description });
+    if (usedModel !== PRIMARY_MODEL) {
+      console.log(`[convo-image] ⚡ Used fallback model: ${usedModel}`);
+    }
+
+    const dataUri = `data:${result.imageData.mimeType || "image/png"};base64,${result.imageData.data}`;
+
+    res.json({ imageUrl: dataUri, description: result.description });
   } catch (err) {
     console.error("[convo-image] generation failed:", err?.message || err);
     res.status(500).json({ error: "Image generation failed" });
