@@ -452,6 +452,31 @@ export default async function handler(req, res) {
     // Count user turns for phase calculation
     const turnCount = trimmed.filter(m => m.role === "user").length;
 
+    // ── Hard turn cap: force-end if user pushes way past targetTurns ──
+    const targetTurns = scenario.targetTurns || 12;
+    const hardCap = targetTurns + 4;
+    if (turnCount > hardCap) {
+      const aiLabel = scenario?.otherRole?.label || "The other person";
+      const closingNarrations = [
+        `${aiLabel} smiled politely, gathered their things, and headed out.`,
+        `${aiLabel} glanced at the time and excused themselves with a wave.`,
+        `${aiLabel} stood up, signaling the conversation was over.`,
+        `With a final nod, ${aiLabel} turned and walked away.`,
+        `${aiLabel} gave a small wave and left without another word.`,
+      ];
+      const narration = closingNarrations[Math.floor(Math.random() * closingNarrations.length)];
+
+      return res.status(200).json({
+        ok: true,
+        model: "",
+        assistant: "",
+        narration,
+        phase: "closing",
+        status: "ended",
+        suggested_replies: [],
+      });
+    }
+
     const sys = buildSystemPrompt(scenario, knobs, trimmed, turnCount);
 
 const model =
