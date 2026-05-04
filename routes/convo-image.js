@@ -49,7 +49,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds, imageCount, visualHistory } = req.body;
+    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds, imageCount, visualHistory, imageDirection } = req.body;
 
     if (!scenarioHidden || !transcript) {
       return res.status(400).json({ error: "Missing scenarioHidden or transcript" });
@@ -159,6 +159,9 @@ WHAT IS HAPPENING RIGHT NOW:
 ${transcript.slice(-transcriptSlice)}
 
 Conversation tone: ${tone || "neutral"}
+
+${imageDirection ? `DIRECTOR'S NOTE (HIGHEST PRIORITY — this describes exactly what should be in this image):
+${imageDirection}` : ""}
 
 ${shotDirection}
 ${visualContinuityBlock}

@@ -286,6 +286,18 @@ NARRATION RULES:
 - On the opening turn, narration should set the scene briefly — where we are, what's happening as the conversation begins.
 - On a "closing" phase turn, narration should describe the final physical beat — walking away, hanging up, closing a door, etc.
 
+IMAGE DIRECTION SYSTEM:
+In addition to narration (which the user sees), you MUST always provide an "imageDirection" field. This is a rich visual description that the user NEVER sees — it is used exclusively by the image generation system to create accurate illustrations.
+
+IMAGE DIRECTION RULES:
+- imageDirection is REQUIRED on every turn. Never set it to null.
+- Write 2-4 sentences describing the full visual scene as a film director would describe it to a cinematographer.
+- Include: exact character positions, body language, facial expressions, hand positions, what objects are visible, lighting mood, and any changes from the previous moment.
+- Describe what has CHANGED since the last turn — if a document was handed over, it should now be in the other person's hands. If someone stood up, they are now standing.
+- Include environmental details: time of day feel, background activity, weather if outdoors.
+- Be specific about spatial relationships: "The officer stands to the left of the red car, facing the driver who is seated. The parking ticket is now in the driver's hand."
+- This is NOT dialogue or narration — it is pure visual scene description for an image generator.
+
 ${phaseInstruction}
 
 PHASE VALUES for your response:
@@ -412,7 +424,7 @@ SUGGESTED REPLIES — WINDING DOWN / CLOSING:
 - When the phase is "closing," all 3 suggested_replies should be farewell variants — different ways to say goodbye or wrap up.
 
 OUTPUT: JSON only, no other text:
-{"assistant":"your reply","narration":"optional stage direction or null","phase":"opening|active|winding_down|closing","suggested_replies":["option 1","option 2","option 3"]}
+{"assistant":"your reply","narration":"optional stage direction or null","imageDirection":"required visual scene description for image generator","phase":"opening|active|winding_down|closing","suggested_replies":["option 1","option 2","option 3"]}
 `.trim();
 }
 
@@ -543,8 +555,9 @@ const model =
       isOpeningTurn,
     });
 
-    // Extract narration and phase from GPT response (graceful fallback)
+    // Extract narration, imageDirection, and phase from GPT response (graceful fallback)
     const narration = json.narration && json.narration !== "null" ? json.narration : null;
+    const imageDirection = json.imageDirection && json.imageDirection !== "null" ? json.imageDirection : null;
     const phase = json.phase || (isOpeningTurn ? "opening" : "active");
 
     return res.status(200).json({
@@ -552,6 +565,7 @@ const model =
       model,
       assistant,
       narration: narration || null,
+      imageDirection: imageDirection || null,
       phase,
       suggested_replies: Array.isArray(json.suggested_replies) ? json.suggested_replies : [],
     });
