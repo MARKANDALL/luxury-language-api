@@ -66,6 +66,12 @@ const TONE_INSTRUCTIONS = {
 
   sarcastic: `Sarcastic — dry wit and irony. Say the opposite sometimes, exaggerated disbelief. Deadpan comedian friend. Sharp but not cruel. Learner reads between lines.`,
 
+  nervous: `Nervous — anxious, second-guessing, fidgety energy. Might ramble, trail off, or ask for reassurance. First day on the job or waiting for test results. Learner puts them at ease.`,
+
+  sympathetic: `Sympathetic — genuinely caring, emotionally present. Active listening, validating feelings, offering comfort. Not just polite — actually moved by what the learner shares. Think a good friend hearing bad news.`,
+
+  confused: `Confused — not quite following, needs things repeated or clarified. "Wait, what do you mean?" Might mix things up. Not unintelligent — just lost in this moment. Learner explains clearly.`,
+
   tired: `Tired — low-energy, slow, running on fumes. Shorter sentences. Might sigh or yawn. Not rude, just exhausted. Learner works harder to keep you engaged.`,
 
   distracted: `Distracted — losing focus, half-listening, jumping topics. Might ask "wait, what?" Not trying to be rude. Learner must get and hold your attention.`,
@@ -76,12 +82,49 @@ const TONE_INSTRUCTIONS = {
 
   impatient: `Impatient — busy, pressed for time. Clipped responses. Might interrupt or say "let's speed this up." Not rude, just in a hurry. Learner must be efficient.`,
 
-  irritable: `Irritable — rough day, slightly snappy, easily annoyed. Might sigh heavily or react sharply. Not shouting, just on edge. Learner stays calm and diplomatic.`,
-
   angry: `Angry — upset about something scenario-specific. Slightly raised voice, shorter/sharper sentences, visible frustration. Not abusive. Learner de-escalates or holds firm.`,
 
   emotional: `Emotional — stressed, sad, overwhelmed, or deeply moved. Voice wavers. Might pause or change the subject. Learner shows empathy and responds with sensitivity.`,
 };
+
+/* ── Multi-tone blending ─────────────────────────────────────── */
+
+const WEIGHT_LABELS = { 1: "subtle", 3: "moderate", 5: "strong" };
+
+/**
+ * Build a tone instruction block from knobs.
+ * Supports both legacy single-tone (knobs.tone = "formal")
+ * and new weighted multi-tone (knobs.tones = { formal: 5, cold: 3 }).
+ */
+function buildToneBlock(knobs) {
+  // ── New multi-tone format ──
+  const tones = knobs?.tones;
+  if (tones && typeof tones === "object" && Object.keys(tones).length > 0) {
+    // Sort by weight descending
+    const sorted = Object.entries(tones)
+      .filter(([k, w]) => TONE_INSTRUCTIONS[k] && w > 0)
+      .sort((a, b) => b[1] - a[1]);
+
+    if (sorted.length === 0) return TONE_INSTRUCTIONS.neutral;
+
+    if (sorted.length === 1) {
+      return TONE_INSTRUCTIONS[sorted[0][0]];
+    }
+
+    const primary = sorted[0];
+    const blendLines = sorted.map(([tone, weight]) => {
+      const label = WEIGHT_LABELS[weight] || WEIGHT_LABELS[3];
+      const desc = TONE_INSTRUCTIONS[tone];
+      return `- ${tone.charAt(0).toUpperCase() + tone.slice(1)} (${label}): ${desc}`;
+    });
+
+    return `TONE BLEND — Your character combines these emotional influences:\n${blendLines.join("\n")}\n\n${primary[0].charAt(0).toUpperCase() + primary[0].slice(1)} is your PRIMARY tone. The others are secondary influences on HOW you express that primary tone. Don't alternate between them — blend them naturally, the way a real person would be mostly ${primary[0]} but also a bit ${sorted.slice(1).map(s => s[0]).join(" and ")}.`;
+  }
+
+  // ── Legacy single-tone format ──
+  const tone = knobs?.tone || knobs?.mood || "neutral";
+  return TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.neutral;
+}
 
 /* ── Response length instructions ────────────────────────────── */
 
@@ -146,11 +189,10 @@ function isLengthOutlier(text, length, opts = {}) {
 
 function buildLengthRepairPrompt(scenario, knobs, { isOpeningTurn = false } = {}) {
   const level = knobs?.level || "B1";
-  const tone = knobs?.tone || knobs?.mood || "neutral";
   const length = normalizeLength(knobs?.length || "medium");
 
   const levelBlock = LEVEL_INSTRUCTIONS[level] || LEVEL_INSTRUCTIONS.B1;
-  const toneBlock = TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.neutral;
+  const toneBlock = buildToneBlock(knobs);
   const lengthBlock = LENGTH_INSTRUCTIONS[length] || LENGTH_INSTRUCTIONS.medium;
 
   const otherRole = scenario?.otherRole;
@@ -231,13 +273,12 @@ async function maybeRepairAssistantLength({
 
 function buildSystemPrompt(scenario, knobs, messages = [], turnCount = 0) {
   const level = knobs?.level || "B1";
-  const tone = knobs?.tone || knobs?.mood || "neutral";   // tone (v3) with mood fallback
   const length = normalizeLength(knobs?.length || "medium");
 
   const role = scenario.role;
   const otherRole = scenario.otherRole;
   const levelBlock = LEVEL_INSTRUCTIONS[level] || LEVEL_INSTRUCTIONS.B1;
-  const toneBlock = TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.neutral;
+  const toneBlock = buildToneBlock(knobs);
   const lengthBlock = LENGTH_INSTRUCTIONS[length] || LENGTH_INSTRUCTIONS.medium;
 
   const aiCharDesc = otherRole?.npc || "A realistic character appropriate for this scenario.";
