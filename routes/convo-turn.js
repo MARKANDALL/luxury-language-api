@@ -89,7 +89,7 @@ const TONE_INSTRUCTIONS = {
 
 /* ── Multi-tone blending ─────────────────────────────────────── */
 
-const WEIGHT_LABELS = { 1: "subtle", 3: "moderate", 5: "strong" };
+const WEIGHT_LABELS = { 1: "subtle", 2: "moderate", 3: "strong" };
 
 /**
  * Build a tone instruction block from knobs.
@@ -99,6 +99,16 @@ const WEIGHT_LABELS = { 1: "subtle", 3: "moderate", 5: "strong" };
 function buildToneBlock(knobs) {
   // ── New multi-tone format ──
   const tones = knobs?.tones;
+  const userSet = knobs?.toneUserSet === true;
+
+  // If tones exist but user hasn't modified them (presets only), skip override —
+  // the character/scenario descriptions already cover the natural emotional lean.
+  if (!userSet) {
+    // Legacy single-tone fallback (from old knobs format)
+    const tone = knobs?.tone || knobs?.mood || "neutral";
+    return TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.neutral;
+  }
+
   if (tones && typeof tones === "object" && Object.keys(tones).length > 0) {
     // Sort by weight descending
     const sorted = Object.entries(tones)
@@ -109,13 +119,13 @@ function buildToneBlock(knobs) {
 
     if (sorted.length === 1) {
       const [tone, weight] = sorted[0];
-      const label = WEIGHT_LABELS[weight] || WEIGHT_LABELS[3];
+      const label = WEIGHT_LABELS[weight] || WEIGHT_LABELS[2];
       return `⚠️ TONE OVERRIDE (${label} intensity) — THIS SUPERSEDES YOUR DEFAULT PERSONALITY:\n${TONE_INSTRUCTIONS[tone]}\n\nYour character description tells you who you ARE. This tone tells you how you are ACTING RIGHT NOW. If your personality says "warm and friendly" but this tone says "cold," you are cold. The tone wins. Always.`;
     }
 
     const primary = sorted[0];
     const blendLines = sorted.map(([tone, weight]) => {
-      const label = WEIGHT_LABELS[weight] || WEIGHT_LABELS[3];
+      const label = WEIGHT_LABELS[weight] || WEIGHT_LABELS[2];
       const desc = TONE_INSTRUCTIONS[tone];
       return `- ${tone.charAt(0).toUpperCase() + tone.slice(1)} (${label}): ${desc}`;
     });
@@ -133,6 +143,7 @@ function buildToneBlock(knobs) {
  * Returns empty string if neutral / no override needed.
  */
 function buildToneCharacterModifier(knobs) {
+  if (knobs?.toneUserSet !== true) return "";
   const tones = knobs?.tones;
   if (!tones || typeof tones !== "object") return "";
   const sorted = Object.entries(tones)
