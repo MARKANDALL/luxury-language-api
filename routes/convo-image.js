@@ -49,7 +49,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds, imageCount, visualHistory, imageDirection } = req.body;
+    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds, imageCount, visualHistory, imageDirection, isClosingShot } = req.body;
 
     if (!scenarioHidden || !transcript) {
       return res.status(400).json({ error: "Missing scenarioHidden or transcript" });
@@ -107,7 +107,15 @@ export default async function handler(req, res) {
 
     // ── Shot direction based on image count ─────────────────────────────
     let shotDirection;
-    if (shotNum === 0) {
+
+    if (isClosingShot) {
+      shotDirection = `SHOT DIRECTION — CLOSING SHOT (final image of the conversation):
+Wide cinematic pullback. The camera lingers on the scene after the interaction has ended or is about to end. Show the environment with more breathing room — the characters may be further apart, one turning to leave, or both settling into a final moment together. This should feel like the last frame of a film — contemplative, quiet, complete.
+- If the conversation ended naturally: show the aftermath — an empty chair, a receipt on the counter, both characters at ease, one waving goodbye.
+- If one character is leaving: show them walking away with the environment prominent, the other character smaller in frame or watching.
+- If it ended abruptly or negatively: the AI character alone in frame, the space where the other person was now empty.
+The mood should match the final tone of the conversation. Warm lighting for positive endings, cooler tones for tense or unresolved ones. Shot on Hasselblad, Kodak Portra 400, shallow depth of field on the environment.`;
+    } else if (shotNum === 0) {
       shotDirection = "SHOT DIRECTION: Wide establishing shot. Show the full environment — both characters, the space between them, and the setting. Pull the camera back to orient the viewer. Shot on Hasselblad, natural daylight, Kodak Portra 400 color palette.";
     } else if (shotNum === 1) {
       shotDirection = "SHOT DIRECTION: Medium two-shot. Both characters visible, focused on the interaction. Emphasize body language and the space between them. Rule of thirds composition, shallow depth of field on the characters.";
