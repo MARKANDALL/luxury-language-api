@@ -108,7 +108,9 @@ function buildToneBlock(knobs) {
     if (sorted.length === 0) return TONE_INSTRUCTIONS.neutral;
 
     if (sorted.length === 1) {
-      return TONE_INSTRUCTIONS[sorted[0][0]];
+      const [tone, weight] = sorted[0];
+      const label = WEIGHT_LABELS[weight] || WEIGHT_LABELS[3];
+      return `⚠️ TONE OVERRIDE (${label} intensity) — THIS SUPERSEDES YOUR DEFAULT PERSONALITY:\n${TONE_INSTRUCTIONS[tone]}\n\nYour character description tells you who you ARE. This tone tells you how you are ACTING RIGHT NOW. If your personality says "warm and friendly" but this tone says "cold," you are cold. The tone wins. Always.`;
     }
 
     const primary = sorted[0];
@@ -118,12 +120,28 @@ function buildToneBlock(knobs) {
       return `- ${tone.charAt(0).toUpperCase() + tone.slice(1)} (${label}): ${desc}`;
     });
 
-    return `TONE BLEND — Your character combines these emotional influences:\n${blendLines.join("\n")}\n\n${primary[0].charAt(0).toUpperCase() + primary[0].slice(1)} is your PRIMARY tone. The others are secondary influences on HOW you express that primary tone. Don't alternate between them — blend them naturally, the way a real person would be mostly ${primary[0]} but also a bit ${sorted.slice(1).map(s => s[0]).join(" and ")}.`;
+    return `⚠️ TONE OVERRIDE — THIS SUPERSEDES YOUR DEFAULT PERSONALITY:\n${blendLines.join("\n")}\n\n${primary[0].charAt(0).toUpperCase() + primary[0].slice(1)} is your PRIMARY tone. The others are secondary influences.\n\nCRITICAL: Your character description tells you who you ARE. This tone tells you how you are ACTING RIGHT NOW. If your personality says "warm and friendly" but this tone says "cold and angry," you are cold and angry. The tone ALWAYS wins over your default personality. Do not soften, moderate, or revert to your baseline personality. Commit fully to these tones in every line of dialogue.`;
   }
 
   // ── Legacy single-tone format ──
   const tone = knobs?.tone || knobs?.mood || "neutral";
   return TONE_INSTRUCTIONS[tone] || TONE_INSTRUCTIONS.neutral;
+}
+
+/**
+ * Build a short tone modifier to inject directly into the character description line.
+ * Returns empty string if neutral / no override needed.
+ */
+function buildToneCharacterModifier(knobs) {
+  const tones = knobs?.tones;
+  if (!tones || typeof tones !== "object") return "";
+  const sorted = Object.entries(tones)
+    .filter(([k, w]) => TONE_INSTRUCTIONS[k] && w > 0)
+    .sort((a, b) => b[1] - a[1]);
+  if (sorted.length === 0) return "";
+
+  const toneNames = sorted.map(([t]) => t).join(", ");
+  return `\n⚠️ RIGHT NOW IN THIS CONVERSATION: Your character is acting ${toneNames}. This overrides your default personality traits below.`;
 }
 
 /* ── Response length instructions ────────────────────────────── */
@@ -356,14 +374,14 @@ Setting: ${scenario.desc}
 ${scenario.more ? `Detail: ${scenario.more}` : ""}
 ${scenario.scenarioHidden ? `Context: ${scenario.scenarioHidden}` : ""}
 
-YOUR CHARACTER: You are "${aiLabel}". ${aiCharDesc}${aiPersonality ? `\nPersonality: ${aiPersonality}` : ""}
+TONE: ${toneBlock}
+
+YOUR CHARACTER: You are "${aiLabel}". ${aiCharDesc}${buildToneCharacterModifier(knobs)}${aiPersonality ? `\nPersonality: ${aiPersonality}` : ""}
 
 THE LEARNER plays "${learnerLabel}".${learnerCharDesc ? ` (${learnerCharDesc})` : ""}
 suggested_replies must be things "${learnerLabel}" would say — not your character.
 
 ${levelBlock}
-
-TONE: ${toneBlock}
 
 ${lengthBlock}
 
@@ -426,7 +444,7 @@ CONTRADICTIONS:
 
 NATURAL LANGUAGE:
 - Use natural human language at all times. Phrases like "I can't provide," "I don't have access to," "I am not able to," or "As an AI" are things real people never say — use real-person equivalents.
-- NEVER repeat the same phrase you used in a previous turn. If you expressed confusion or set a boundary already, use completely different words the next time.${aiHidden ? `\n\nCHARACTER DETAIL:\n${aiHidden}` : ""}
+- NEVER repeat the same phrase you used in a previous turn. If you expressed confusion or set a boundary already, use completely different words the next time.${aiHidden ? `\n\nCHARACTER DETAIL:\n${aiHidden}` : ""}${buildToneCharacterModifier(knobs) ? `\n\nTONE REMINDER: The TONE OVERRIDE above takes priority over the character detail. Your character's baseline personality is background — the active tone is what the user should HEAR and FEEL in every line you say.` : ""}
 
 ${isOpeningTurn ? `OPENING TURN:
 - You are "${aiLabel}". Speak ONLY as "${aiLabel}".
