@@ -187,6 +187,8 @@ IMAGE RULES:
 - No text, words, letters, signs with readable text, watermarks, chat bubbles, or UI elements
 - No violence, weapons, blood, sexual content, or anything inappropriate
 - Hands should be in natural resting positions — at sides, holding relevant objects, or out of frame
+- Characters should NEVER look directly at the camera — they are in a conversation with each other, not posing for a photo. Eye contact should be between the characters, or looking at objects/environment relevant to the conversation
+- Maintain consistent lighting across all images in a conversation. If the first image shows evening light, all subsequent images should show the same time of day and lighting conditions
 - Do NOT render text messages, chat interfaces, phone screens showing text, whiteboards with readable text, or any UI overlay${imageNotes ? `
 
 SCENARIO-SPECIFIC IMAGE GUIDANCE:
