@@ -49,7 +49,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds, imageCount, visualHistory, imageDirection, isClosingShot, closingImageHint } = req.body;
+    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds, imageCount, visualHistory, imageDirection, isClosingShot, closingImageHint, imageNotes } = req.body;
 
     if (!scenarioHidden || !transcript) {
       return res.status(400).json({ error: "Missing scenarioHidden or transcript" });
@@ -187,7 +187,10 @@ IMAGE RULES:
 - No text, words, letters, signs with readable text, watermarks, chat bubbles, or UI elements
 - No violence, weapons, blood, sexual content, or anything inappropriate
 - Hands should be in natural resting positions — at sides, holding relevant objects, or out of frame
-- Do NOT render text messages, chat interfaces, phone screens showing text, whiteboards with readable text, or any UI overlay`;
+- Do NOT render text messages, chat interfaces, phone screens showing text, whiteboards with readable text, or any UI overlay${imageNotes ? `
+
+SCENARIO-SPECIFIC IMAGE GUIDANCE:
+${imageNotes}` : ""}`;
 
     // ── Call Gemini with retry + fallback ──────────────────────────────
     const contents = [
