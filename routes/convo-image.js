@@ -200,8 +200,8 @@ ${imageNotes}` : ""}`;
       { text: textPrompt },
     ];
 
-    const PRIMARY_MODEL = "gemini-3-pro-image-preview";
-    const FALLBACK_MODEL = "gemini-2.5-flash-image";
+    const PRIMARY_MODEL = "gemini-3.1-flash-image-preview";
+    const FALLBACK_MODEL = "gemini-3-pro-image-preview";
     const MAX_PRIMARY_RETRIES = 2;
     const RETRY_DELAY_MS = 2000;
 
