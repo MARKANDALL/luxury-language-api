@@ -44,6 +44,12 @@ const FRONTEND_BASE = process.env.FRONTEND_URL || "http://localhost:3000";
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
+  // ── Provider dispatch — route to Luma when configured ──
+  if ((process.env.LUX_IMAGE_PROVIDER || "").toLowerCase() === "luma") {
+    const { default: lumaHandler } = await import("./convo-image-luma.js");
+    return lumaHandler(req, res);
+  }
+
   if (!process.env.GEMINI_API_KEY) {
     return res.status(500).json({ error: "GEMINI_API_KEY not configured" });
   }
