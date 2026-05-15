@@ -7,7 +7,7 @@
 const LUMA_API_BASE = "https://agents.lumalabs.ai/v1";
 const LUMA_MODEL = process.env.LUMA_IMAGE_MODEL || "uni-1-max"; // "uni-1" or "uni-1-max"
 const POLL_INTERVAL_MS = 2000;
-const POLL_TIMEOUT_MS = 90000; // Luma avg ~31s; 90s leaves comfortable headroom
+const POLL_TIMEOUT_MS = 180000; // 3 min — Luma claims ~31s avg but uni-1-max with refs runs longer under load
 const FRONTEND_BASE = process.env.FRONTEND_URL || "http://localhost:3000";
 
 // ── Image cache (per-process; cleared on restart) ──────────────────────────
@@ -73,20 +73,24 @@ async function lumaGetGeneration(id) {
 async function lumaPollUntilDone(id) {
   const start = Date.now();
   let polls = 0;
+  let lastState = "queued";
   while (Date.now() - start < POLL_TIMEOUT_MS) {
     await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
     polls++;
     const gen = await lumaGetGeneration(id);
+    if (gen.state !== lastState) {
+      console.log(`[convo-image-luma] Job ${id.slice(0, 8)}: ${lastState} → ${gen.state} (poll ${polls}, ~${polls * POLL_INTERVAL_MS / 1000}s elapsed)`);
+      lastState = gen.state;
+    }
     if (gen.state === "completed") {
-      console.log(`[convo-image-luma] Completed after ${polls} polls (~${polls * POLL_INTERVAL_MS / 1000}s)`);
+      console.log(`[convo-image-luma] ✅ Completed after ${polls} polls (~${polls * POLL_INTERVAL_MS / 1000}s)`);
       return gen;
     }
     if (gen.state === "failed") {
       throw new Error(`Luma generation failed: ${gen.failure_code || "?"} - ${gen.failure_reason || "?"}`);
     }
-    // queued or processing — keep polling
   }
-  throw new Error(`Luma generation timed out after ${POLL_TIMEOUT_MS}ms`);
+  throw new Error(`Luma generation timed out after ${POLL_TIMEOUT_MS}ms (last state: ${lastState})`);
 }
 
 async function downloadImageAsDataUri(url) {
