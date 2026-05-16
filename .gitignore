@@ -4,3 +4,6 @@ repomix-*.xml
 .vercel
 .env*.local
 *.GOLD*
+# Local secrets
+.env
+.env.local
