@@ -156,17 +156,55 @@ function buildToneCharacterModifier(knobs) {
 }
 
 /* ── Response length instructions ────────────────────────────── */
+/* v3.31 — research-backed 5-pillar pattern per tier:
+   (1) hard DEFAULT (not ceiling), (2) STRETCH condition,
+   (3) MIRRORING rule (engagement-based, learner-adapted),
+   (4) BAD/GOOD example pair, (5) anti-fill statement.
+   Sources: talk-normal, Questie AI production template, Character.AI
+   Prompt Poet, Inworld Dialogue Style, YapBench, countdown-prompt paper.
+*/
 
 const LENGTH_INSTRUCTIONS = {
-  terse: `LENGTH: Terse — 1 to 5 words. A grunt, a nod, barely verbal. "Mmhm." / "Yeah." / "Over there." / "Name?" This is someone who does NOT want to talk. On opening turns, one or two words max.`,
+  terse: `LENGTH: Terse.
+Default: 1-3 words. "Yeah." / "Over there." / "Mmhm."
+Stretch ONLY if a single word would be cryptic.
+Mirror: if the learner asks something deep, you can give one short sentence — but never more.
+BAD: "Yes, that's correct, the bathroom is located just down the hallway on your left."
+GOOD: "Down the hall, left."
+Brevity IS the personality. Do not pad. Do not explain.`,
 
-  short: `LENGTH: Short — 1 sentence, sometimes 2. Clipped, efficient, no elaboration. A busy person giving you what you need and nothing more.`,
+  short: `LENGTH: Short — efficient and clipped.
+Default: 1 sentence.
+Stretch to 2 ONLY when 1 sentence would leave real ambiguity.
+Mirror: if the learner offers depth, you can match with one extra clause — but stop there.
+BAD: "Yes, unfortunately we're closed on Sundays, but we are open Monday through Saturday from 9 to 6."
+GOOD: "No, closed Sundays."
+You do NOT have to fill space. Brevity is the default.`,
 
-  medium: `LENGTH: Medium — 1 to 3 sentences. A normal conversational turn. Say what needs saying, then stop. Do NOT fill space.`,
+  medium: `LENGTH: Medium — a natural conversational turn.
+Default: 1 sentence.
+Stretch to 2 ONLY when content genuinely needs it (comparing options, explaining a process, layered emotion).
+Mirror: if the learner asks something open-ended or expresses curiosity, you can stretch. If they ask a yes/no, stay short.
+BAD: "Yes, that's one of the easiest ways. Direct deposit means your paycheck goes straight into the account, and with some checking accounts that will waive the monthly fee."
+GOOD: "Yeah, that's right — direct deposit usually waives it."
+Length must be earned by what you're actually saying. Do not consume space because the budget allows it.`,
 
-  long: `LENGTH: Long — 2 to 4 sentences. A fuller response when the moment calls for it, but still conversational and never a monologue or lecture.`,
+  long: `LENGTH: Long — a fuller response when the moment calls for it.
+Default: 2 sentences.
+Stretch to 3-4 ONLY for genuine multi-part content (laying out options, walking through a process, brief story).
+Mirror: if the learner is engaged and curious, lean fuller. If they ask a narrow question, just answer it.
+BAD (to "Is direct deposit included?"): "Yes, direct deposit is one of several ways to set up your account. We offer it as part of our standard checking package, and it can also help you avoid monthly fees, as I mentioned earlier..."
+GOOD (to "Is direct deposit included?"): "Yeah, it's included."
+GOOD (to "What are my account options?"): "We've got checking, savings, and a money-market account. Checking is for daily use; savings earns a little interest; money-market needs a higher balance but pays more."
+Length serves the listener — not the model's training to fill space.`,
 
-  extended: `LENGTH: Extended — up to 5 or 6 sentences when the situation genuinely requires it. Still conversational. If you catch yourself writing a paragraph, stop and cut.`,
+  extended: `LENGTH: Extended — only for moments that genuinely need depth.
+Default: 3-4 sentences.
+Stretch to 5-6 ONLY when the situation truly calls for it — telling a story, walking through detailed complexity, real explanation.
+Mirror: even at this length, brevity is virtuous. Cut any sentence that doesn't earn its place.
+BAD: A six-sentence response to "Are you open today?"
+GOOD: A six-sentence response to "Can you walk me through how a 30-year fixed mortgage works?"
+If you catch yourself writing a textbook paragraph, stop and cut. Every sentence must earn its place.`,
 };
 
 function normalizeLength(length) {
@@ -190,22 +228,25 @@ function wordCount(text) {
 function getLengthOutlierThresholds(length, { isOpeningTurn = false } = {}) {
   const l = normalizeLength(length);
 
+  // v3.31 — tightened from 150 → 135 to match medium's ~18% reduction at ~10% scale
   if (l === "extended") {
-    return { maxSentences: 6, maxWords: 150 };
+    return { maxSentences: 6, maxWords: 135 };
   }
 
+  // v3.31 — opening caps tightened (medium 45→35 most aggressive; others ~10%)
   const openingMap = {
-    terse:  { maxSentences: 1, maxWords: 8 },
-    short:  { maxSentences: 2, maxWords: 22 },
-    medium: { maxSentences: 3, maxWords: 45 },
-    long:   { maxSentences: 4, maxWords: 70 },
+    terse:  { maxSentences: 1, maxWords: 7 },
+    short:  { maxSentences: 2, maxWords: 20 },
+    medium: { maxSentences: 3, maxWords: 35 },
+    long:   { maxSentences: 4, maxWords: 63 },
   };
 
+  // v3.31 — normal caps tightened (medium 55→45 most aggressive; others ~10%)
   const normalMap = {
-    terse:  { maxSentences: 1, maxWords: 12 },
-    short:  { maxSentences: 2, maxWords: 30 },
-    medium: { maxSentences: 3, maxWords: 55 },
-    long:   { maxSentences: 5, maxWords: 95 },
+    terse:  { maxSentences: 1, maxWords: 11 },
+    short:  { maxSentences: 2, maxWords: 27 },
+    medium: { maxSentences: 3, maxWords: 45 },
+    long:   { maxSentences: 5, maxWords: 85 },
   };
 
   return (isOpeningTurn ? openingMap : normalMap)[l] || normalMap.medium;
@@ -473,6 +514,19 @@ ${isOpeningTurn ? `OPENING TURN:
 - Usually open with a brief greeting plus one focused question or one focused piece of information.
 - Do not front-load the full explanation or process unless the learner has already asked for it.
 - Let the conversation unfold over multiple turns.` : ""}
+
+ANTI-FILL PRINCIPLE (v3.31 — research-backed):
+- Do not consume the space available to you. Most real conversational turns are SHORT.
+- If you can drop a sentence without losing meaning, drop it.
+- React first. Add explanation ONLY if the learner's question genuinely needs it.
+- Mirror engagement, not raw length: if the learner shows curiosity or depth, you can match. If they ask narrowly, stay narrow.
+
+FILLER PHRASES — FORBIDDEN:
+- Do NOT open with: "Certainly", "Great question", "Absolutely", "Of course", "I'd be happy to", "Let me break this down".
+- Do NOT close with: "Hope this helps", "Let me know if you need anything", "Feel free to ask".
+- Do NOT use: "It's worth noting", "It's important to note", "delve", "utilize", "leverage".
+- Do NOT restate the user's question back to them before answering.
+- Do NOT add "as I mentioned earlier" or summarize what was just said.
 
 RULES:
 - Treat the length setting as a strong target band, not a robotic exact quota.
