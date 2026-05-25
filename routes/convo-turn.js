@@ -614,6 +614,7 @@ export default async function handler(req, res) {
       ];
       const narration = closingNarrations[Math.floor(Math.random() * closingNarrations.length)];
 
+      console.log(`[convo-turn] hard-cap reached; turn=${turnCount} target=${targetTurns}`);
       return res.status(200).json({
         ok: true,
         model: "",
@@ -632,6 +633,8 @@ const model =
       (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
       "gpt-4.1-mini";
 
+    console.log(`[convo-turn] model=${model} turn=${turnCount} target=${targetTurns}`);
+
     // ── Character Card System v1: post-history anchor ──
     // npcAnchor is injected AFTER the conversation history as a system message.
     // Per SillyTavern research, post-history instructions carry stronger weight
@@ -649,6 +652,7 @@ const model =
     });
 
     const raw = rsp?.choices?.[0]?.message?.content || "{}";
+    console.log(`[convo-turn] raw.length=${raw.length} preview=${raw.slice(0, 200)}`);
     let json;
     try { json = JSON.parse(raw); }
     catch { json = { assistant: raw, suggested_replies: [] }; }
@@ -668,6 +672,7 @@ const model =
       ];
       const narration = narrations[Math.floor(Math.random() * narrations.length)];
 
+      console.log(`[convo-turn] empty assistant; model=${model} turn=${turnCount}; entering closing fallback`);
       return res.status(200).json({
         ok: true,
         model,
@@ -714,6 +719,11 @@ const model =
       /content.?policy|content.?filter|safety|refus/i.test(err?.message || "");
 
     if (isContentFilter) {
+      const matchedHeuristic =
+        (err?.code === "content_filter" || err?.error?.code === "content_filter") ? "code"
+        : (err?.status === 400) ? "status"
+        : "message-regex";
+      console.log(`[convo-turn] content-filter matched via ${matchedHeuristic}`);
       const aiLabel = scenario?.otherRole?.label || "The other person";
       const narrations = [
         `${aiLabel} went silent, then turned and walked away without another word.`,
