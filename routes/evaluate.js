@@ -3,6 +3,7 @@
 import formidable from "formidable";
 import { createReadStream } from "fs";
 import sdk from "microsoft-cognitiveservices-speech-sdk";
+import { resolveLocale } from "../lib/pack-locale.js";
 
 export const config = { api: { bodyParser: false } };
 
@@ -22,13 +23,13 @@ function createForm() {
 }
 
 // Util for Azure
-function recognizePronunciationFromFile(filePath, referenceText) {
+function recognizePronunciationFromFile(filePath, referenceText, locale = "en-US") {
   return new Promise((resolve, reject) => {
     const speechConfig = sdk.SpeechConfig.fromSubscription(
       process.env.AZURE_SPEECH_KEY,
       process.env.AZURE_SPEECH_REGION || process.env.AZURE_REGION
     );
-    speechConfig.speechRecognitionLanguage = "en-US";
+    speechConfig.speechRecognitionLanguage = locale;
 
     const pronConfig = new sdk.PronunciationAssessmentConfig(
       referenceText,
@@ -92,9 +93,11 @@ export default async function handler(req, res) {
       return;
     }
 
+    const locale = resolveLocale(data.fields);
+
     let azureResultRaw;
     try {
-      azureResultRaw = await recognizePronunciationFromFile(audioFile, referenceText);
+      azureResultRaw = await recognizePronunciationFromFile(audioFile, referenceText, locale);
     } catch (err) {
       res.status(500).json({ error: "Azure Speech error: " + (err?.message || String(err)) });
       return;

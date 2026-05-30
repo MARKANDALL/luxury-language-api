@@ -5,6 +5,7 @@ import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { tmpdir } from "os";
 import path from "path";
+import { resolveLocale } from "../lib/pack-locale.js";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
@@ -49,6 +50,8 @@ export default async function handler(req, res) {
     let referenceText = pickFirst(fields?.text);
     referenceText = typeof referenceText === "string" ? referenceText.trim() : "";
 
+    const locale = resolveLocale(fields);
+
     const audioFile = files?.audio?.[0] || files?.audio;
     inputPath = audioFile?.filepath || audioFile?.path || null;
     const size = Number(audioFile?.size ?? 0);
@@ -80,13 +83,13 @@ export default async function handler(req, res) {
       Granularity: "Phoneme",
       Dimension: "Comprehensive",
       EnableMiscue: true,
-      Language: "en-US",
+      Language: locale,
       ...(enableProsody && { EnableProsodyAssessment: true }),
     };
 
     const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "utf8").toString("base64");
 
-    const endpoint = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed`;
+    const endpoint = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${locale}&format=detailed`;
 
     const azureRes = await fetch(endpoint, {
       method: "POST",

@@ -18,6 +18,8 @@ import {
   speak,
 } from "./tts/speak.js";
 
+import { resolveLocale } from "../lib/pack-locale.js";
+
 // /api/tts.js  — Azure REST v1 proxy with smart style fallbacks & rich headers
 export default async function handler(req, res) {
   // Basic CORS
@@ -89,6 +91,8 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Server TTS not configured" });
     if (!voice) return res.status(400).json({ error: "missing voice" });
     if (!text && !ssml) return res.status(400).json({ error: "missing text or ssml" });
+
+    const locale = resolveLocale(body);
 
     const hdrBase = makeHdrBase({ key, region });
 
@@ -174,7 +178,7 @@ export default async function handler(req, res) {
           includeRole: v.role,
           includeDegree: v.deg,
         });
-        const xml = baseSpeakTag({ voice, inner, withMstts: true });
+        const xml = baseSpeakTag({ voice, inner, withMstts: true, lang: locale });
 
         const r = await doSpeak(xml);
 
@@ -206,7 +210,7 @@ export default async function handler(req, res) {
         styledegree,
         styleName: "",
       });
-      const neutralXml = baseSpeakTag({ voice, inner: neutralInner, withMstts: true }); // keep mstts ns harmlessly
+      const neutralXml = baseSpeakTag({ voice, inner: neutralInner, withMstts: true, lang: locale }); // keep mstts ns harmlessly
       const n = await doSpeak(neutralXml);
 
       if (n.ok) {
@@ -226,7 +230,7 @@ export default async function handler(req, res) {
 
     // No style requested => neutral path
     const content = prosody ? `${prosody.open}${safeXml(text)}${prosody.close}` : safeXml(text);
-    const neutralXml = baseSpeakTag({ voice, inner: content, withMstts: false });
+    const neutralXml = baseSpeakTag({ voice, inner: content, withMstts: false, lang: locale });
 
     const r = await doSpeak(neutralXml);
 

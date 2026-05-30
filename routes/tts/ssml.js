@@ -36,12 +36,12 @@ export function safeXml(s = "") {
     .replace(/'/g, "&apos;");
 }
 
-export function baseSpeakTag({ voice, inner, withMstts = false }) {
+export function baseSpeakTag({ voice, inner, withMstts = false, lang = "en-US" }) {
   // Put mstts on <speak> for max compatibility; keep xml:lang on both speak & voice
   const ns = withMstts
-    ? `xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="en-US"`
-    : `xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US"`;
-  return `<speak version="1.0" ${ns}><voice name="${voice}" xml:lang="en-US">${inner}</voice></speak>`;
+    ? `xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="${lang}"`
+    : `xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${lang}"`;
+  return `<speak version="1.0" ${ns}><voice name="${voice}" xml:lang="${lang}">${inner}</voice></speak>`;
 }
 
 // helper to build inner XML for a given style/role combo
