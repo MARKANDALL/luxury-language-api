@@ -10,7 +10,7 @@
 // This is the ONLY Vercel function. It must support BOTH:
 // - multipart/form-data uploads (assess) -> requires bodyParser: false
 // - application/json bodies (most routes) -> we hydrate req.body ourselves.
-export const config = { api: { bodyParser: false, externalResolver: true }, maxDuration: 30 };
+export const config = { api: { bodyParser: false, externalResolver: true }, maxDuration: 60 };
 
 import crypto from "node:crypto";
 
@@ -236,6 +236,8 @@ const u = new URL(req.url, `http://${getHeader(req, "host") || "localhost"}`);
         "Access-Control-Allow-Methods",
         "GET,POST,OPTIONS"
       );
+    } else {
+      console.warn(`[router] CORS rejected origin=${origin} path=${route}`);
     }
 
     // Preflight
