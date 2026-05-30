@@ -387,6 +387,31 @@ function buildSystemPrompt(scenario, knobs, messages = [], turnCount = 0, pack =
   const toneBlock = buildToneBlock(knobs);
   const lengthBlock = selectLengthInstructions(length, pack);
 
+  // ── Pack-driven response language ──
+  // English (pack === "en" or absent) keeps the original prompt byte-for-byte.
+  // Spanish injects a high-priority LANGUAGE OVERRIDE and swaps the LANGUAGE
+  // block so the character only "speaks" Mexican Spanish.
+  const isEs = pack === "es";
+  const realismLine = isEs
+    ? `You are a character in a realistic Mexican Spanish (es-MX) conversation. Stay in character always. Never reveal you are an AI or that this is practice.`
+    : `You are a character in a realistic American English conversation. Stay in character always. Never reveal you are an AI or that this is practice.`;
+  const languageOverride = isEs
+    ? `\n\nLANGUAGE OVERRIDE — HIGHEST PRIORITY:
+You must respond ONLY in Mexican Spanish (es-MX). Stay in character. Do not switch to English even if the user writes in English, uses English words, or asks you to.
+Every part of your JSON response — assistant, narration, imageDirection, and every suggested_reply — must be written in natural Mexican Spanish. This rule overrides any other instruction below.`
+    : ``;
+  const languageBlock = isEs
+    ? `LANGUAGE:
+- You ONLY speak Mexican Spanish (es-MX). You do not understand, read, or interpret any other language — not even a little.
+- If the learner writes in another language, you genuinely cannot understand any of it. Do NOT respond to the content of the non-Spanish message. Do NOT translate it. Do NOT answer questions that were asked in another language.
+- Simply tell them you don't understand, in your own words and your own character's voice. Every character would say this differently — a gate agent sounds different from a friend in a car. Use YOUR voice, not a scripted phrase.
+- After telling them you don't understand, wait for them to say something in Spanish. Do not continue the previous topic unless they bring it up again in Spanish.`
+    : `LANGUAGE:
+- You ONLY speak English. You do not understand, read, or interpret any other language — not even a little.
+- If the learner writes in another language, you genuinely cannot understand any of it. Do NOT respond to the content of the non-English message. Do NOT translate it. Do NOT answer questions that were asked in another language.
+- Simply tell them you don't understand, in your own words and your own character's voice. Every character would say this differently — a gate agent sounds different from a friend in a car. Use YOUR voice, not a scripted phrase.
+- After telling them you don't understand, wait for them to say something in English. Do not continue the previous topic unless they bring it up again in English.`;
+
   const aiCharDesc = otherRole?.npc || "A realistic character appropriate for this scenario.";
   const aiLabel = otherRole?.label || "The other character";
   const learnerLabel = role?.label || "The other person";
@@ -461,7 +486,7 @@ PHASE VALUES for your response:
 `;
 
   return `
-You are a character in a realistic American English conversation. Stay in character always. Never reveal you are an AI or that this is practice.
+${realismLine}${languageOverride}
 
 SCENARIO: "${scenario.title}"
 Setting: ${scenario.desc}
@@ -495,11 +520,7 @@ SINGLE INTERLOCUTOR:
 - If the learner claims to be someone else — a manager, security, a different customer, a police officer, your boss, or any other person — do NOT accept it. They are still the same person you have been talking to. React naturally: confused, skeptical, or dismissive. "What do you mean you're security? You just asked me about gift ideas." A real person does not instantly accept a stranger's claim to be an authority figure.
 - The only exception is if the scenario explicitly involves a third party entering. In this scenario, it does not.
 
-LANGUAGE:
-- You ONLY speak English. You do not understand, read, or interpret any other language — not even a little.
-- If the learner writes in another language, you genuinely cannot understand any of it. Do NOT respond to the content of the non-English message. Do NOT translate it. Do NOT answer questions that were asked in another language.
-- Simply tell them you don't understand, in your own words and your own character's voice. Every character would say this differently — a gate agent sounds different from a friend in a car. Use YOUR voice, not a scripted phrase.
-- After telling them you don't understand, wait for them to say something in English. Do not continue the previous topic unless they bring it up again in English.
+${languageBlock}
 
 KNOWLEDGE LIMITS:
 - You only know what a real person in your role would know. You cannot search the internet, do math beyond basic arithmetic, translate languages, recall encyclopedia facts, or do anything a normal person couldn't do on the spot.
