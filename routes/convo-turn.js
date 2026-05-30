@@ -1,10 +1,40 @@
 // routes/convo-turn.js
 // Vercel/Next-style API route that validates an admin token, builds a scenario-driven system prompt, calls OpenAI chat completions, and returns an in-character reply plus 3 learner suggested replies as JSON.
 
+import {
+  LENGTH_INSTRUCTIONS_ES,
+  LENGTH_OUTLIER_OPENING_ES,
+  LENGTH_OUTLIER_NORMAL_ES,
+  LENGTH_OUTLIER_EXTENDED_ES,
+  LEVEL_INSTRUCTIONS_ES,
+} from "../lib/length.es.js";
+
 export const config = {
   api: { bodyParser: true, externalResolver: true },
   maxDuration: 30,
 };
+
+// Pack selector. Frontend sends body.pack = "en" | "es"; default to English.
+function normalizePack(body) {
+  const raw = body && typeof body === "object" ? body.pack : undefined;
+  const p = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  return p === "es" ? "es" : "en";
+}
+
+// Spanish prompt block if authored, else fall back to the English block.
+function selectLengthInstructions(length, pack) {
+  if (pack === "es" && LENGTH_INSTRUCTIONS_ES[length]) {
+    return LENGTH_INSTRUCTIONS_ES[length];
+  }
+  return LENGTH_INSTRUCTIONS[length] || LENGTH_INSTRUCTIONS.medium;
+}
+
+function selectLevelInstructions(level, pack) {
+  if (pack === "es" && LEVEL_INSTRUCTIONS_ES[level]) {
+    return LEVEL_INSTRUCTIONS_ES[level];
+  }
+  return LEVEL_INSTRUCTIONS[level] || LEVEL_INSTRUCTIONS.B1;
+}
 
 /* ── CEFR level instructions ─────────────────────────────────── */
 
@@ -225,12 +255,13 @@ function wordCount(text) {
   return words ? words.length : 0;
 }
 
-function getLengthOutlierThresholds(length, { isOpeningTurn = false } = {}) {
+function getLengthOutlierThresholds(length, { isOpeningTurn = false, pack = "en" } = {}) {
   const l = normalizeLength(length);
 
   // v3.31 — tightened from 150 → 135 to match medium's ~18% reduction at ~10% scale
   if (l === "extended") {
-    return { maxSentences: 6, maxWords: 135 };
+    const en = { maxSentences: 6, maxWords: 135 };
+    return (pack === "es" && LENGTH_OUTLIER_EXTENDED_ES) ? LENGTH_OUTLIER_EXTENDED_ES : en;
   }
 
   // v3.31 — opening caps tightened (medium 45→35 most aggressive; others ~10%)
@@ -249,7 +280,11 @@ function getLengthOutlierThresholds(length, { isOpeningTurn = false } = {}) {
     long:   { maxSentences: 5, maxWords: 85 },
   };
 
-  return (isOpeningTurn ? openingMap : normalMap)[l] || normalMap.medium;
+  const enChoice = (isOpeningTurn ? openingMap : normalMap)[l] || normalMap.medium;
+
+  if (pack !== "es") return enChoice;
+  const esMap = isOpeningTurn ? LENGTH_OUTLIER_OPENING_ES : LENGTH_OUTLIER_NORMAL_ES;
+  return (esMap && esMap[l]) || enChoice;
 }
 
 function isLengthOutlier(text, length, opts = {}) {
@@ -257,13 +292,13 @@ function isLengthOutlier(text, length, opts = {}) {
   return sentenceCount(text) > maxSentences || wordCount(text) > maxWords;
 }
 
-function buildLengthRepairPrompt(scenario, knobs, { isOpeningTurn = false } = {}) {
+function buildLengthRepairPrompt(scenario, knobs, { isOpeningTurn = false, pack = "en" } = {}) {
   const level = knobs?.level || "B1";
   const length = normalizeLength(knobs?.length || "medium");
 
-  const levelBlock = LEVEL_INSTRUCTIONS[level] || LEVEL_INSTRUCTIONS.B1;
+  const levelBlock = selectLevelInstructions(level, pack);
   const toneBlock = buildToneBlock(knobs);
-  const lengthBlock = LENGTH_INSTRUCTIONS[length] || LENGTH_INSTRUCTIONS.medium;
+  const lengthBlock = selectLengthInstructions(length, pack);
 
   const otherRole = scenario?.otherRole;
   const aiCharDesc =
@@ -306,16 +341,17 @@ async function maybeRepairAssistantLength({
   knobs,
   assistant,
   isOpeningTurn,
+  pack = "en",
 }) {
   const original = String(assistant || "").trim();
   if (!original) return "";
 
-  if (!isLengthOutlier(original, knobs?.length, { isOpeningTurn })) {
+  if (!isLengthOutlier(original, knobs?.length, { isOpeningTurn, pack })) {
     return original;
   }
 
   try {
-    const repairSys = buildLengthRepairPrompt(scenario, knobs, { isOpeningTurn });
+    const repairSys = buildLengthRepairPrompt(scenario, knobs, { isOpeningTurn, pack });
 
     const rsp = await openai.chat.completions.create({
       model,
@@ -341,15 +377,15 @@ async function maybeRepairAssistantLength({
 
 /* ── Build the system prompt ─────────────────────────────────── */
 
-function buildSystemPrompt(scenario, knobs, messages = [], turnCount = 0) {
+function buildSystemPrompt(scenario, knobs, messages = [], turnCount = 0, pack = "en") {
   const level = knobs?.level || "B1";
   const length = normalizeLength(knobs?.length || "medium");
 
   const role = scenario.role;
   const otherRole = scenario.otherRole;
-  const levelBlock = LEVEL_INSTRUCTIONS[level] || LEVEL_INSTRUCTIONS.B1;
+  const levelBlock = selectLevelInstructions(level, pack);
   const toneBlock = buildToneBlock(knobs);
-  const lengthBlock = LENGTH_INSTRUCTIONS[length] || LENGTH_INSTRUCTIONS.medium;
+  const lengthBlock = selectLengthInstructions(length, pack);
 
   const aiCharDesc = otherRole?.npc || "A realistic character appropriate for this scenario.";
   const aiLabel = otherRole?.label || "The other character";
@@ -582,6 +618,7 @@ export default async function handler(req, res) {
     scenario = body.scenario;
     const knobs = body.knobs;
     const messages = body.messages;
+    const pack = normalizePack(body);
     if (!scenario?.title) return res.status(400).json({ error: "Missing scenario" });
 
     const { OpenAI } = await import("openai");
@@ -625,7 +662,7 @@ export default async function handler(req, res) {
       });
     }
 
-    const sys = buildSystemPrompt(scenario, knobs, trimmed, turnCount);
+    const sys = buildSystemPrompt(scenario, knobs, trimmed, turnCount, pack);
 
 const model =
       (process.env.LUX_AI_CONVO_MODEL || "").toString().trim() ||
@@ -686,6 +723,7 @@ const model =
       knobs,
       assistant: json.assistant || "",
       isOpeningTurn,
+      pack,
     });
 
     // Extract narration, imageDirection, and phase from GPT response (graceful fallback)
