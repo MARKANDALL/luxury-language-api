@@ -12,7 +12,12 @@ export function buildCoachPrompt({
   DEEP_REASONING_MODEL,
   DEEP_REASONING_EFFORT,
   historySummary,
+  pack = "en",
 }) {
+  const isEs = pack === "es";
+  const langOverride = isEs
+    ? `LANGUAGE OVERRIDE -- HIGHEST PRIORITY:\nYou must respond ONLY in Mexican Spanish (es-MX), with seseo and yeismo. Use "tu" (informal) when addressing the learner.\nAll coaching text, section titles, and explanations in your JSON response must be written in natural Mexican Spanish. Do not fall back to English except when quoting the learner's own pronunciation attempt.\nThis rule overrides any other instruction below.\n\n`
+    : "";
   const ALL_SECTIONS = [
     { emoji: "🎯", en: "Quick Coaching", min: 80, max: 120 },
     { emoji: "🔬", en: "Phoneme Profile", min: 70, max: 110 },
@@ -39,7 +44,7 @@ export function buildCoachPrompt({
     targetSections = [{ title: "QuickTip", en: "string", emoji: "⚡" }];
 
     systemPrompt = `
-${selectedPersona.role}
+${langOverride}${selectedPersona.role}
 Tone: ${selectedPersona.style}
 ${pCasing}
 
@@ -81,7 +86,7 @@ Return pure JSON ONLY:
   }
 
   systemPrompt = `
-${selectedPersona.role}
+${langOverride}${selectedPersona.role}
 Tone: ${selectedPersona.style}
 ${pCasing}
 You may receive an overallScore (0–100) with an approximate CEFR band (A1–C2).

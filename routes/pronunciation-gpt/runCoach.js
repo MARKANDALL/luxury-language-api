@@ -44,8 +44,11 @@ export async function runPronunciationCoach({
     attemptId = null,
     tipIndex = 0,
     tipCount = 3,
-    includeHistory = undefined
+    includeHistory = undefined,
+    pack = "en",
   } = reqBody || {};
+
+  const packNorm = typeof pack === "string" && pack.trim().toLowerCase() === "es" ? "es" : "en";
 
   const universallyHard = new Set(["θ", "ð", "ɹ"]);
   const langs = {
@@ -86,6 +89,7 @@ export async function runPronunciationCoach({
     DEEP_REASONING_MODEL,
     DEEP_REASONING_EFFORT,
     historySummary,
+    pack: packNorm,
   });
 
   const targetSections = built.targetSections;
