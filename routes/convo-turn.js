@@ -1,6 +1,8 @@
 // routes/convo-turn.js
 // Vercel/Next-style API route that validates an admin token, builds a scenario-driven system prompt, calls OpenAI chat completions, and returns an in-character reply plus 3 learner suggested replies as JSON.
 
+import { renderHearingBlock } from "../lib/hearing.js";
+
 export const config = {
   api: { bodyParser: true, externalResolver: true },
   maxDuration: 30,
@@ -579,6 +581,7 @@ export default async function handler(req, res) {
   let scenario;
   try {
     const body = req.body || {};
+    const hearing = body.hearing || null;
     scenario = body.scenario;
     const knobs = body.knobs;
     const messages = body.messages;
@@ -643,6 +646,13 @@ const model =
     const postHistory = aiAnchor
       ? [{ role: "system", content: `REMINDER: ${aiAnchor}` }]
       : [];
+
+    // Swing 1 — private hearing stage direction. Gated on body.hearing, which
+    // only the Ear-wired frontend sends; absent by default so existing clients
+    // produce byte-identical messages. SLIDE directives render to null (inject
+    // nothing); only non-SLIDE turns push a system message into postHistory.
+    const hearingMsg = hearing ? renderHearingBlock(hearing, { register: "neutral" }) : null;
+    if (hearingMsg) postHistory.push({ role: "system", content: hearingMsg });
 
     const rsp = await openai.chat.completions.create({
       model,
