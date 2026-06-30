@@ -78,6 +78,7 @@ export default async function handler(req, res) {
       ReferenceText: referenceText,
       GradingSystem: "HundredMark",
       Granularity: "Phoneme",
+      NBestPhonemeCount: 3,
       Dimension: "Comprehensive",
       EnableMiscue: true,
       Language: "en-US",
