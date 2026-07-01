@@ -581,6 +581,7 @@ export default async function handler(req, res) {
   let scenario;
   try {
     const body = req.body || {};
+    const hearingBlock = (body.hearingBlock || "").toString().trim();
     const hearing = body.hearing || null;
     scenario = body.scenario;
     const knobs = body.knobs;
@@ -643,9 +644,10 @@ const model =
     // Per SillyTavern research, post-history instructions carry stronger weight
     // than pre-history instructions for maintaining character consistency.
     const aiAnchor = scenario?.otherRole?.npcAnchor || "";
-    const postHistory = aiAnchor
-      ? [{ role: "system", content: `REMINDER: ${aiAnchor}` }]
-      : [];
+    const postHistory = [
+      aiAnchor ? { role: "system", content: `REMINDER: ${aiAnchor}` } : null,
+      hearingBlock ? { role: "system", content: hearingBlock } : null,
+    ].filter(Boolean);
 
     // Swing 1 — private hearing stage direction. Gated on body.hearing, which
     // only the Ear-wired frontend sends; absent by default so existing clients
