@@ -652,6 +652,7 @@ const model =
     // produce byte-identical messages. SLIDE directives render to null (inject
     // nothing); only non-SLIDE turns push a system message into postHistory.
     const hearingMsg = hearing ? renderHearingBlock(hearing, { register: "neutral" }) : null;
+    console.log(`[hearing] action=${hearing?.action || "none"} bucket=${hearing?.bucket || ""} omission=${hearing?.omission?.slot || ""} rendered=${!!hearingMsg}`);
     if (hearingMsg) postHistory.push({ role: "system", content: hearingMsg });
 
     const rsp = await openai.chat.completions.create({
