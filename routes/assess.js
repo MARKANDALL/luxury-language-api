@@ -132,16 +132,7 @@ export default async function handler(req, res) {
     console.error("[/api/assess] error:", e);
     return res.status(500).json({ error: "Server error", details: String(e?.message || e) });
   } finally {
-    // cleanup temp files
-    if (outputPath) {
-try { await fs.rm(outputPath, { force: true }); }
-      catch (err) { console.warn("[/api/assess] cleanup: failed to remove outputPath", err); }
-     }
-     if (inputPath) {    }
-    if (inputPath) {
-try { await fs.rm(outputPath, { force: true }); }
-      catch (err) { console.warn("[/api/assess] cleanup: failed to remove outputPath", err); }
-     }
-     if (inputPath) {    }
+    if (outputPath) { try { await fs.rm(outputPath, { force: true }); } catch (err) { console.warn("[/api/assess] cleanup outputPath", err); } }
+    if (inputPath)  { try { await fs.rm(inputPath,  { force: true }); } catch (err) { console.warn("[/api/assess] cleanup inputPath", err); } }
   }
 }

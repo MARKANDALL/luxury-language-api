@@ -709,6 +709,14 @@ const model =
     const imageDirection = json.imageDirection && json.imageDirection !== "null" ? json.imageDirection : null;
     const phase = json.phase || (isOpeningTurn ? "opening" : "active");
 
+    let sr = Array.isArray(json.suggested_replies)
+      ? json.suggested_replies.filter(s => typeof s === "string" && s.trim()).slice(0, 3)
+      : [];
+    const pad = (phase === "closing" || phase === "winding_down")
+      ? ["Thanks, that is all.", "Sounds good, thank you.", "Take care!"]
+      : ["Okay.", "Sounds good.", "Thank you."];
+    while (sr.length < 3) sr.push(pad[sr.length]);
+
     return res.status(200).json({
       ok: true,
       model,
@@ -716,7 +724,7 @@ const model =
       narration: narration || null,
       imageDirection: imageDirection || null,
       phase,
-      suggested_replies: Array.isArray(json.suggested_replies) ? json.suggested_replies : [],
+      suggested_replies: sr,
     });
 
   } catch (err) {
