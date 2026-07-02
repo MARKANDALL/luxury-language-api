@@ -28,6 +28,7 @@ import updateAttempt from "../routes/update-attempt.js";
 import userRecent from "../routes/user-recent.js";
 import voiceClone from "../routes/voice-clone.js";
 import voiceMirror from "../routes/voice-mirror.js";
+import wordInfo from "../routes/word-info.js";
 
 function getHeader(req, name) {
   const h = req?.headers;
@@ -164,6 +165,7 @@ const ROUTES = {
   "user-recent": userRecent,
   "voice-clone": voiceClone,
   "voice-mirror": voiceMirror,
+  "word-info": wordInfo,
 };
 
 async function hydrateJsonBodyIfNeeded(req, res) {
@@ -260,6 +262,7 @@ const ADMIN_ONLY = new Set([
   "realtime/webrtc/session",
   "voice-clone",
   "voice-mirror",
+  "word-info",
 ]);
 
     if (ADMIN_ONLY.has(route) && !isAdminRequest(req, u)) {
@@ -293,7 +296,7 @@ const ADMIN_ONLY = new Set([
     console.error(`[router] requestId=${requestId}`, err);
     if (!res.headersSent) {
       res.statusCode = 500;
-      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
       res.end(JSON.stringify({ ok: false, error: "internal_error", requestId }));
     }
   }
