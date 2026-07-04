@@ -36,12 +36,28 @@ export function safeXml(s = "") {
     .replace(/'/g, "&apos;");
 }
 
-export function baseSpeakTag({ voice, inner, withMstts = false }) {
+// Derive the xml:lang locale for the SSML from the Azure voice name (e.g.
+// "es-MX-DaliaNeural" → "es-MX"). Every English voice stays pinned to en-US so the
+// English TTS path is byte-identical to today; only a non-English (es-MX flip) voice
+// adopts its own locale. Unparseable / missing voice → null (caller falls back).
+export function localeFromVoice(voice) {
+  const m = /^([a-z]{2}-[A-Z]{2})-/.exec(String(voice || ""));
+  if (!m) return null;
+  const loc = m[1];
+  if (loc.startsWith("en-")) return "en-US";
+  return loc;
+}
+
+export function baseSpeakTag({ voice, inner, withMstts = false, lang }) {
+  // xml:lang: explicit `lang` wins; otherwise derive from the voice; default en-US.
+  // English voices always resolve to en-US, so pack=en output is unchanged. The
+  // es-MX flip works because the frontend sends an es-MX voice for Spanish.
+  const xmlLang = lang || localeFromVoice(voice) || "en-US";
   // Put mstts on <speak> for max compatibility; keep xml:lang on both speak & voice
   const ns = withMstts
-    ? `xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="en-US"`
-    : `xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US"`;
-  return `<speak version="1.0" ${ns}><voice name="${voice}" xml:lang="en-US">${inner}</voice></speak>`;
+    ? `xmlns="http://www.w3.org/2001/10/synthesis" xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="${xmlLang}"`
+    : `xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${xmlLang}"`;
+  return `<speak version="1.0" ${ns}><voice name="${voice}" xml:lang="${xmlLang}">${inner}</voice></speak>`;
 }
 
 // helper to build inner XML for a given style/role combo

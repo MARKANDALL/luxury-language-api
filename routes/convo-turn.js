@@ -723,9 +723,18 @@ const model =
     let sr = Array.isArray(json.suggested_replies)
       ? json.suggested_replies.filter(s => typeof s === "string" && s.trim()).slice(0, 3)
       : [];
-    const pad = (phase === "closing" || phase === "winding_down")
-      ? ["Thanks, that is all.", "Sounds good, thank you.", "Take care!"]
-      : ["Okay.", "Sounds good.", "Thank you."];
+    // Last-resort filler when the model returns fewer than 3 suggested_replies.
+    // The per-turn replies themselves are LLM-generated (json.suggested_replies) and
+    // already Spanish under pack:"es" via buildSystemPrompt's LANGUAGE block; keep this
+    // fallback in the same language so es turns don't leak English buttons when the
+    // model bounces. pack absent / "en" → byte-identical to today.
+    const pad = pack === "es"
+      ? ((phase === "closing" || phase === "winding_down")
+          ? ["Gracias, es todo.", "Muy bien, gracias.", "¡Que te vaya bien!"]
+          : ["Está bien.", "Me parece bien.", "Gracias."])
+      : ((phase === "closing" || phase === "winding_down")
+          ? ["Thanks, that is all.", "Sounds good, thank you.", "Take care!"]
+          : ["Okay.", "Sounds good.", "Thank you."]);
     while (sr.length < 3) sr.push(pad[sr.length]);
 
     return res.status(200).json({
