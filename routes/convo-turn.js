@@ -555,7 +555,7 @@ CRITICAL — ROLE CHECK: You are "${aiLabel}". The suggested replies are NOT thi
 - All 3 must be from "${learnerLabel}"'s perspective — responses directed AT your character ("${aiLabel}").
 - Each reply must be a direct, logical follow-up to what YOUR CHARACTER ("${aiLabel}") just said. Read your own last line. The replies should respond to THAT line specifically.
 - If your character just asked a question, the replies should answer or engage with that question.
-- If your character just expressed confusion about non-English input, the replies should acknowledge the confusion (e.g., apologize, rephrase, switch back to English) — NOT answer the original non-English question.
+${isEs ? `- If your character just expressed confusion about non-Spanish input, the replies should acknowledge the confusion (e.g., apologize, rephrase, switch back to Spanish) — NOT answer the original non-Spanish question.` : `- If your character just expressed confusion about non-English input, the replies should acknowledge the confusion (e.g., apologize, rephrase, switch back to English) — NOT answer the original non-English question.`}
 - If "${learnerLabel}" just said something aggressive or bizarre and your character reacted, the replies should reflect how "${learnerLabel}" might respond to your reaction — NOT continue as if nothing happened.
 - All must be short, ordinary spoken responses "${learnerLabel}" would realistically say out loud.
 - When "${learnerLabel}" has just committed to an action (telling a joke, giving directions, explaining something), the suggested replies must be attempts at that action — not requests for the other person to do it.
