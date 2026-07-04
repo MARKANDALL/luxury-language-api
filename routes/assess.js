@@ -49,6 +49,14 @@ export default async function handler(req, res) {
     let referenceText = pickFirst(fields?.text);
     referenceText = typeof referenceText === "string" ? referenceText.trim() : "";
 
+    // es-MX flip: honor a pack/locale multipart field if the frontend sends one.
+    // Absent → en-US (byte-identical to today). pack:"es" or locale starting
+    // with "es" → es-MX so Azure returns Spanish phonemes automatically.
+    const packField = (pickFirst(fields?.pack) || "").toString().trim().toLowerCase();
+    const localeField = (pickFirst(fields?.locale) || "").toString().trim().toLowerCase();
+    const assessLang =
+      packField === "es" || localeField.startsWith("es") ? "es-MX" : "en-US";
+
     const audioFile = files?.audio?.[0] || files?.audio;
     inputPath = audioFile?.filepath || audioFile?.path || null;
     const size = Number(audioFile?.size ?? 0);
@@ -81,13 +89,13 @@ export default async function handler(req, res) {
       NBestPhonemeCount: 3,
       Dimension: "Comprehensive",
       EnableMiscue: true,
-      Language: "en-US",
+      Language: assessLang,
       ...(enableProsody && { EnableProsodyAssessment: true }),
     };
 
     const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "utf8").toString("base64");
 
-    const endpoint = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed`;
+    const endpoint = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${assessLang}&format=detailed`;
 
     const azureRes = await fetch(endpoint, {
       method: "POST",
