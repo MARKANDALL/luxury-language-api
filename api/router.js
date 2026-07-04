@@ -120,6 +120,7 @@ const pronunciationGpt = lazyRoute(
 const expensesMigrate = lazyRoute(() => import("../routes/expenses-migrate.js"), "routes/expenses-migrate");
 const expensesSummary = lazyRoute(() => import("../routes/expenses-summary.js"), "routes/expenses-summary");
 const expensesManual = lazyRoute(() => import("../routes/expenses-manual.js"), "routes/expenses-manual");
+const expensesRefresh = lazyRoute(() => import("../routes/expenses-refresh.js"), "routes/expenses-refresh");
 
 // Dev/proxy sanity check endpoint:
 // GET /api/ping   -> { ok: true, ... }
@@ -167,6 +168,7 @@ const ROUTES = {
   "admin/expenses/migrate": expensesMigrate,
   "admin/expenses/summary": expensesSummary,
   "admin/expenses/manual": expensesManual,
+  "admin/expenses/refresh": expensesRefresh,
   "pronunciation-gpt": pronunciationGpt,
   "realtime/webrtc/session": realtimeWebrtcSession,
   tts,
