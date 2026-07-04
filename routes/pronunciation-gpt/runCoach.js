@@ -55,9 +55,11 @@ export async function runPronunciationCoach({
   const isEs = String(pack).trim().toLowerCase() === "es";
 
   // "Universally hard" phonemes toggle a reassurance flag for the coach. English
-  // set is th/th/r; Spanish learners struggle with the trill/tap and jota family.
+  // set is th/th/r; for Spanish learners the notoriously hard ones are the trill
+  // /r/, the tap /ɾ/, and the jota /x/ — all phonemic in Mexican Spanish. (/ʎ/ is
+  // excluded: yeísmo means it is not phonemic in es-MX, so Azure never returns it.)
   const universallyHard = isEs
-    ? new Set(["r", "ɾ", "x", "ʎ", "ɲ"])
+    ? new Set(["r", "ɾ", "x"])
     : new Set(["θ", "ð", "ɹ"]);
   const langs = {
     es: "Spanish", fr: "French", pt: "Portuguese", zh: "Chinese",
