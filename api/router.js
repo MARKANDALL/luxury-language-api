@@ -45,6 +45,14 @@ function normToken(v) {
   return s.replace(/^["'](.*?)["']$/, "$1").trim();
 }
 
+// Constant-time, length-independent secret comparison (compare SHA-256 digests
+// so a byte-by-byte timing side-channel can't leak the token length or value).
+function secretsMatch(a, b) {
+  const da = crypto.createHash("sha256").update(String(a || ""), "utf8").digest();
+  const db = crypto.createHash("sha256").update(String(b || ""), "utf8").digest();
+  return crypto.timingSafeEqual(da, db);
+}
+
 function isAdminRequest(req, u) {
   const token = normToken(
     getHeader(req, "x-admin-token") ||
@@ -54,7 +62,7 @@ function isAdminRequest(req, u) {
   const expected = normToken(process.env.ADMIN_TOKEN);
 
   if (!expected) return false;
-  return token && token === expected;
+  return !!token && secretsMatch(token, expected);
 }
 
 function mkReqId(req) {
@@ -115,6 +123,13 @@ const pronunciationGpt = lazyRoute(
   "routes/pronunciation-gpt"
 );
 
+// Expense dashboard (admin-only; self-gated inside each route). Lazy-loaded so
+// a bad import (pg / supabase / a vendor fetcher) can't take down the router.
+const expensesMigrate = lazyRoute(() => import("../routes/expenses-migrate.js"), "routes/expenses-migrate");
+const expensesSummary = lazyRoute(() => import("../routes/expenses-summary.js"), "routes/expenses-summary");
+const expensesManual = lazyRoute(() => import("../routes/expenses-manual.js"), "routes/expenses-manual");
+const expensesRefresh = lazyRoute(() => import("../routes/expenses-refresh.js"), "routes/expenses-refresh");
+
 // Dev/proxy sanity check endpoint:
 // GET /api/ping   -> { ok: true, ... }
 // GET /api/health -> alias of /api/ping
@@ -158,6 +173,10 @@ const ROUTES = {
   "convo-turn": convoTurn,
   evaluate,
   migrate,
+  "admin/expenses/migrate": expensesMigrate,
+  "admin/expenses/summary": expensesSummary,
+  "admin/expenses/manual": expensesManual,
+  "admin/expenses/refresh": expensesRefresh,
   "pronunciation-gpt": pronunciationGpt,
   "realtime/webrtc/session": realtimeWebrtcSession,
   tts,
