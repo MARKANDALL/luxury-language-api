@@ -6,7 +6,7 @@
 // Phase F: Structured Output + Personas + Hybrid Models (4o Logic / Mini Translation)
 // STATUS: Complete (All helpers + Chunking + Personas restored)
 
-import { PERSONAS, DRILL_CASING_GUARDRAILS } from './pronunciation-gpt/personas.js';
+import { PERSONAS, PERSONAS_ES, DRILL_CASING_GUARDRAILS } from './pronunciation-gpt/personas.js';
 import { forceJson, parseJsonWithRepair } from './pronunciation-gpt/json.js';
 import {
   safeNum,
@@ -81,6 +81,7 @@ const TRANSLATE_MODEL = process.env.LUX_AI_TRANSLATE_MODEL || "gpt-4.1-mini";
       TRANSLATE_MODEL,
 
       PERSONAS,
+      PERSONAS_ES,
       DRILL_CASING_GUARDRAILS,
       forceJson,
       parseJsonWithRepair,
