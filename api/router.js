@@ -45,6 +45,14 @@ function normToken(v) {
   return s.replace(/^["'](.*?)["']$/, "$1").trim();
 }
 
+// Constant-time, length-independent secret comparison (compare SHA-256 digests
+// so a byte-by-byte timing side-channel can't leak the token length or value).
+function secretsMatch(a, b) {
+  const da = crypto.createHash("sha256").update(String(a || ""), "utf8").digest();
+  const db = crypto.createHash("sha256").update(String(b || ""), "utf8").digest();
+  return crypto.timingSafeEqual(da, db);
+}
+
 function isAdminRequest(req, u) {
   const token = normToken(
     getHeader(req, "x-admin-token") ||
@@ -54,7 +62,7 @@ function isAdminRequest(req, u) {
   const expected = normToken(process.env.ADMIN_TOKEN);
 
   if (!expected) return false;
-  return token && token === expected;
+  return !!token && secretsMatch(token, expected);
 }
 
 function mkReqId(req) {

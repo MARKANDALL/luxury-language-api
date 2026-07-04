@@ -32,7 +32,15 @@ export default async function handler(req, res) {
 
   if (!slug) return sendJson(res, 400, { ok: false, error: "missing_slug" });
 
-  const amt = Number(body.amount_usd ?? body.amount);
+  // Accept only a real number or a non-empty numeric string. Guards against
+  // Number("")===0, Number([])===0, Number(true)===1 slipping through as bogus.
+  const rawAmt = body.amount_usd ?? body.amount;
+  const numericString =
+    typeof rawAmt === "string" && rawAmt.trim() !== "" && Number.isFinite(Number(rawAmt));
+  if (typeof rawAmt !== "number" && !numericString) {
+    return sendJson(res, 400, { ok: false, error: "invalid_amount" });
+  }
+  const amt = Number(rawAmt);
   if (!Number.isFinite(amt)) return sendJson(res, 400, { ok: false, error: "invalid_amount" });
 
   // Resolve the period.

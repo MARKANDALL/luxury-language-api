@@ -53,6 +53,13 @@ create table if not exists public.expense_events (
 create index if not exists idx_expense_events_date
   on public.expense_events (event_date desc);
 
+-- Greatest-n-per-group helper: exactly one row (the newest snapshot) per source,
+-- so the summary reads latest-per-source without scanning/capping the whole table.
+create or replace view public.expense_latest_snapshots as
+  select distinct on (source_id) *
+  from public.expense_snapshots
+  order by source_id, fetched_at desc, id desc;
+
 -- ========================= SEED: sources =========================
 insert into public.expense_sources
   (slug, display_name, category, billing_shape, fetch_mode, vendor_url, active, notes)

@@ -75,11 +75,13 @@ export default async function handler(req, res) {
     }
 
     const okCount = results.filter((r) => r.ok).length;
+    const skippedCount = results.filter((r) => !r.ok && r.skipped).length;
+    const failedCount = results.filter((r) => !r.ok && !r.skipped).length;
     return sendJson(res, 200, {
       ok: true,
       triggered_by: triggeredBy,
       ran_at: new Date().toISOString(),
-      counts: { total: autoSources.length, ok: okCount, failed: autoSources.length - okCount },
+      counts: { total: autoSources.length, ok: okCount, skipped: skippedCount, failed: failedCount },
       results,
     });
   } catch (err) {
