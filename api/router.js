@@ -118,6 +118,8 @@ const pronunciationGpt = lazyRoute(
 // Expense dashboard (admin-only; self-gated inside each route). Lazy-loaded so
 // a bad import (pg / supabase / a vendor fetcher) can't take down the router.
 const expensesMigrate = lazyRoute(() => import("../routes/expenses-migrate.js"), "routes/expenses-migrate");
+const expensesSummary = lazyRoute(() => import("../routes/expenses-summary.js"), "routes/expenses-summary");
+const expensesManual = lazyRoute(() => import("../routes/expenses-manual.js"), "routes/expenses-manual");
 
 // Dev/proxy sanity check endpoint:
 // GET /api/ping   -> { ok: true, ... }
@@ -163,6 +165,8 @@ const ROUTES = {
   evaluate,
   migrate,
   "admin/expenses/migrate": expensesMigrate,
+  "admin/expenses/summary": expensesSummary,
+  "admin/expenses/manual": expensesManual,
   "pronunciation-gpt": pronunciationGpt,
   "realtime/webrtc/session": realtimeWebrtcSession,
   tts,
