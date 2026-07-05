@@ -14,6 +14,12 @@ export default async function handler(req, res) {
   const uid = body.uid || body.userId || null;
   const targetText = (body.targetText || body.text || '').trim();
 
+  // es-MX flip: honor the frontend's pack field. Absent / !== "es" → English,
+  // byte-identical to today. Under "es" the Spanish targetText drives Spanish
+  // output via multilingual_v2 (see lib/voice.js synthesizeSpeech). Mirrors the
+  // pack gating in routes/convo-turn.js.
+  const pack = (body.pack || '').toString().trim().toLowerCase() === 'es' ? 'es' : 'en';
+
   if (!uid) return res.status(400).json({ ok: false, error: 'missing uid' });
   if (!targetText) return res.status(400).json({ ok: false, error: 'missing targetText' });
 
@@ -46,6 +52,7 @@ export default async function handler(req, res) {
     const audioBuffer = await synthesizeSpeech({
       voiceId: profile.voice_id,
       text: targetText,
+      pack,
     });
 
     // Update last_used_at (fire-and-forget; log failures but don't block response)
