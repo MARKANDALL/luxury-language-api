@@ -13,10 +13,51 @@ export default async function handler(req, res) {
   const uid = body.uid || body.userId || null;
   const supabase = getSupabaseAdmin();
 
+  // es-MX flip: honor the frontend's pack field. Absent / !== "es" → English,
+  // byte-identical to today. Under "es" we tag the clone lang="es" (built from the
+  // Spanish calibration reads) and report it via `status`, so the frontend can
+  // prompt a Spanish re-calibration instead of silently reusing an English clone.
+  // All `lang` reads/writes below are gated on pack==="es" and are migration-
+  // tolerant, so the English path never depends on the `lang` column.
+  const pack = (body.pack || '').toString().trim().toLowerCase() === 'es' ? 'es' : 'en';
+
   // ── STATUS: check if user has a voice profile ────────────────────────
   if (body.action === 'status') {
     if (!uid) return res.status(400).json({ ok: false, error: 'missing uid' });
 
+    // es: also report the clone's calibration language so the frontend knows
+    // whether the existing clone was built from Spanish reads. Falls back to the
+    // base columns if the `lang` column hasn't been migrated yet.
+    if (pack === 'es') {
+      let { data: profile } = await supabase
+        .from('voice_profiles')
+        .select('voice_id, provider, created_at, last_used_at, lang')
+        .eq('uid', uid)
+        .eq('status', 'active')
+        .maybeSingle();
+
+      if (!profile) {
+        ({ data: profile } = await supabase
+          .from('voice_profiles')
+          .select('voice_id, provider, created_at, last_used_at')
+          .eq('uid', uid)
+          .eq('status', 'active')
+          .maybeSingle());
+      }
+
+      return res.status(200).json({
+        ok: true,
+        hasProfile: !!profile,
+        ...(profile && {
+          voiceId: profile.voice_id,
+          provider: profile.provider,
+          createdAt: profile.created_at,
+          lang: profile.lang || 'en',
+        }),
+      });
+    }
+
+    // en / absent: byte-identical to today.
     const { data: profile } = await supabase
       .from('voice_profiles')
       .select('voice_id, provider, created_at, last_used_at')
@@ -135,15 +176,33 @@ export default async function handler(req, res) {
       });
     }
 
-    const { error: dbErr } = await supabase.from('voice_profiles').upsert({
+    const now = new Date().toISOString();
+    const baseRow = {
       uid,
       voice_id: voiceId,
       provider: 'elevenlabs',
       user_name: userName,
-      created_at: new Date().toISOString(),
-      last_used_at: new Date().toISOString(),
+      created_at: now,
+      last_used_at: now,
       status: 'active',
-    });
+    };
+
+    let dbErr;
+    if (pack === 'es') {
+      // Tag the Spanish-calibrated clone. If the `lang` column isn't migrated
+      // yet the upsert errors; retry without it so the profile still saves and
+      // playback still works (multilingual_v2 speaks Spanish regardless).
+      ({ error: dbErr } = await supabase
+        .from('voice_profiles')
+        .upsert({ ...baseRow, lang: 'es' }));
+      if (dbErr) {
+        console.warn('[voice-clone] es lang-tagged upsert failed; retrying without lang:', dbErr.message);
+        ({ error: dbErr } = await supabase.from('voice_profiles').upsert(baseRow));
+      }
+    } else {
+      // en / absent: byte-identical to today.
+      ({ error: dbErr } = await supabase.from('voice_profiles').upsert(baseRow));
+    }
 
     if (dbErr) console.error('[voice-clone] Supabase insert error:', dbErr);
 
