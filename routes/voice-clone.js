@@ -176,35 +176,38 @@ export default async function handler(req, res) {
       });
     }
 
-    const now = new Date().toISOString();
-    const baseRow = {
+    // Persist the profile. This upsert is byte-identical to the pre-change write
+    // for EVERY path (en and es) — same fields, order, and the two independent
+    // timestamp calls. Under es we then best-effort tag lang="es" as a SEPARATE
+    // update, so profile persistence is never at risk if the `lang` column isn't
+    // deployed yet: the clone still saves and plays (multilingual_v2 speaks
+    // Spanish regardless), and a later re-calibration re-tags it.
+    const { error: dbErr } = await supabase.from('voice_profiles').upsert({
       uid,
       voice_id: voiceId,
       provider: 'elevenlabs',
       user_name: userName,
-      created_at: now,
-      last_used_at: now,
+      created_at: new Date().toISOString(),
+      last_used_at: new Date().toISOString(),
       status: 'active',
-    };
-
-    let dbErr;
-    if (pack === 'es') {
-      // Tag the Spanish-calibrated clone. If the `lang` column isn't migrated
-      // yet the upsert errors; retry without it so the profile still saves and
-      // playback still works (multilingual_v2 speaks Spanish regardless).
-      ({ error: dbErr } = await supabase
-        .from('voice_profiles')
-        .upsert({ ...baseRow, lang: 'es' }));
-      if (dbErr) {
-        console.warn('[voice-clone] es lang-tagged upsert failed; retrying without lang:', dbErr.message);
-        ({ error: dbErr } = await supabase.from('voice_profiles').upsert(baseRow));
-      }
-    } else {
-      // en / absent: byte-identical to today.
-      ({ error: dbErr } = await supabase.from('voice_profiles').upsert(baseRow));
-    }
+    });
 
     if (dbErr) console.error('[voice-clone] Supabase insert error:', dbErr);
+
+    if (pack === 'es' && !dbErr) {
+      // Tag the Spanish-calibrated clone. Best-effort: a failure here (e.g. the
+      // `lang` column not migrated yet, or PostgREST schema-cache lag) leaves the
+      // clone saved but untagged (defaults to 'en'); it is NOT retried as a
+      // lang-less write, so a transient error can never mis-persist the row.
+      const { error: tagErr } = await supabase
+        .from('voice_profiles')
+        .update({ lang: 'es' })
+        .eq('uid', uid)
+        .eq('status', 'active');
+      if (tagErr) {
+        console.warn('[voice-clone] lang="es" tag failed (clone saved untagged; is 0002 migrated?):', tagErr.message);
+      }
+    }
 
     return res.status(200).json({
       ok: true,
