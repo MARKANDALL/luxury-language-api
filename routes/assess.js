@@ -1,5 +1,5 @@
-// /api/assess.js  (backend)
-import formidable from "formidable";
+// routes/assess.js (backend)
+// import formidable from "formidable";
 import fs from "fs/promises";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
@@ -49,6 +49,12 @@ export default async function handler(req, res) {
     let referenceText = pickFirst(fields?.text);
     referenceText = typeof referenceText === "string" ? referenceText.trim() : "";
 
+    // Assessment TARGET language is set by the active pack (sent by the
+    // frontend). es -> es-MX, everything else -> en-US (unchanged default).
+    // This is separate from firstLang (the learner's L1, used for coaching).
+    const pack = pickFirst(fields?.pack);
+    const assessLocale = pack === "es" ? "es-MX" : "en-US";
+
     const audioFile = files?.audio?.[0] || files?.audio;
     inputPath = audioFile?.filepath || audioFile?.path || null;
     const size = Number(audioFile?.size ?? 0);
@@ -81,13 +87,13 @@ export default async function handler(req, res) {
       NBestPhonemeCount: 3,
       Dimension: "Comprehensive",
       EnableMiscue: true,
-      Language: "en-US",
+      Language: assessLocale,
       ...(enableProsody && { EnableProsodyAssessment: true }),
     };
 
     const pronAssessmentHeader = Buffer.from(JSON.stringify(pronAssessmentParams), "utf8").toString("base64");
 
-    const endpoint = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US&format=detailed`;
+    const endpoint = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${assessLocale}&format=detailed`;
 
     const azureRes = await fetch(endpoint, {
       method: "POST",
