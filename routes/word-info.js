@@ -7,13 +7,15 @@
 // gpt-4.1-mini), same json_object + jsonrepair parsing.
 //
 // Contract:
-//   POST { word, sentence, lang, l1, level, uid }
+//   POST { word, sentence, lang, l1, level, uid, surface }
 //   ->   { ok: true, cached: boolean, card: {
 //           word, unit, pos, ipa, def, example, l1Translation,
 //           tag: { cefr, freq } } }
 //
 // Cache: table word_cards, keyed (lang, l1, level, word, sentence_hash).
-// Analytics: table word_taps, one row per tap (fire-and-forget).
+// Analytics: table word_taps, one row per tap (fire-and-forget). Each tap is
+//   tagged with the Word Motor SURFACE it came from (whitelisted, default
+//   "convo-ai") so tap analytics can be sliced per surface.
 // Both degrade gracefully if Supabase env is missing.
 
 import crypto from "node:crypto";
@@ -27,6 +29,22 @@ export const config = {
 
 const FREQ_VALUES = new Set(["very common", "common", "less common", "rare"]);
 const CEFR_VALUES = new Set(["A1", "A2", "B1", "B2", "C1", "C2"]);
+
+// Word Motor tap surfaces. Only these are logged; anything else falls back to
+// "convo-ai". Kept in sync with features/word-motor/motor-adapters.js on the
+// frontend (Wave 1 sends only "convo-ai"; later waves light up the rest).
+const SURFACE_VALUES = new Set([
+  "convo-ai",
+  "convo-user",
+  "ph-hover",
+  "coach",
+  "scenario",
+  "passage",
+  "results",
+  "selfpb",
+  "stream",
+  "life",
+]);
 
 function sentenceHash(s) {
   return crypto
@@ -61,6 +79,8 @@ export default async function handler(req, res) {
   const levelRaw = (body.level || "B1").toString().trim().toUpperCase();
   const level = CEFR_VALUES.has(levelRaw) ? levelRaw : "B1";
   const uid = (body.uid || "").toString().trim().slice(0, 80);
+  const surfaceRaw = (body.surface || "convo-ai").toString().trim();
+  const surface = SURFACE_VALUES.has(surfaceRaw) ? surfaceRaw : "convo-ai";
 
   if (!word) {
     return res.status(400).json({ ok: false, error: "bad_request", detail: "word required" });
@@ -80,7 +100,7 @@ export default async function handler(req, res) {
   // 4a) Tap analytics — fire and forget, before anything can fail
   if (sb) {
     sb.from("word_taps")
-      .insert({ uid, word, lang, l1, level, sentence_hash: sHash })
+      .insert({ uid, word, lang, l1, level, sentence_hash: sHash, surface })
       .then(() => {})
       .catch((e) => console.warn("[word-info] tap log failed", e?.message || e));
   }
