@@ -40,6 +40,9 @@ export default async function handler(req, res) {
 
   // 4) Validate input
   const body = req.body || {};
+  // es-MX flip: honor the frontend's pack field. Absent / !== "es" → English
+  // (byte-identical to today). pack:"es" → Spanish explanations for Spanish words.
+  const isEs = (body.pack || "").toString().trim().toLowerCase() === "es";
   const word = (body.word || "").toString().trim().slice(0, 80);
   const sentence = (body.sentence || "").toString().trim().slice(0, 280);
   const pronsIn = Array.isArray(body.prons) ? body.prons : [];
@@ -57,7 +60,30 @@ export default async function handler(req, res) {
   }
 
   // 5) Prompt (strictly short, aligned to prons)
-  const system = `
+  const system = (isEs ? `
+You generate ultra-short meaning hints for Spanish (Mexican Spanish) words with multiple pronunciation variants.
+Write every "def", "example", and "note" value in natural Mexican Spanish.
+You will be given:
+- a target word
+- the sentence context it came from (may be empty)
+- a list of pronunciations (alts)
+
+Your job:
+Return JSON with a single key "alts" whose value is an array with EXACTLY the same length and order as the pronunciations list.
+Each element must be an object:
+- "pos": one of ["noun","verb","adjective","adverb","other","unknown"]
+- "def": a single short definition (<= 12 words)
+- "example": a single short example sentence (<= 12 words)
+Optional:
+- "note": only if needed, <= 12 words
+
+Rules:
+- If the pronunciation variants do NOT imply a meaning change (just dialect/phone variation), set pos="unknown",
+  and use def like "Mismo significado; variante de pronunciación" and a simple example with the word.
+- If context helps choose a noun vs verb sense, use it; otherwise keep it generic and honest.
+- Keep everything very short and clean.
+Output MUST be valid JSON only.
+` : `
 You generate ultra-short meaning hints for English words with multiple pronunciation variants.
 You will be given:
 - a target word
@@ -79,7 +105,7 @@ Rules:
 - If context helps choose a noun vs verb sense, use it; otherwise keep it generic and honest.
 - Keep everything very short and clean.
 Output MUST be valid JSON only.
-`.trim();
+`).trim();
 
   const user = {
     word,
@@ -125,9 +151,9 @@ Output MUST be valid JSON only.
       const example = (it.example || "").toString().trim().slice(0, 120);
       const note = (it.note || "").toString().trim().slice(0, 120);
 
-      // minimal fallback if model gave blanks
-      const safeDef = def || "Same meaning; pronunciation variant";
-      const safeEx = example || `I said "${word}" clearly.`;
+      // minimal fallback if model gave blanks (Spanish under pack:"es"; English else)
+      const safeDef = def || (isEs ? "Mismo significado; variante de pronunciación" : "Same meaning; pronunciation variant");
+      const safeEx = example || (isEs ? `Dije "${word}" claramente.` : `I said "${word}" clearly.`);
 
       const obj = { pos, def: safeDef, example: safeEx };
       if (note) obj.note = note;

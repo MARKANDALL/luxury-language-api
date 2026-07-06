@@ -14,6 +14,7 @@ export async function runPronunciationCoach({
 
   // shared helpers/modules
   PERSONAS,
+  PERSONAS_ES,
   DRILL_CASING_GUARDRAILS,
   forceJson,
   parseJsonWithRepair,
@@ -40,6 +41,8 @@ export async function runPronunciationCoach({
     chunk = 1,
     persona = "tutor",
 
+    pack = "",
+
     uid = "",
     attemptId = null,
     tipIndex = 0,
@@ -47,7 +50,17 @@ export async function runPronunciationCoach({
     includeHistory = undefined
   } = reqBody || {};
 
-  const universallyHard = new Set(["θ", "ð", "ɹ"]);
+  // es-MX flip: when pack==="es" the coach coaches Mexican Spanish pronunciation
+  // in Spanish. Absent / !== "es" → English, byte-identical to today.
+  const isEs = String(pack).trim().toLowerCase() === "es";
+
+  // "Universally hard" phonemes toggle a reassurance flag for the coach. English
+  // set is th/th/r; for Spanish learners the notoriously hard ones are the trill
+  // /r/, the tap /ɾ/, and the jota /x/ — all phonemic in Mexican Spanish. (/ʎ/ is
+  // excluded: yeísmo means it is not phonemic in es-MX, so Azure never returns it.)
+  const universallyHard = isEs
+    ? new Set(["r", "ɾ", "x"])
+    : new Set(["θ", "ð", "ɹ"]);
   const langs = {
     es: "Spanish", fr: "French", pt: "Portuguese", zh: "Chinese",
     ja: "Japanese", ko: "Korean", ar: "Arabic", ru: "Russian",
@@ -73,7 +86,8 @@ export async function runPronunciationCoach({
 
   let model = DEEP_MODEL;
 
-  const selectedPersona = PERSONAS[persona] || PERSONAS.tutor;
+  const personaSet = isEs ? (PERSONAS_ES || PERSONAS) : PERSONAS;
+  const selectedPersona = personaSet[persona] || personaSet.tutor;
 
   const built = buildCoachPrompt({
     mode,
@@ -86,6 +100,7 @@ export async function runPronunciationCoach({
     DEEP_REASONING_MODEL,
     DEEP_REASONING_EFFORT,
     historySummary,
+    isEs,
   });
 
   const targetSections = built.targetSections;
@@ -136,7 +151,7 @@ export async function runPronunciationCoach({
   }
 
   if (mode !== "simple") {
-    await translateMissing({ openai, forceJson, langs, TRANSLATE_MODEL }, finalSections, langCode);
+    await translateMissing({ openai, forceJson, langs, TRANSLATE_MODEL, isEs }, finalSections, langCode);
   }
 
   return {

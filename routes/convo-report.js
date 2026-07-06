@@ -62,13 +62,27 @@ function aggregateLowsWords(rows) {
   return out.slice(0, 10);
 }
 
-async function maybeNarrative({ stats, sampleUtterances }) {
+async function maybeNarrative({ stats, sampleUtterances, pack = "en" }) {
   if (!process.env.OPENAI_API_KEY) return null;
 
   const { OpenAI } = await import("openai");
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  const sys = `
+  // es-MX flip: write the end-of-conversation report in Mexican Spanish under
+  // pack:"es". Schema keys are unchanged; only the values are Spanish. pack absent
+  // / "en" → byte-identical to today.
+  const sys = (pack === "es" ? `
+Eres un instructor de pronunciación de español mexicano (es-MX), comprensivo y práctico.
+Escribe un reporte BREVE, alentador y accionable. Escribe TODO el contenido en español mexicano natural.
+Output JSON ONLY with:
+{
+  "overall": "1-3 sentences",
+  "strengths": ["...", "..."],
+  "focus": ["...", "...", "..."],
+  "practice_next": ["short speakable line", "short speakable line", "short speakable line"]
+}
+Evita avergonzar. Evita explicaciones largas.
+` : `
 You are a supportive, practical American English pronunciation coach.
 Write a SHORT report that is encouraging and actionable.
 Output JSON ONLY with:
@@ -79,7 +93,7 @@ Output JSON ONLY with:
   "practice_next": ["short speakable line", "short speakable line", "short speakable line"]
 }
 Avoid shaming. Avoid long explanations.
-`.trim();
+`).trim();
 
   const user = {
     stats,
@@ -128,6 +142,8 @@ export default async function handler(req, res) {
     const uid = body.uid || body.userId || null;
     const sessionId = body.sessionId || body.session_id || null;
     const passageKey = body.passageKey || body.passage_key || body.passage || null;
+    // es-MX flip: honor the frontend's pack field. Absent / !== "es" → English.
+    const pack = (body.pack || "").toString().trim().toLowerCase() === "es" ? "es" : "en";
 
     if (!uid) return res.status(400).json({ ok: false, error: "missing_uid" });
     if (!sessionId) return res.status(400).json({ ok: false, error: "missing_session_id" });
@@ -168,7 +184,7 @@ export default async function handler(req, res) {
 
     const stats = { meta, scores, lows_phonemes, lows_words };
 
-    const narrative = await maybeNarrative({ stats, sampleUtterances });
+    const narrative = await maybeNarrative({ stats, sampleUtterances, pack });
 
     return res.status(200).json({
       ok: true,

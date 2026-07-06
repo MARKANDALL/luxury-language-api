@@ -22,13 +22,13 @@ function createForm() {
 }
 
 // Util for Azure
-function recognizePronunciationFromFile(filePath, referenceText) {
+function recognizePronunciationFromFile(filePath, referenceText, recognitionLang = "en-US") {
   return new Promise((resolve, reject) => {
     const speechConfig = sdk.SpeechConfig.fromSubscription(
       process.env.AZURE_SPEECH_KEY,
       process.env.AZURE_SPEECH_REGION || process.env.AZURE_REGION
     );
-    speechConfig.speechRecognitionLanguage = "en-US";
+    speechConfig.speechRecognitionLanguage = recognitionLang;
 
     const pronConfig = new sdk.PronunciationAssessmentConfig(
       referenceText,
@@ -83,6 +83,16 @@ export default async function handler(req, res) {
       ? String(referenceTextRaw[0] || "")
       : String(referenceTextRaw || "");
 
+    // es-MX flip: honor a pack/locale multipart field if the frontend sends one.
+    // Absent → en-US (byte-identical to today). pack:"es" or locale starting with
+    // "es" → es-MX so Azure assesses against Spanish phonemes. Mirrors routes/assess.js.
+    const packRaw = data.fields?.pack;
+    const localeRaw = data.fields?.locale;
+    const packField = (Array.isArray(packRaw) ? packRaw[0] : packRaw || "").toString().trim().toLowerCase();
+    const localeField = (Array.isArray(localeRaw) ? localeRaw[0] : localeRaw || "").toString().trim().toLowerCase();
+    const recognitionLang =
+      packField === "es" || localeField.startsWith("es") ? "es-MX" : "en-US";
+
     if (!audioFile) {
       res.status(400).json({ error: "No audio file uploaded" });
       return;
@@ -94,7 +104,7 @@ export default async function handler(req, res) {
 
     let azureResultRaw;
     try {
-      azureResultRaw = await recognizePronunciationFromFile(audioFile, referenceText);
+      azureResultRaw = await recognizePronunciationFromFile(audioFile, referenceText, recognitionLang);
     } catch (err) {
       res.status(500).json({ error: "Azure Speech error: " + (err?.message || String(err)) });
       return;

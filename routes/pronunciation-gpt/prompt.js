@@ -12,7 +12,17 @@ export function buildCoachPrompt({
   DEEP_REASONING_MODEL,
   DEEP_REASONING_EFFORT,
   historySummary,
+  isEs = false,
 }) {
+  // es-MX flip: when isEs, write coaching content in Spanish and address the
+  // learner as "tú". Added once here so it applies to every persona/section.
+  // When !isEs the prompts below are byte-identical to today's English.
+  const esDirective = isEs
+    ? `\nLANGUAGE: Write ALL coaching content (every "en" field value) in natural Mexican Spanish (español mexicano). Address the learner informally as "tú" (never "usted"). You are coaching Mexican Spanish pronunciation.`
+    : "";
+  const praiseExample = isEs ? "Buen trabajo" : "Nice work";
+  const wordUnit = isEs ? "Spanish" : "EN";
+
   const ALL_SECTIONS = [
     { emoji: "🎯", en: "Quick Coaching", min: 80, max: 120 },
     { emoji: "🔬", en: "Phoneme Profile", min: 70, max: 110 },
@@ -41,7 +51,7 @@ export function buildCoachPrompt({
     systemPrompt = `
 ${selectedPersona.role}
 Tone: ${selectedPersona.style}
-${pCasing}
+${pCasing}${esDirective}
 
 Write exactly 2 to 4 sentences in ONE paragraph.
 No bullets. No markdown. No headings.
@@ -50,7 +60,7 @@ Stay under ~75 words.
 
 You are generating tip variant ${qIndex + 1}/${qCount} (kind: ${variantKind}).
 
-If overallScore is present, mention it ONCE in a compact way like: "Nice work (82% · B2) ..." (do not over-explain CEFR).
+If overallScore is present, mention it ONCE in a compact way like: "${praiseExample} (82% · B2) ..." (do not over-explain CEFR).
 Do not label individual words/phonemes with CEFR; keep CEFR macro (overall only).
 
 Return pure JSON ONLY:
@@ -69,7 +79,7 @@ Return pure JSON ONLY:
   targetSections = ALL_SECTIONS.slice(start, end);
 
   const ranges = targetSections
-    .map((s, i) => `${i + 1}. ${s.emoji} ${s.en} — ${s.min}-${s.max} EN words`)
+    .map((s, i) => `${i + 1}. ${s.emoji} ${s.en} — ${s.min}-${s.max} ${wordUnit} words`)
     .join("\n");
 
   if (DEEP_REASONING_MODEL && String(DEEP_REASONING_MODEL).trim()) {
@@ -83,9 +93,9 @@ Return pure JSON ONLY:
   systemPrompt = `
 ${selectedPersona.role}
 Tone: ${selectedPersona.style}
-${pCasing}
+${pCasing}${esDirective}
 You may receive an overallScore (0–100) with an approximate CEFR band (A1–C2).
-If overallScore is present, mention it ONCE in a compact way like: "Nice work (82% · B2) ..." (do not over-explain CEFR).
+If overallScore is present, mention it ONCE in a compact way like: "${praiseExample} (82% · B2) ..." (do not over-explain CEFR).
 Do not label individual words/phonemes with CEFR; keep CEFR macro (overall only).
 Return pure JSON exactly like: { "sections":[ {"title":"","titleL1":"","en":"","l1":""} ] }
 Follow these ${targetSections.length} sections in order:

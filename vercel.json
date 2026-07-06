@@ -3,5 +3,8 @@
     { "source": "/api/router", "destination": "/api/router" },
     { "source": "/api/:route", "destination": "/api/router?route=:route" },
     { "source": "/api/:route/:rest*", "destination": "/api/router?route=:route/:rest*" }
+  ],
+  "crons": [
+    { "path": "/api/admin/expenses/refresh", "schedule": "0 8 * * *" }
   ]
 }
