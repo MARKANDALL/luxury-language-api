@@ -19,6 +19,7 @@ import adminRecent from "../routes/admin-recent.js";
 import adminUserStats from "../routes/admin-user-stats.js";
 import attempt from "../routes/attempt.js";
 import altMeaning from "../routes/alt-meaning.js";
+import coachAsk from "../routes/coach-ask.js";
 import convoImage from "../routes/convo-image.js";
 import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
@@ -168,6 +169,7 @@ const ROUTES = {
   "alt-meaning": altMeaning,
   assess,
   attempt,
+  "coach-ask": coachAsk,
   "convo-image": convoImage,
   "convo-report": convoReport,
   "convo-turn": convoTurn,
@@ -278,6 +280,7 @@ const ADMIN_ONLY = new Set([
   "convo-turn",
   "convo-report",
   "alt-meaning",
+  "coach-ask",
   "realtime/webrtc/session",
   "voice-clone",
   "voice-mirror",
