@@ -25,6 +25,7 @@ import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
 import migrate from "../routes/migrate.js";
 import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
+import sessionAnalyst from "../routes/session-analyst.js";
 import updateAttempt from "../routes/update-attempt.js";
 import userRecent from "../routes/user-recent.js";
 import voiceClone from "../routes/voice-clone.js";
@@ -181,6 +182,7 @@ const ROUTES = {
   "admin/expenses/refresh": expensesRefresh,
   "pronunciation-gpt": pronunciationGpt,
   "realtime/webrtc/session": realtimeWebrtcSession,
+  "session-analyst": sessionAnalyst,
   tts,
   "update-attempt": updateAttempt,
   "user-recent": userRecent,
@@ -282,6 +284,7 @@ const ADMIN_ONLY = new Set([
   "alt-meaning",
   "coach-ask",
   "realtime/webrtc/session",
+  "session-analyst",
   "voice-clone",
   "voice-mirror",
   "word-info",
