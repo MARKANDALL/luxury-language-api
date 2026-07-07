@@ -97,6 +97,25 @@ export default async function handler(req, res) {
     sb = null; // env not configured; run cacheless
   }
 
+  // 4a-log) logOnly fast-path — for gloss taps answered locally by the frontend
+  // BUILTIN_GLOSS map. The tap still feeds analytics, but we skip the cache read
+  // and skip the model entirely (no cost). Admin gate + validation above still
+  // apply. The insert is awaited (not fire-and-forget) so the row lands before
+  // the serverless function can freeze after the response. Degrades gracefully
+  // when Supabase env is missing (returns ok anyway; nothing to log).
+  if (body.logOnly === true) {
+    if (sb) {
+      try {
+        await sb
+          .from("word_taps")
+          .insert({ uid, word, lang, l1, level, sentence_hash: sHash, surface });
+      } catch (e) {
+        console.warn("[word-info] logOnly tap log failed", e?.message || e);
+      }
+    }
+    return res.status(200).json({ ok: true, logged: true });
+  }
+
   // 4a) Tap analytics — fire and forget, before anything can fail
   if (sb) {
     sb.from("word_taps")
