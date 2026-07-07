@@ -29,6 +29,7 @@ import updateAttempt from "../routes/update-attempt.js";
 import userRecent from "../routes/user-recent.js";
 import voiceClone from "../routes/voice-clone.js";
 import voiceMirror from "../routes/voice-mirror.js";
+import wordHistory from "../routes/word-history.js";
 import wordInfo from "../routes/word-info.js";
 
 function getHeader(req, name) {
@@ -186,6 +187,7 @@ const ROUTES = {
   "user-recent": userRecent,
   "voice-clone": voiceClone,
   "voice-mirror": voiceMirror,
+  "word-history": wordHistory,
   "word-info": wordInfo,
 };
 
@@ -284,6 +286,7 @@ const ADMIN_ONLY = new Set([
   "realtime/webrtc/session",
   "voice-clone",
   "voice-mirror",
+  "word-history",
   "word-info",
 ]);
 

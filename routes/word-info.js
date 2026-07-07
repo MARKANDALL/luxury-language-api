@@ -54,6 +54,29 @@ function sentenceHash(s) {
     .slice(0, 16);
 }
 
+// W4-C enrichment validators. Kept small + defensive: the model output is
+// untrusted, so both fields are trimmed, whitespace-collapsed and length-capped.
+// collocations: up to 2 strings, each non-empty, at most 4 words and 40 chars.
+function sanitizeCollocations(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const item of raw) {
+    const s = String(item == null ? "" : item).trim().replace(/\s+/g, " ").slice(0, 40);
+    if (!s) continue;
+    if (s.split(" ").length > 4) continue; // enforce the "<= 4 words" cap
+    out.push(s);
+    if (out.length === 2) break; // "up to 2"
+  }
+  return out;
+}
+
+// trap: a single short L1-specific caution. Empty when no L1 is known (there is
+// nothing L1-specific to warn about) or when the model returns nothing.
+function sanitizeTrap(raw, l1) {
+  if (l1 === "universal") return "";
+  return String(raw == null ? "" : raw).trim().replace(/\s+/g, " ").slice(0, 160);
+}
+
 export default async function handler(req, res) {
   // 1) CORS
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -81,6 +104,11 @@ export default async function handler(req, res) {
   const uid = (body.uid || "").toString().trim().slice(0, 80);
   const surfaceRaw = (body.surface || "convo-ai").toString().trim();
   const surface = SURFACE_VALUES.has(surfaceRaw) ? surfaceRaw : "convo-ai";
+  // Wave 4 (W4-D): a prefetch is a speculative card warm-up for the rarest
+  // words in a new AI turn. It must NEVER write a word_taps row (the tap log is
+  // an implicit-assessment signal; prefetches would poison it). Everything else
+  // — cache read, model call, cache write — behaves exactly as a normal call.
+  const prefetch = body.prefetch === true;
 
   if (!word) {
     return res.status(400).json({ ok: false, error: "bad_request", detail: "word required" });
@@ -116,8 +144,11 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, logged: true });
   }
 
-  // 4a) Tap analytics — fire and forget, before anything can fail
-  if (sb) {
+  // 4a) Tap analytics — fire and forget, before anything can fail.
+  // W4-D: a prefetch skips this insert (and ONLY this insert); the cache read,
+  // model call, and cache write below all run normally so the tap that follows
+  // a prefetch opens instantly from the warmed cache.
+  if (sb && !prefetch) {
     sb.from("word_taps")
       .insert({ uid, word, lang, l1, level, sentence_hash: sHash, surface })
       .then(() => {})
@@ -136,7 +167,10 @@ export default async function handler(req, res) {
         .eq("word", word.toLowerCase())
         .eq("sentence_hash", sHash)
         .maybeSingle();
-      if (data?.card) {
+      // W4-C decision 5: the enriched card carries v: 2. A cached card without
+      // v === 2 is a stale (pre-enrichment) entry — treat it as a miss so we
+      // regenerate and the upsert below overwrites it. No SQL/migration needed.
+      if (data?.card && data.card.v === 2) {
         return res.status(200).json({ ok: true, cached: true, card: data.card });
       }
     } catch (e) {
@@ -183,8 +217,15 @@ Rules:
     : `a short translation of the unit into the language with code "${l1}" (the translation itself, no commentary)`}.
 - "cefr": your estimate of the unit's difficulty level ("A1".."C2").
 - "freq": one of ["very common","common","less common","rare"].
+- "collocations": up to 2 short, natural collocations of the unit (the words it
+  most often travels with), as an array of strings, each at most 4 words. Use
+  [] if none are worth showing. No definitions, just the collocations.
+- "trap": ${l1 === "universal"
+    ? 'empty string "" (no L1 is known, so no L1-specific trap).'
+    : `ONE short caution (max 16 words) specific to a learner whose first language has code "${l1}" — e.g. a false friend, or a make/do-style interference — but ONLY when a genuine trap exists for THIS unit. If there is no real trap, use empty string "".`}
 Output MUST be valid JSON only, with exactly these keys:
-{ "unit", "pos", "ipa", "def", "example", "l1Translation", "cefr", "freq" }
+{ "unit", "pos", "ipa", "def", "example", "l1Translation", "cefr", "freq",
+  "collocations", "trap" }
 `.trim();
 
   const user = { word, sentence };
@@ -232,6 +273,12 @@ Output MUST be valid JSON only, with exactly these keys:
           ? parsed.freq.toString().toLowerCase()
           : "",
       },
+      // W4-C: card data v2 — collocations + an optional L1 trap note.
+      collocations: sanitizeCollocations(parsed.collocations),
+      trap: sanitizeTrap(parsed.trap, l1),
+      // Schema version. Cache reads treat a card without v === 2 as a miss
+      // (decision 5), so this stamp is what upgrades stale entries in place.
+      v: 2,
     };
 
     if (!card.def) {
