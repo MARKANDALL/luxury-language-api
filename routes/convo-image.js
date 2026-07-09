@@ -55,7 +55,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { scenarioHidden, desc, more, roles, transcript, tone, scenarioId, roleIds, imageCount, visualHistory, imageDirection, isClosingShot, closingImageHint, imageNotes } = req.body;
+    const { scenarioHidden, desc, more, roles, transcript, tone, toneWeights, scenarioId, roleIds, imageCount, visualHistory, imageDirection, isClosingShot, closingImageHint, imageNotes } = req.body;
 
     if (!scenarioHidden || !transcript) {
       return res.status(400).json({ error: "Missing scenarioHidden or transcript" });
@@ -155,6 +155,30 @@ ${visualHistory}
 IMPORTANT: Maintain visual continuity with the above. If a bandage was applied, it should still be visible. If a document was handed over, it should be in the recipient's hands or on the surface. If a character moved to a new position, they should still be there. Do NOT revert to an earlier state of the scene.`;
     }
 
+    // ── Emotional tone → visual mood ────────────────────────────────────
+    // Weighted tones come straight from the user's tone chips (1 = light,
+    // 2 = clear, 3 = strong). They shape expression, posture, and a SUBTLE
+    // color-grade / lighting shift. Falls back to the plain tone string when
+    // no weights are supplied.
+    const WEIGHT_WORD = { 1: "a light touch of", 2: "a clear sense of", 3: "a strong, dominant sense of" };
+
+    const toneEntries = (toneWeights && typeof toneWeights === "object")
+      ? Object.entries(toneWeights).filter(([, w]) => Number(w) > 0).sort((a, b) => b[1] - a[1])
+      : [];
+
+    let toneBlock;
+    if (toneEntries.length > 0) {
+      const toneLines = toneEntries
+        .map(([name, w]) => `- ${WEIGHT_WORD[w] || "a sense of"} ${name}`)
+        .join("\n");
+      toneBlock = `EMOTIONAL TONE (shape the mood of this image to match):
+${toneLines}
+
+Let this emotional tone drive the characters' facial expressions, posture, and body language, and let it SUBTLY shift the color grade and lighting warmth: warmer and softer for positive tones, cooler and more contrasty for tense ones. Higher-weighted tones set the dominant mood; lighter ones are secondary accents. Keep it grounded and photorealistic, never exaggerated or theatrical.`;
+    } else {
+      toneBlock = `Conversation tone: ${tone || "neutral"}`;
+    }
+
     // ── Build the prompt ────────────────────────────────────────────────
     const textPrompt = `Create a photorealistic image for a language learning app.
 
@@ -170,7 +194,7 @@ ${characterBlock}
 WHAT IS HAPPENING RIGHT NOW:
 ${transcript.slice(-transcriptSlice)}
 
-Conversation tone: ${tone || "neutral"}
+${toneBlock}
 
 ${imageDirection ? `DIRECTOR'S NOTE (HIGHEST PRIORITY — this describes exactly what should be in this image):
 ${imageDirection}` : ""}
@@ -194,7 +218,7 @@ IMAGE RULES:
 - No violence, weapons, blood, sexual content, or anything inappropriate
 - Hands should be in natural resting positions — at sides, holding relevant objects, or out of frame
 - Characters should NEVER look directly at the camera — they are in a conversation with each other, not posing for a photo. Eye contact should be between the characters, or looking at objects/environment relevant to the conversation
-- Maintain consistent lighting across all images in a conversation. If the first image shows evening light, all subsequent images should show the same time of day and lighting conditions
+- Keep the physical lighting setup consistent across all images in a conversation: same time of day, same light sources and direction. Do NOT jump from day to night or move the sun. The color grade and warmth MAY drift subtly to match the emotional tone as the conversation develops (a touch cooler as things get tense, a touch warmer as they resolve), but keep these shifts gentle: it must still read as the same place at the same time
 - Do NOT render text messages, chat interfaces, phone screens showing text, whiteboards with readable text, or any UI overlay${imageNotes ? `
 
 SCENARIO-SPECIFIC IMAGE GUIDANCE:

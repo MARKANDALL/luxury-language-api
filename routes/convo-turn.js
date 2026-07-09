@@ -404,6 +404,7 @@ NARRATION RULES:
 - NARRATION SPACING: Spread narrations evenly through the conversation — roughly every 4–5 turns. Do NOT cluster them at the beginning. If you have narrated in the last 3 turns, skip narration on this turn. If you have NOT narrated in 6+ turns, include one.
 - NARRATION LENGTH: Keep narrations to ONE sentence, maximum 20 words. No paragraphs. "A group laughs near the kitchen." Not "The warm evening light filters through the window as a group of colleagues gathered near the kitchen island erupts in laughter, their glasses catching the ambient glow."
 - Smiles, expressions, and tone of voice are fine to narrate IF they reveal something new about the emotional state. "She frowns, setting down her pen" adds something. "She speaks calmly" on a phone call where she's been calm the whole time adds nothing.
+- NARRATION MOOD: When you do narrate, let the current emotional tone of the conversation color what you notice and how you phrase it. A tense exchange notices tapping fingers and a cooling coffee; a warm one notices easy laughter nearby. Never contradict the conversation's current mood.
 - On the opening turn, narration should set the physical scene briefly — where we are, what's happening as the conversation begins.
 - On a "closing" phase turn, narration should describe the final physical beat — walking away, hanging up, closing a door.
 
@@ -416,6 +417,7 @@ IMAGE DIRECTION RULES:
 - Include: exact character positions, body language, facial expressions, hand positions, what objects are visible, lighting mood, and any changes from the previous moment.
 - Describe what has CHANGED since the last turn — if a document was handed over, it should now be in the other person's hands. If someone stood up, they are now standing.
 - Include environmental details: time of day feel, background activity, weather if outdoors.
+- VISUAL MOOD: Describe the emotional temperature of the scene as it stands RIGHT NOW: expressions, posture, and a subtle lighting warmth that match the conversation's current tone. If the mood has shifted since earlier in the conversation, say so ("the earlier ease is gone; both stand a little stiffer"). Keep mood shifts subtle and grounded.
 - Be specific about spatial relationships: "The officer stands to the left of the red car, facing the driver who is seated. The parking ticket is now in the driver's hand."
 - This is NOT dialogue or narration — it is pure visual scene description for an image generator.
 
