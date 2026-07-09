@@ -19,15 +19,18 @@ import adminRecent from "../routes/admin-recent.js";
 import adminUserStats from "../routes/admin-user-stats.js";
 import attempt from "../routes/attempt.js";
 import altMeaning from "../routes/alt-meaning.js";
+import coachAsk from "../routes/coach-ask.js";
 import convoImage from "../routes/convo-image.js";
 import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
 import migrate from "../routes/migrate.js";
 import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
+import sessionAnalyst from "../routes/session-analyst.js";
 import updateAttempt from "../routes/update-attempt.js";
 import userRecent from "../routes/user-recent.js";
 import voiceClone from "../routes/voice-clone.js";
 import voiceMirror from "../routes/voice-mirror.js";
+import wordHistory from "../routes/word-history.js";
 import wordInfo from "../routes/word-info.js";
 
 function getHeader(req, name) {
@@ -168,6 +171,7 @@ const ROUTES = {
   "alt-meaning": altMeaning,
   assess,
   attempt,
+  "coach-ask": coachAsk,
   "convo-image": convoImage,
   "convo-report": convoReport,
   "convo-turn": convoTurn,
@@ -179,11 +183,13 @@ const ROUTES = {
   "admin/expenses/refresh": expensesRefresh,
   "pronunciation-gpt": pronunciationGpt,
   "realtime/webrtc/session": realtimeWebrtcSession,
+  "session-analyst": sessionAnalyst,
   tts,
   "update-attempt": updateAttempt,
   "user-recent": userRecent,
   "voice-clone": voiceClone,
   "voice-mirror": voiceMirror,
+  "word-history": wordHistory,
   "word-info": wordInfo,
 };
 
@@ -278,9 +284,12 @@ const ADMIN_ONLY = new Set([
   "convo-turn",
   "convo-report",
   "alt-meaning",
+  "coach-ask",
   "realtime/webrtc/session",
+  "session-analyst",
   "voice-clone",
   "voice-mirror",
+  "word-history",
   "word-info",
 ]);
 
