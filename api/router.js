@@ -32,6 +32,7 @@ import voiceClone from "../routes/voice-clone.js";
 import voiceMirror from "../routes/voice-mirror.js";
 import wordHistory from "../routes/word-history.js";
 import wordInfo from "../routes/word-info.js";
+import coachExplain from "../routes/coach-explain.js";
 
 function getHeader(req, name) {
   const h = req?.headers;
@@ -191,6 +192,7 @@ const ROUTES = {
   "voice-mirror": voiceMirror,
   "word-history": wordHistory,
   "word-info": wordInfo,
+  "coach-explain": coachExplain,
 };
 
 async function hydrateJsonBodyIfNeeded(req, res) {
@@ -285,6 +287,7 @@ const ADMIN_ONLY = new Set([
   "convo-report",
   "alt-meaning",
   "coach-ask",
+  "coach-explain",
   "realtime/webrtc/session",
   "session-analyst",
   "voice-clone",
