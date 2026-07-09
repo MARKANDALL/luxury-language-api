@@ -23,6 +23,7 @@ import coachAsk from "../routes/coach-ask.js";
 import convoImage from "../routes/convo-image.js";
 import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
+import dictate from "../routes/dictate.js";
 import migrate from "../routes/migrate.js";
 import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
 import sessionAnalyst from "../routes/session-analyst.js";
@@ -176,6 +177,7 @@ const ROUTES = {
   "convo-image": convoImage,
   "convo-report": convoReport,
   "convo-turn": convoTurn,
+  dictate,
   evaluate,
   migrate,
   "admin/expenses/migrate": expensesMigrate,
@@ -284,6 +286,7 @@ const ADMIN_ONLY = new Set([
   "assess",
   "convo-image",
   "convo-turn",
+  "dictate",
   "convo-report",
   "alt-meaning",
   "coach-ask",
