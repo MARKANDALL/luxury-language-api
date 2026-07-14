@@ -27,6 +27,20 @@ export const config = {
 
 const CEFR_VALUES = new Set(["A1", "A2", "B1", "B2", "C1", "C2"]);
 
+// Word Motor Craft-B2 (item 5): coach persona voices. The rules that keep the
+// answer short/warm/level-appropriate still apply to all three — only the TONE
+// changes. Kept register-neutral so the tú/English register note stays in charge.
+const PERSONA_NOTES = {
+  tutor:
+    "Voice: a warm, patient tutor. Encouraging and gentle; celebrate small wins.",
+  drill:
+    "Voice: a no-nonsense drill sergeant — punchy, direct, high-energy, tough love. " +
+    "Short imperative commands. Motivating, NEVER insulting or demeaning.",
+  linguist:
+    "Voice: a precise language expert. Calm and exact; name the sound or grammar " +
+    "point plainly, but still in plain words at the learner's level.",
+};
+
 function sentenceHash(s) {
   return crypto
     .createHash("sha1")
@@ -60,6 +74,12 @@ export default async function handler(req, res) {
   const levelRaw = (body.level || "B1").toString().trim().toUpperCase();
   const level = CEFR_VALUES.has(levelRaw) ? levelRaw : "B1";
   const uid = (body.uid || "").toString().trim().slice(0, 80);
+  // Word Motor Craft-B2 (item 5): the learner's selected coach persona
+  // (Tutor / Sgt. / Experto), so the answer adopts that voice. Values mirror the
+  // frontend voice buttons (ui-ai-ai-dom.getCurrentPersona): tutor | drill |
+  // linguist. Unknown/absent -> "tutor" (the warm default this route already used).
+  const styleRaw = (body.style || body.persona || "tutor").toString().trim().toLowerCase();
+  const style = PERSONA_NOTES[styleRaw] ? styleRaw : "tutor";
 
   if (!word) {
     return res.status(400).json({ ok: false, error: "bad_request", detail: "word required" });
@@ -104,17 +124,20 @@ export default async function handler(req, res) {
 
   // 6) Prompt — friendly coach, learner register, in the target language
   const system = `
-You are a warm, encouraging pronunciation and language coach for a ${targetLangName}
+You are a pronunciation and language coach for a ${targetLangName}
 learner at CEFR level ${level}.
 You get: a word the learner tapped, and the sentence it appeared in.
 
+${PERSONA_NOTES[style]}
+
 Rules:
 - ${registerNote}
-- Answer in 2 to 3 SHORT sentences. Warm and direct, no preamble, no lists.
+- Answer in 2 to 3 SHORT sentences. Direct, no preamble, no lists.
 - Use NO words harder than the learner's ${level} level.
 - Explain what the word means IN THIS SENTENCE (pick the sense from context),
   then give ONE concrete tip for using OR pronouncing it.
 - Do not repeat the whole sentence back. Speak TO the learner ("you"/"tú").
+- Stay in the Voice above, but keep the register (${registerNote}) exactly.
 Output MUST be valid JSON only, with exactly this key:
 { "answer": "<your 2-3 sentence reply>" }
 `.trim();
