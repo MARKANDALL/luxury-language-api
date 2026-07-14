@@ -86,6 +86,26 @@ describe("coach-ask contract", () => {
     expect(systemMsg).toContain('"tú"');
   });
 
+  it("adopts the selected coach persona voice in the prompt (Craft-B2 item 5)", async () => {
+    const api = await client();
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "browse", sentence: "Would you like to browse?", style: "drill" });
+    const systemMsg = createSpy.mock.calls[0][0].messages[0].content;
+    expect(systemMsg).toContain("drill sergeant");
+  });
+
+  it("falls back to the tutor voice for an unknown/absent persona", async () => {
+    const api = await client();
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "browse", sentence: "Would you like to browse?", style: "not-a-persona" });
+    const systemMsg = createSpy.mock.calls[0][0].messages[0].content;
+    expect(systemMsg).toContain("warm, patient tutor");
+  });
+
   it("returns 502 when the model yields an empty answer", async () => {
     createSpy.mockResolvedValueOnce({ choices: [{ message: { content: JSON.stringify({ answer: "" }) } }] });
     const api = await client();

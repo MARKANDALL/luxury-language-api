@@ -73,4 +73,18 @@ describe("word-info logOnly fast-path", () => {
     expect(r.body).toEqual({ ok: true, logged: true });
     expect(insertSpy.mock.calls[0][0]).toMatchObject({ surface: "convo-ai" });
   });
+
+  it("preserves the Craft-B2 surfaces (narration, score-metrics, practice)", async () => {
+    for (const surface of ["narration", "score-metrics", "practice"]) {
+      insertSpy.mockClear();
+      const api = await client();
+      const r = await api
+        .post("/api/router?route=word-info")
+        .set("x-admin-token", "test_admin_token")
+        .send({ word: "ridge", surface, logOnly: true });
+      expect(r.status).toBe(200);
+      // Not downgraded to convo-ai — these are now whitelisted surfaces.
+      expect(insertSpy.mock.calls[0][0]).toMatchObject({ surface });
+    }
+  });
 });

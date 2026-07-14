@@ -44,6 +44,14 @@ const SURFACE_VALUES = new Set([
   "selfpb",
   "stream",
   "life",
+  // Craft-B1 shipped a frontend "practice" surface (read-mode taps) but never
+  // added it here, so those taps silently downgraded to "convo-ai" analytics.
+  // Corrected in Craft-B2 so practice taps are attributed to their own surface.
+  "practice",
+  // Craft-B2 new gloss hosts: convo narration lines (item 2) and the per-metric
+  // explainer's own prose (item 4). Characters (item 3) reuse "scenario".
+  "narration",
+  "score-metrics",
 ]);
 
 function sentenceHash(s) {
