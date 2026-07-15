@@ -33,11 +33,16 @@ export async function computeHistorySummaryIfNeeded(
   try {
     const supabase = getSupabaseAdmin({ url: supabaseUrl, key: supabaseKey });
 
+    // Order by `ts`, the column attempt.js populates on insert and that every
+    // other lux_attempts reader uses (user-recent, admin-recent, admin-user-stats,
+    // convo-report, word-history). This was the lone outlier ordering by
+    // `created_at`; aligning it keeps the "recent attempts" window consistent
+    // across the codebase. See backend-hygiene item 3.
     const { data, error } = await supabase
       .from("lux_attempts")
-      .select("summary, created_at")
+      .select("summary, ts")
       .eq("uid", uid)
-      .order("created_at", { ascending: false })
+      .order("ts", { ascending: false })
       .limit(40);
 
     if (error) {
