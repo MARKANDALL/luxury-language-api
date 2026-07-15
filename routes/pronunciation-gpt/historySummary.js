@@ -19,19 +19,17 @@ export async function computeHistorySummaryIfNeeded(
 
   if (!includeByRule) return null;
 
-  const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-  const supabaseKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_SERVICE_KEY ||
-    process.env.SUPABASE_ANON_KEY ||
-    process.env.SUPABASE_SERVICE_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-    "";
-
-  if (!supabaseUrl || !supabaseKey) return null;
-
   try {
-    const supabase = getSupabaseAdmin({ url: supabaseUrl, key: supabaseKey });
+    // Use the shared admin client instead of a bespoke key chain. That chain
+    // omitted SUPABASE_SERVICE_ROLE (and SUPABASE_SERVICE_ROLE_KEY_JWT), so on an
+    // environment where only SUPABASE_SERVICE_ROLE is set — which is prod — it
+    // resolved to nothing and this function bailed at its own url/key guard: the
+    // coaching history never loaded, including item 1's trouble words/phonemes.
+    // getSupabaseAdmin() resolves the service-role key in the canonical order
+    // (SUPABASE_SERVICE_ROLE first) and warns loudly if it must fall back to anon.
+    // If the env is genuinely unconfigured it throws, and the catch below degrades
+    // to null exactly as the old guard did.
+    const supabase = getSupabaseAdmin();
 
     // Order by `ts`, the column attempt.js populates on insert and that every
     // other lux_attempts reader uses (user-recent, admin-recent, admin-user-stats,
