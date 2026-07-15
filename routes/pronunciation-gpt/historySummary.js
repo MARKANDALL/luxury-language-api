@@ -69,8 +69,18 @@ export async function computeHistorySummaryIfNeeded(
         if (Array.isArray(words)) {
           for (const item of words) {
             if (typeof item === "string") {
+              // Legacy: a bare word string.
               wordCounts[item] = (wordCounts[item] || 0) + 1;
+            } else if (Array.isArray(item)) {
+              // Writer's real shape: compact triple [word, score, count] emitted
+              // by attempt.js toSummaryFromAzure for the bottom-10 trouble words.
+              // The old reader only understood {word,...} objects, so every triple
+              // fell through to "" and the trouble-word list came back empty.
+              const w = typeof item[0] === "string" ? item[0].trim() : "";
+              const c = safeNum(item[2]) || 1;
+              if (w) wordCounts[w] = (wordCounts[w] || 0) + c;
             } else if (item && typeof item === "object") {
+              // Legacy: an object row { word|text|w, count? }.
               const w = item.word || item.text || item.w || "";
               const c = safeNum(item.count) || 1;
               if (w) wordCounts[w] = (wordCounts[w] || 0) + c;
