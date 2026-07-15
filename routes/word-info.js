@@ -140,7 +140,13 @@ export default async function handler(req, res) {
   // the serverless function can freeze after the response. Degrades gracefully
   // when Supabase env is missing (returns ok anyway; nothing to log).
   if (body.logOnly === true) {
-    if (sb) {
+    // W4-D law: a prefetch must NEVER write a word_taps row (taps are implicit
+    // assessment data; a prefetched row would poison that signal). When a call is
+    // BOTH logOnly and prefetch, the prefetch guard wins and no tap is inserted —
+    // otherwise this fast-path would insert before the prefetch guard below is
+    // ever reached. Single-flag behavior is unchanged: logOnly alone still logs
+    // (logged:true); prefetch alone never enters this block.
+    if (sb && !prefetch) {
       try {
         await sb
           .from("word_taps")
@@ -149,7 +155,7 @@ export default async function handler(req, res) {
         console.warn("[word-info] logOnly tap log failed", e?.message || e);
       }
     }
-    return res.status(200).json({ ok: true, logged: true });
+    return res.status(200).json({ ok: true, logged: !prefetch });
   }
 
   // 4a) Tap analytics — fire and forget, before anything can fail.
