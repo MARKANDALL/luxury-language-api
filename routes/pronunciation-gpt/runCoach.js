@@ -23,7 +23,12 @@ export async function runPronunciationCoach({
   scoreTier,
   cefrBandFromScore,
   extractOverallPronScore,
+  extractOverallPronScoreRaw,
   extractPronScore,
+  adjustAzureResultForScrutiny,
+  getScrutinyInfo,
+  normalizeScrutinyDelta,
+  POINTS_PER_NOTCH = 2.2,
 
   makeNorm,
   worstPhoneme,
@@ -47,8 +52,24 @@ export async function runPronunciationCoach({
     attemptId = null,
     tipIndex = 0,
     tipCount = 3,
-    includeHistory = undefined
+    includeHistory = undefined,
+    scrutinyDelta = 0
   } = reqBody || {};
+
+  // ── SCRUTINY REMAP (Phase 3 mirror) ──
+  // The frontend's display-adjusted results arrive tagged (__scrutiny) and are
+  // used as-is — never double-applied. Untagged (raw) input is remapped here by
+  // the request's scrutinyDelta so coach-side tiering (worst words/phonemes,
+  // overall tier/CEFR) always agrees with what the learner's UI shows.
+  // effectiveScrutinyDelta is the rigor actually in force (Phase 4 feeds it to
+  // the coach prompt).
+  const preTag = getScrutinyInfo(azureResult);
+  const effectiveScrutinyDelta = preTag
+    ? normalizeScrutinyDelta(preTag.delta)
+    : normalizeScrutinyDelta(scrutinyDelta);
+  const azureScored = preTag
+    ? azureResult
+    : adjustAzureResultForScrutiny(azureResult, effectiveScrutinyDelta);
 
   // es-MX flip: when pack==="es" the coach coaches Mexican Spanish pronunciation
   // in Spanish. Absent / !== "es" → English, byte-identical to today.
@@ -72,12 +93,20 @@ export async function runPronunciationCoach({
 
   const norm = makeNorm();
 
-  const worst = worstPhoneme(azureResult, { scoreTier, norm });
-  const badList = worstWords(azureResult, { scoreTier }, 3);
+  const worst = worstPhoneme(azureScored, { scoreTier, norm });
+  const badList = worstWords(azureScored, { scoreTier }, 3);
 
-  const overallScore = extractOverallPronScore(azureResult);
+  const overallScore = extractOverallPronScore(azureScored);
   const overallTier = scoreTier(overallScore);
-  const overallCefr = cefrBandFromScore(overallScore);
+  // CONGRUENCY: the CEFR band is a claim about the LEARNER, not the session —
+  // it always derives from the RAW score (the *Raw sibling on adjusted views;
+  // extractOverallPronScoreRaw falls back to the plain field on raw input).
+  // overallScore/overallTier stay adjusted: colors and the coach's judgment
+  // react to scrutiny; the band does not. Mirrors the frontend's fmtPctCefr
+  // raw-band rule.
+  const overallCefr = cefrBandFromScore(
+    (extractOverallPronScoreRaw ? extractOverallPronScoreRaw(azureScored) : null) ?? overallScore
+  );
 
   const historySummary = await computeHistorySummaryIfNeeded(
     { safeNum, extractPronScore },
@@ -101,6 +130,10 @@ export async function runPronunciationCoach({
     DEEP_REASONING_EFFORT,
     historySummary,
     isEs,
+    // Phase 4: rigor → the coach's strictness of language (0 = byte-identical
+    // prompt to pre-scrutiny behavior).
+    scrutinyDelta: effectiveScrutinyDelta,
+    pointsPerNotch: POINTS_PER_NOTCH,
   });
 
   const targetSections = built.targetSections;
@@ -117,9 +150,21 @@ export async function runPronunciationCoach({
     universal: universallyHard.has(worst),
     langCode,
 
+    // All score fields below come from azureScored — ADJUSTED for rigor.
+    // (history is a summary of PAST attempts and is raw-derived by design;
+    // it is context, not this attempt's judgment.)
     overallScore,
     overallTier,
     overallCefr,
+
+    // Phase 4: the effective rigor, so the coach can reference it naturally.
+    scrutiny: effectiveScrutinyDelta !== 0
+      ? {
+          notches: effectiveScrutinyDelta,
+          direction: effectiveScrutinyDelta > 0 ? "stricter" : "softer",
+          pointsShift: +(Math.abs(effectiveScrutinyDelta) * POINTS_PER_NOTCH).toFixed(1),
+        }
+      : undefined,
 
     history: historySummary || undefined,
   });
@@ -161,7 +206,10 @@ export async function runPronunciationCoach({
       chunk: Number(chunk) || 1,
       tipIndex: Number(tipIndex) || 0,
       tipCount: Number(tipCount) || 3,
-      usedModel: model
+      usedModel: model,
+      // Rigor actually applied to the scores the coach reasoned about
+      // (Phase 4 will also feed this into the prompt's strictness language).
+      scrutinyDelta: effectiveScrutinyDelta
     }
   };
 }
