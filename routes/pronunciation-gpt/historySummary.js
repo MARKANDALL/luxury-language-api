@@ -19,25 +19,28 @@ export async function computeHistorySummaryIfNeeded(
 
   if (!includeByRule) return null;
 
-  const supabaseUrl = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-  const supabaseKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_SERVICE_KEY ||
-    process.env.SUPABASE_ANON_KEY ||
-    process.env.SUPABASE_SERVICE_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-    "";
-
-  if (!supabaseUrl || !supabaseKey) return null;
-
   try {
-    const supabase = getSupabaseAdmin({ url: supabaseUrl, key: supabaseKey });
+    // Use the shared admin client instead of a bespoke key chain. That chain
+    // omitted SUPABASE_SERVICE_ROLE (and SUPABASE_SERVICE_ROLE_KEY_JWT), so on an
+    // environment where only SUPABASE_SERVICE_ROLE is set — which is prod — it
+    // resolved to nothing and this function bailed at its own url/key guard: the
+    // coaching history never loaded, including item 1's trouble words/phonemes.
+    // getSupabaseAdmin() resolves the service-role key in the canonical order
+    // (SUPABASE_SERVICE_ROLE first) and warns loudly if it must fall back to anon.
+    // If the env is genuinely unconfigured it throws, and the catch below degrades
+    // to null exactly as the old guard did.
+    const supabase = getSupabaseAdmin();
 
+    // Order by `ts`, the column attempt.js populates on insert and that every
+    // other lux_attempts reader uses (user-recent, admin-recent, admin-user-stats,
+    // convo-report, word-history). This was the lone outlier ordering by
+    // `created_at`; aligning it keeps the "recent attempts" window consistent
+    // across the codebase. See backend-hygiene item 3.
     const { data, error } = await supabase
       .from("lux_attempts")
-      .select("summary, created_at")
+      .select("summary, ts")
       .eq("uid", uid)
-      .order("created_at", { ascending: false })
+      .order("ts", { ascending: false })
       .limit(40);
 
     if (error) {
@@ -56,11 +59,35 @@ export async function computeHistorySummaryIfNeeded(
       const summary = row?.summary || null;
 
       const lows = summary?.lows;
-      if (lows && typeof lows === "object" && !Array.isArray(lows)) {
-        for (const [k, v] of Object.entries(lows)) {
-          const n = safeNum(v) || 0;
-          if (!k) continue;
-          phonemeCounts[k] = (phonemeCounts[k] || 0) + n;
+      if (lows && typeof lows === "object") {
+        if (Array.isArray(lows)) {
+          for (const item of lows) {
+            if (typeof item === "string") {
+              // Legacy: a bare phoneme string.
+              phonemeCounts[item] = (phonemeCounts[item] || 0) + 1;
+            } else if (Array.isArray(item)) {
+              // Writer's real shape: compact pair [phoneme, score] emitted by
+              // attempt.js toSummaryFromAzure for the lowest-scoring phonemes.
+              // The old reader only handled non-array objects, so every pair was
+              // skipped and the trouble-phoneme list came back empty. NOTE the
+              // pair carries a SCORE, not a count, so each appearance weighs 1 —
+              // topTroublePhonemes ranks by how often a phoneme lands in the
+              // bottom set, never by its score.
+              const k = typeof item[0] === "string" ? item[0].trim() : "";
+              if (k) phonemeCounts[k] = (phonemeCounts[k] || 0) + 1;
+            } else if (item && typeof item === "object") {
+              // Legacy: an object row { phoneme|p, count? }.
+              const k = item.phoneme || item.p || "";
+              const c = safeNum(item.count) || 1;
+              if (k) phonemeCounts[k] = (phonemeCounts[k] || 0) + c;
+            }
+          }
+        } else {
+          for (const [k, v] of Object.entries(lows)) {
+            const n = safeNum(v) || 0;
+            if (!k) continue;
+            phonemeCounts[k] = (phonemeCounts[k] || 0) + n;
+          }
         }
       }
 
@@ -69,8 +96,18 @@ export async function computeHistorySummaryIfNeeded(
         if (Array.isArray(words)) {
           for (const item of words) {
             if (typeof item === "string") {
+              // Legacy: a bare word string.
               wordCounts[item] = (wordCounts[item] || 0) + 1;
+            } else if (Array.isArray(item)) {
+              // Writer's real shape: compact triple [word, score, count] emitted
+              // by attempt.js toSummaryFromAzure for the bottom-10 trouble words.
+              // The old reader only understood {word,...} objects, so every triple
+              // fell through to "" and the trouble-word list came back empty.
+              const w = typeof item[0] === "string" ? item[0].trim() : "";
+              const c = safeNum(item[2]) || 1;
+              if (w) wordCounts[w] = (wordCounts[w] || 0) + c;
             } else if (item && typeof item === "object") {
+              // Legacy: an object row { word|text|w, count? }.
               const w = item.word || item.text || item.w || "";
               const c = safeNum(item.count) || 1;
               if (w) wordCounts[w] = (wordCounts[w] || 0) + c;
