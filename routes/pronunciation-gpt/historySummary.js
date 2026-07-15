@@ -61,11 +61,35 @@ export async function computeHistorySummaryIfNeeded(
       const summary = row?.summary || null;
 
       const lows = summary?.lows;
-      if (lows && typeof lows === "object" && !Array.isArray(lows)) {
-        for (const [k, v] of Object.entries(lows)) {
-          const n = safeNum(v) || 0;
-          if (!k) continue;
-          phonemeCounts[k] = (phonemeCounts[k] || 0) + n;
+      if (lows && typeof lows === "object") {
+        if (Array.isArray(lows)) {
+          for (const item of lows) {
+            if (typeof item === "string") {
+              // Legacy: a bare phoneme string.
+              phonemeCounts[item] = (phonemeCounts[item] || 0) + 1;
+            } else if (Array.isArray(item)) {
+              // Writer's real shape: compact pair [phoneme, score] emitted by
+              // attempt.js toSummaryFromAzure for the lowest-scoring phonemes.
+              // The old reader only handled non-array objects, so every pair was
+              // skipped and the trouble-phoneme list came back empty. NOTE the
+              // pair carries a SCORE, not a count, so each appearance weighs 1 —
+              // topTroublePhonemes ranks by how often a phoneme lands in the
+              // bottom set, never by its score.
+              const k = typeof item[0] === "string" ? item[0].trim() : "";
+              if (k) phonemeCounts[k] = (phonemeCounts[k] || 0) + 1;
+            } else if (item && typeof item === "object") {
+              // Legacy: an object row { phoneme|p, count? }.
+              const k = item.phoneme || item.p || "";
+              const c = safeNum(item.count) || 1;
+              if (k) phonemeCounts[k] = (phonemeCounts[k] || 0) + c;
+            }
+          }
+        } else {
+          for (const [k, v] of Object.entries(lows)) {
+            const n = safeNum(v) || 0;
+            if (!k) continue;
+            phonemeCounts[k] = (phonemeCounts[k] || 0) + n;
+          }
         }
       }
 
