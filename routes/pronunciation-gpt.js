@@ -13,7 +13,12 @@ import {
   scoreTier,
   cefrBandFromScore,
   extractOverallPronScore,
+  extractOverallPronScoreRaw,
   extractPronScore,
+  adjustAzureResultForScrutiny,
+  getScrutinyInfo,
+  normalizeScrutinyDelta,
+  POINTS_PER_NOTCH,
 } from './pronunciation-gpt/scoring.js';
 import {
   makeNorm,
@@ -90,7 +95,12 @@ const TRANSLATE_MODEL = process.env.LUX_AI_TRANSLATE_MODEL || "gpt-4.1-mini";
       scoreTier,
       cefrBandFromScore,
       extractOverallPronScore,
+      extractOverallPronScoreRaw,
       extractPronScore,
+      adjustAzureResultForScrutiny,
+      getScrutinyInfo,
+      normalizeScrutinyDelta,
+      POINTS_PER_NOTCH,
 
       makeNorm,
       worstPhoneme,
