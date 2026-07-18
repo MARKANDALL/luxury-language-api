@@ -315,7 +315,14 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, error: "Method Not Allowed" });
   }
 
-  // 2) ADMIN_TOKEN gate (belt-and-suspenders with the router)
+  // Best-effort pack for EVERY response, including the graceful/empty ones. Parsed
+  // defensively (req.body may be a string, null, or absent) so this line can never
+  // throw and every exit below has a valid `pack` to echo.
+  const pack =
+    ((req.body && req.body.pack) || "en").toString().trim() === "es" ? "es" : "en";
+
+  // 2) ADMIN_TOKEN gate (belt-and-suspenders with the router). A rejected call is a
+  // real 401 — kept before the guard below so it is never masked as an empty portrait.
   const token =
     (req.headers["x-admin-token"] || "").toString().trim() ||
     (req.query?.token || "").toString().trim();
@@ -324,30 +331,35 @@ export default async function handler(req, res) {
     return res.status(401).json({ ok: false, error: "unauthorized" });
   }
 
-  // 3) Validate input. pack -> whitelist {'es','en'}, default 'en'. uid is a STRING,
-  // sliced but NOT UUID-validated (reads must key identically to how the analyst wrote).
-  const body = req.body || {};
-  const uid = (body.uid || "").toString().trim().slice(0, 80);
-  const pack = (body.pack || "en").toString().trim() === "es" ? "es" : "en";
-
-  // 4) Supabase (lazy, optional — never let a read break the panel)
-  let sb = null;
+  // 3) Top-level guard. The learner-model surface must NEVER 500 (house law: an empty
+  // portrait is the correct answer, not an error). ANY unexpected throw — from body
+  // handling, the lazy Supabase import, the DB read, the pack dictionary, or the
+  // aggregation — degrades to the empty shape at HTTP 200, and the real exception is
+  // logged WITH route context so it surfaces in the function logs instead of a bare
+  // router-level "internal_error". This closes the only path by which a throw could
+  // previously escape to the router (the prologue was outside the read try/catch).
   try {
-    const { getSupabaseAdmin } = await import("../lib/supabase.js");
-    sb = getSupabaseAdmin();
-  } catch {
-    sb = null; // env not configured; degrade gracefully
-  }
+    // uid is a STRING, sliced but NOT UUID-validated (reads must key identically to
+    // how the analyst wrote the rows).
+    const uid = ((req.body && req.body.uid) || "").toString().trim().slice(0, 80);
 
-  // Missing Supabase or no uid yet -> the empty portrait is the correct answer, not
-  // an error (the panel calls this before the user has done anything).
-  if (!sb || !uid) {
-    return res.status(200).json({ ok: true, pack, model: emptyModel() });
-  }
+    // Supabase (lazy, optional — never let a missing env break the panel).
+    let sb = null;
+    try {
+      const { getSupabaseAdmin } = await import("../lib/supabase.js");
+      sb = getSupabaseAdmin();
+    } catch (e) {
+      console.warn("[learner-model] supabase unavailable", e?.message || e);
+      sb = null; // env not configured; degrade gracefully
+    }
 
-  // 5) Read (bounded) + aggregate. Any failure logs a warning and returns the empty
-  // shape — never a 500 on the learner-model surface.
-  try {
+    // Missing Supabase or no uid yet -> the empty portrait is the correct answer, not
+    // an error (the panel calls this before the user has done anything).
+    if (!sb || !uid) {
+      return res.status(200).json({ ok: true, pack, model: emptyModel() });
+    }
+
+    // Read (bounded).
     const { data, error } = await sb
       .from("speech_events")
       .select(
@@ -372,7 +384,15 @@ export default async function handler(req, res) {
     const model = aggregateSpeechEvents(rows, labels, Date.now());
     return res.status(200).json({ ok: true, pack, model });
   } catch (e) {
-    console.warn("[learner-model] aggregation failed", e?.message || e);
-    return res.status(200).json({ ok: true, pack, model: emptyModel() });
+    // The single place a throw could previously have escaped to the router's
+    // internal_error handler — now contained on this surface, and logged loudly
+    // (with the stack) so the true cause is visible next time.
+    console.error(
+      "[learner-model] unhandled error; returning empty shape",
+      e?.stack || e?.message || e
+    );
+    if (!res.headersSent) {
+      return res.status(200).json({ ok: true, pack, model: emptyModel() });
+    }
   }
 }
