@@ -24,6 +24,7 @@ import convoImage from "../routes/convo-image.js";
 import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
 import dictate from "../routes/dictate.js";
+import learnerModel from "../routes/learner-model.js";
 import migrate from "../routes/migrate.js";
 import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
 import sessionAnalyst from "../routes/session-analyst.js";
@@ -179,6 +180,7 @@ const ROUTES = {
   "convo-turn": convoTurn,
   dictate,
   evaluate,
+  "learner-model": learnerModel,
   migrate,
   "admin/expenses/migrate": expensesMigrate,
   "admin/expenses/summary": expensesSummary,
@@ -291,6 +293,7 @@ const ADMIN_ONLY = new Set([
   "alt-meaning",
   "coach-ask",
   "coach-explain",
+  "learner-model",
   "realtime/webrtc/session",
   "session-analyst",
   "voice-clone",
