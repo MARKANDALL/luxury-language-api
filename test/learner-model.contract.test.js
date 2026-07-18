@@ -19,7 +19,9 @@ import { aggregateSpeechEvents } from "../routes/learner-model.js";
 
 // ── Shared, hoisted mock state the vi.mock factory can see. enabled:false
 // simulates a missing Supabase env (getSupabaseAdmin throws). ─────────────────
-const { sbState } = vi.hoisted(() => ({ sbState: { rows: [], enabled: true } }));
+const { sbState } = vi.hoisted(() => ({
+  sbState: { rows: [], enabled: true, throwOnRead: false },
+}));
 
 vi.mock("../lib/supabase.js", () => ({
   getSupabaseAdmin: () => {
@@ -28,12 +30,20 @@ vi.mock("../lib/supabase.js", () => ({
       from() {
         const result = { data: sbState.rows, error: null };
         // Chainable + thenable: `await sb.from(t).select()...limit()` -> result.
+        // throwOnRead simulates the real Supabase client throwing mid-read (a
+        // DB-layer exception) so we can prove the route degrades, never 500s.
         const chain = {
           select: () => chain,
           eq: () => chain,
           order: () => chain,
           limit: () => chain,
-          then: (resolve) => resolve(result),
+          then: (resolve, reject) => {
+            if (sbState.throwOnRead) {
+              const err = new Error("simulated supabase read failure");
+              return reject ? reject(err) : Promise.reject(err);
+            }
+            return resolve(result);
+          },
         };
         return chain;
       },
@@ -46,6 +56,7 @@ beforeEach(() => {
   process.env.ADMIN_TOKEN = "test_admin_token";
   sbState.enabled = true;
   sbState.rows = [];
+  sbState.throwOnRead = false;
 });
 
 async function client() {
@@ -312,6 +323,21 @@ describe("learner-model contract (HTTP)", () => {
       .send({ uid: "u-1", pack: "en" });
     expect(r.status).toBe(200);
     expect(r.body).toEqual({ ok: true, pack: "en", model: EMPTY_MODEL });
+  });
+
+  it("returns the empty shape (200, never internal_error) when the DB read throws", async () => {
+    // The reported production failure was a router-level `internal_error` (a 500):
+    // a throw escaped the route to the router's outer catch. This proves a
+    // DB-layer exception is now contained on this surface as a graceful 200.
+    sbState.throwOnRead = true;
+    const api = await client();
+    const r = await api
+      .post("/api/router?route=learner-model")
+      .set("x-admin-token", "test_admin_token")
+      .send({ uid: "3220f89f-ee4f-4500-a6d8-ff4b67377968", pack: "es" });
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ ok: true, pack: "es", model: EMPTY_MODEL });
+    expect(r.body.error).toBeUndefined();
   });
 
   it("returns the empty shape (200, not 400) when uid is missing", async () => {
