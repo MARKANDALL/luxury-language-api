@@ -106,6 +106,51 @@ describe("coach-ask contract", () => {
     expect(systemMsg).toContain("warm, patient tutor");
   });
 
+  it("defaults to the meaning lens when no lens is sent (backward-compatible)", async () => {
+    const api = await client();
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "browse", sentence: "Would you like to browse?" });
+    const call = createSpy.mock.calls[0][0];
+    expect(call.messages[0].content).toContain("TASK — MEANING");
+    expect(call.max_tokens).toBe(240);
+    expect(call.temperature).toBe(0.5);
+  });
+
+  it("falls back to the meaning lens for an unknown lens", async () => {
+    const api = await client();
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "browse", lens: "not-a-lens" });
+    expect(createSpy.mock.calls[0][0].messages[0].content).toContain("TASK — MEANING");
+  });
+
+  it("contrast lens uses the mapped l1 name (finally consumes l1)", async () => {
+    const api = await client();
+    // lang=en so the shared header says "English"; the only source of "Spanish"
+    // here is the contrast task's L1NAME, mapped from l1: "es".
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "embarrassed", lang: "en", l1: "es", lens: "contrast" });
+    const sys = createSpy.mock.calls[0][0].messages[0].content;
+    expect(sys).toContain("COMPARE TO YOUR LANGUAGE");
+    expect(sys).toContain("Spanish");
+  });
+
+  it("depth 2 appends the GO DEEPER clause and bumps max_tokens by ~120", async () => {
+    const api = await client();
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "browse", lens: "meaning", depth: 2 });
+    const call = createSpy.mock.calls[0][0];
+    expect(call.messages[0].content).toContain("GO DEEPER");
+    expect(call.max_tokens).toBe(360); // 240 + 120
+  });
+
   it("returns 502 when the model yields an empty answer", async () => {
     createSpy.mockResolvedValueOnce({ choices: [{ message: { content: JSON.stringify({ answer: "" }) } }] });
     const api = await client();
