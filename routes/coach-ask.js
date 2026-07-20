@@ -20,7 +20,8 @@
 //   first language) — the route received it since v1 but never fed it to the model.
 //
 // Analytics: table word_taps, one row per ask (fire-and-forget), tagged surface
-//   "coach". No new tables and no schema change: word_taps has no `lens` column
+//   "coach" (coach lenses) or "reference" (ref_* lenses). No new tables and no
+//   schema change: word_taps has no `lens` column
 //   (its columns are uid/word/lang/l1/level/sentence_hash/surface), so the lens is
 //   NOT added to the insert — doing so would make PostgREST reject the whole row
 //   and silently drop the tap. Degrades gracefully if Supabase env is missing.
@@ -74,10 +75,19 @@ const GO_DEEPER =
 //   - markdown: whether this lens may emit light markdown (a short list). Metadata
 //               only — the frontend renders markdown; the task text already tells
 //               the model when a list is appropriate.
-// Built per-request because the CONTRAST task interpolates L1NAME. `meaning` is the
+// Built per-request because the CONTRAST task interpolates L1NAME (and the
+// reference lenses also interpolate the target language name). `meaning` is the
 // backward-compatible default: a request with no lens lands here and behaves like
 // coach-ask v1.
-function buildLenses(L1NAME) {
+//
+// REFERENCE lenses (`ref_*`, marked `reference: true`): the "look it up" surface —
+// the useful WordReference categories, our design + intelligence. They ride this
+// SAME map/route/contract as the coach lenses; the only difference is prompt
+// content (a neutral, dictionary-like scaffold instead of the coach persona voice,
+// chosen in the handler) and a `surface: "reference"` analytics tag. `ref_headline`
+// powers the modal's always-on header (an instant sense + translation); the other
+// seven are the modal's section tabs.
+function buildLenses(L1NAME, targetLangName) {
   return {
     meaning: {
       maxTokens: 240,
@@ -134,6 +144,70 @@ function buildLenses(L1NAME) {
       task:
         "TASK — CULTURE: In 2-3 short sentences, share something cultural about this word: a connotation, a common idiom it appears in, or how it lands socially — how a native actually uses or reacts to it. For Spanish, prefer Mexican usage and flavor where relevant. Interesting and practical, not a lecture.",
     },
+
+    // ── REFERENCE lenses (the "look it up" modal) ────────────────────────────
+    // Same contract as the coach lenses; `reference: true` swaps in the neutral
+    // reference scaffold in the handler and tags the tap surface "reference".
+    ref_headline: {
+      maxTokens: 150,
+      temp: 0.3,
+      markdown: true,
+      reference: true,
+      task: `TASK — HEADLINE: Give an instant, two-line answer. Line 1: the part of speech and a one-line gloss of the sense this word or expression has IN THE GIVEN SENTENCE (or its most common sense if no sentence is given). Line 2: its single best translation into ${L1NAME} (or into clear English if the first language is unknown or "universal"). Two short lines, no lists, no preamble. This is a headline, not a full entry.`,
+    },
+    ref_senses: {
+      maxTokens: 300,
+      temp: 0.4,
+      markdown: true,
+      reference: true,
+      task:
+        "TASK — SENSES (IN CONTEXT): The learner looked this up. If a sentence is given, LEAD with the sense the word has IN THAT sentence: name the part of speech and give a one-line gloss, then one natural example. After that, list up to 2 other common senses as a short markdown list (part of speech + gloss each). If no sentence is given, lead with the most common sense. Tight; no dictionary padding.",
+    },
+    ref_translation: {
+      maxTokens: 300,
+      temp: 0.3,
+      markdown: true,
+      reference: true,
+      task: `TASK — TRANSLATION: Give the best translation(s) of this word or expression between ${targetLangName} and ${L1NAME}. Lead with the PRINCIPAL translation for the in-context sense (mark noun gender, and register if it matters), then up to 2 additional translations for other senses as a short markdown list. If ${L1NAME} is unknown or "universal", translate into clear English and add one friendly line suggesting the learner set a first language for a sharper match. Do not invent; if unsure, say so briefly.`,
+    },
+    ref_examples: {
+      maxTokens: 320,
+      temp: 0.5,
+      markdown: true,
+      reference: true,
+      task: `TASK — EXAMPLES: Give 3 natural example sentences using this word or expression in its in-context sense, ranging from formal to neutral to casual. Render each as a markdown list item: the ${targetLangName} sentence, then its ${L1NAME} translation in parentheses (or an English translation if the first language is unknown or "universal"). Realistic and level-appropriate; almost no commentary.`,
+    },
+    ref_expressions: {
+      maxTokens: 340,
+      temp: 0.4,
+      markdown: true,
+      reference: true,
+      task: `TASK — EXPRESSIONS AND COMPOUND FORMS: List up to 4 common multi-word items built on this word — idioms, phrasal or compound forms, or fixed collocations — as a markdown list. For each: the expression, a short gloss, and its ${L1NAME} equivalent (or an English gloss if the first language is unknown or "universal"). Prefer the most frequent and useful; skip rare or archaic ones. If the looked-up item is ITSELF an expression, unpack it instead: its meaning, when to use it, and one natural example.`,
+    },
+    ref_synonyms: {
+      maxTokens: 280,
+      temp: 0.4,
+      markdown: true,
+      reference: true,
+      task:
+        "TASK — SYNONYMS AND ANTONYMS: For the in-context sense, give 2-3 near-synonyms and, if any exist, 1-2 antonyms, as a short markdown list. For each, add a few words on the connotation or register difference so the learner can pick the right one — not just a bare list. Flag any near-synonym that is a false friend or shifts the meaning.",
+    },
+    ref_conjugation: {
+      maxTokens: 380,
+      temp: 0.2,
+      markdown: true,
+      reference: true,
+      task:
+        "TASK — CONJUGATION: If this word is a verb, give a COMPACT conjugation of its most useful forms as a short markdown list (not every tense). For Spanish: the yo / tú / él / nosotros / ellos forms of the present and the preterite, plus the gerundio and participio, and note if it is irregular. For English: base / past / past participle / -ing, and note if it is irregular. Keep it to the high-value forms. If this word is NOT a verb, reply with a single short line saying so.",
+    },
+    ref_usage: {
+      maxTokens: 260,
+      temp: 0.4,
+      markdown: false,
+      reference: true,
+      task:
+        "TASK — USAGE AND REGISTER: In 2-3 short sentences, tell the learner how to use this word well: how formal or casual it is, any regional notes (for Spanish, prefer Mexican usage), a common mistake or overuse to avoid, and when a native would choose it over a close neighbor. Practical guidance, not a lecture.",
+    },
   };
 }
 
@@ -181,11 +255,14 @@ export default async function handler(req, res) {
   // angle; unknown/absent -> "meaning" (backward-compatible with coach-ask v1).
   // `depth` 2 = "go deeper"; anything else -> 1.
   const L1NAME = L1_NAMES[l1.toLowerCase()] || l1;
-  const LENSES = buildLenses(L1NAME);
+  const targetLangName = lang === "es" ? "Spanish" : "English";
+  const LENSES = buildLenses(L1NAME, targetLangName);
   const lensRaw = (body.lens || "meaning").toString().trim().toLowerCase();
   const lens = LENSES[lensRaw] ? lensRaw : "meaning";
   const chosen = LENSES[lens];
   const depth = Number(body.depth) === 2 ? 2 : 1;
+  // Reference lenses (ref_*) log under a distinct analytics surface.
+  const surface = chosen.reference ? "reference" : "coach";
 
   if (!word) {
     return res.status(400).json({ ok: false, error: "bad_request", detail: "word required" });
@@ -193,16 +270,17 @@ export default async function handler(req, res) {
 
   const sHash = sentenceHash(sentence);
 
-  // 4) Tap analytics — fire and forget (surface "coach"), never blocks the answer.
-  // Degrades gracefully when Supabase env is missing. No cache read/write here.
-  // NB: word_taps has no `lens` column, so the lens is intentionally NOT inserted
-  // (adding an unknown column would make the whole insert fail and drop the tap).
+  // 4) Tap analytics — fire and forget (surface "coach" | "reference"), never
+  // blocks the answer. Degrades gracefully when Supabase env is missing. No cache
+  // read/write here. NB: word_taps has no `lens` column, so the lens is
+  // intentionally NOT inserted (an unknown column would fail the whole insert and
+  // drop the tap); `surface` is an existing column, so the value is safe to vary.
   try {
     const { getSupabaseAdmin } = await import("../lib/supabase.js");
     const sb = getSupabaseAdmin();
     if (sb) {
       sb.from("word_taps")
-        .insert({ uid, word, lang, l1, level, sentence_hash: sHash, surface: "coach" })
+        .insert({ uid, word, lang, l1, level, sentence_hash: sHash, surface })
         .then(() => {})
         .catch((e) => console.warn("[coach-ask] tap log failed", e?.message || e));
     }
@@ -224,18 +302,36 @@ export default async function handler(req, res) {
 
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  const targetLangName = lang === "es" ? "Spanish" : "English";
   const registerNote =
     lang === "es"
       ? `Write in Spanish using the informal "tú" register (never "usted").`
       : `Write in English.`;
 
-  // 6) Prompt — shared coach scaffold (target language, level, register, persona
-  // voice, speak-TO-the-learner, JSON out) + the selected lens task. The per-lens
-  // TASK replaces coach-ask v1's single hard-coded meaning task. depth 2 appends
-  // the GO-DEEPER clause.
+  // 6) Prompt — the selected lens task inside a shared scaffold. depth 2 appends
+  // the GO-DEEPER clause. Coach lenses use the persona voice and speak TO the
+  // learner; REFERENCE lenses (ref_*) swap in a neutral, dictionary-like scaffold —
+  // same target language, level, register, and JSON-out contract, no persona —
+  // because a reference entry should read as a clean reference, not a pep talk.
   const taskBlock = depth === 2 ? `${chosen.task}\n\n${GO_DEEPER}` : chosen.task;
-  const system = `
+  const system = chosen.reference
+    ? `
+You are a clean, modern bilingual reference for a ${targetLangName}
+learner at CEFR level ${level}.
+You get: a word or expression the learner looked up, and (when available) the
+sentence it came from. Use the sentence to choose the RIGHT sense.
+
+Rules:
+- ${registerNote}
+- Lead with what the learner needs: no preamble, no restating the request, no filler.
+- Keep it tight and scannable, at or just above the learner's ${level} level; define a hard word only if you must use it.
+- Be accurate. Do not invent senses, translations, or forms. If you are unsure, say so briefly instead of guessing.
+
+${taskBlock}
+
+Output MUST be valid JSON only, with exactly this key:
+{ "answer": "<your reply>" }
+`.trim()
+    : `
 You are a pronunciation and language coach for a ${targetLangName}
 learner at CEFR level ${level}.
 You get: a word the learner tapped, and (when available) the sentence it appeared in.
