@@ -198,7 +198,7 @@ function buildLenses(L1NAME, targetLangName) {
       markdown: true,
       reference: true,
       task:
-        "TASK — CONJUGATION: If this word is a verb, give a COMPACT conjugation of its most useful forms as a short markdown list (not every tense). For Spanish: the yo / tú / él / nosotros / ellos forms of the present and the preterite, plus the gerundio and participio, and note if it is irregular. For English: base / past / past participle / -ing, and note if it is irregular. Keep it to the high-value forms. If this word is NOT a verb, reply with a single short line saying so.",
+        "TASK — CONJUGATION: If this word is a verb, give a COMPACT conjugation of its most useful forms as a short markdown list (not every tense). Use a plain markdown list, NEVER a table. For Spanish: the yo / tú / él / nosotros / ellos forms of the present and the preterite, plus the gerundio and participio, and note if it is irregular. For English: base / past / past participle / -ing, and note if it is irregular. Keep it to the high-value forms. If this word is NOT a verb, reply with a single short line saying so.",
     },
     ref_usage: {
       maxTokens: 260,
