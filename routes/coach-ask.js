@@ -153,7 +153,7 @@ function buildLenses(L1NAME, targetLangName) {
       temp: 0.3,
       markdown: true,
       reference: true,
-      task: `TASK — HEADLINE: Give an instant, two-line answer. Line 1: the part of speech and a one-line gloss of the sense this word or expression has IN THE GIVEN SENTENCE (or its most common sense if no sentence is given). Line 2: its single best translation into ${L1NAME} (or into clear English if the first language is unknown or "universal"). Two short lines, no lists, no preamble. This is a headline, not a full entry.`,
+      task: `TASK — HEADLINE: Give an instant, two-line answer. Line 1: the part of speech and a one-line gloss of the sense this word or expression has IN THE GIVEN SENTENCE (or its most common sense if no sentence is given). Line 2: its single best translation into ${L1NAME} (or into clear English if the first language is unknown or "universal"). OFF-LANGUAGE CHECK: if the looked-up word or expression is clearly NOT ${targetLangName} (for example, an English word saved on the Spanish side), do not pretend it is ${targetLangName} — say briefly which language it actually is and give its ${targetLangName} equivalent(s) as the principal translation instead (e.g. "shelf is English — Spanish: estante / repisa"). Two short lines, no lists, no preamble. This is a headline, not a full entry.`,
     },
     ref_senses: {
       maxTokens: 300,
@@ -261,6 +261,18 @@ export default async function handler(req, res) {
   const lens = LENSES[lensRaw] ? lensRaw : "meaning";
   const chosen = LENSES[lens];
   const depth = Number(body.depth) === 2 ? 2 : 1;
+  // FIRST-LANGUAGE FLIP (reference lenses only): `answerIn` "l1" asks the shared
+  // REFERENCE scaffold to write its explanatory prose in the learner's first
+  // language, while keeping the target-language material (the word, examples,
+  // expressions, conjugated forms) in the target language. Absent/unknown ->
+  // "target" (backward-compatible: coach-ask callers that send no answerIn behave
+  // exactly as before). It is INERT unless the lens is a ref_* lens AND the l1 is
+  // known and actually differs from the target language; the coach lenses ignore it.
+  const answerInRaw = (body.answerIn || "target").toString().trim().toLowerCase();
+  const answerIn = answerInRaw === "l1" ? "l1" : "target";
+  const l1DiffersFromTarget =
+    l1.toLowerCase() !== "universal" && l1.toLowerCase() !== lang;
+  const flipToL1 = chosen.reference && answerIn === "l1" && l1DiffersFromTarget;
   // Reference lenses (ref_*) log under a distinct analytics surface.
   const surface = chosen.reference ? "reference" : "coach";
 
@@ -307,6 +319,18 @@ export default async function handler(req, res) {
       ? `Write in Spanish using the informal "tú" register (never "usted").`
       : `Write in English.`;
 
+  // FIRST-LANGUAGE FLIP: when the learner flips a reference answer into their first
+  // language, the shared REFERENCE scaffold swaps its register line for this one —
+  // prose in ${L1NAME}, but the target-language material itself stays in
+  // ${targetLangName} (that material IS the content). When not flipping,
+  // answerLangNote === registerNote, so the reference scaffold (and the untouched
+  // coach scaffold) render byte-for-byte as before.
+  const answerLangNote = flipToL1
+    ? `Write your explanatory prose — every gloss, definition, note, and label — in ${L1NAME}. Keep all ${targetLangName} material itself (the looked-up word, example sentences, expressions, and conjugated forms) in ${targetLangName}${
+        lang === "es" ? ` using the informal "tú" register` : ""
+      }, since that material IS the content the learner is studying; do not translate it away. The result reads as ${L1NAME} explanations wrapping ${targetLangName} examples.`
+    : registerNote;
+
   // 6) Prompt — the selected lens task inside a shared scaffold. depth 2 appends
   // the GO-DEEPER clause. Coach lenses use the persona voice and speak TO the
   // learner; REFERENCE lenses (ref_*) swap in a neutral, dictionary-like scaffold —
@@ -321,7 +345,7 @@ You get: a word or expression the learner looked up, and (when available) the
 sentence it came from. Use the sentence to choose the RIGHT sense.
 
 Rules:
-- ${registerNote}
+- ${answerLangNote}
 - Lead with what the learner needs: no preamble, no restating the request, no filler.
 - Keep it tight and scannable, at or just above the learner's ${level} level; define a hard word only if you must use it.
 - Be accurate. Do not invent senses, translations, or forms. If you are unsure, say so briefly instead of guessing.
