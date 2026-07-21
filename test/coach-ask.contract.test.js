@@ -238,3 +238,103 @@ describe("coach-ask reference lenses", () => {
     expect(call.max_tokens).toBe(420); // 300 + 120
   });
 });
+
+// FIRST-LANGUAGE FLIP (answerIn): the learner can flip a reference answer into their
+// first language. The shared REFERENCE scaffold then writes its explanatory prose in
+// the L1 while keeping target-language material (word, examples, forms) in the target
+// language. It applies ONLY to ref_* lenses, only when the l1 is known and differs
+// from the target language, and defaults to "target" (backward-compatible). The coach
+// lenses ignore answerIn entirely. Also covers the off-language ref_headline addition.
+describe("coach-ask first-language flip (answerIn)", () => {
+  // A stable marker present ONLY in the flipped reference scaffold.
+  const FLIP_MARK = "explanatory prose";
+
+  it("default (no answerIn): reference scaffold stays in the target language, no flip", async () => {
+    const api = await client();
+    // es pack, l1 en (differs) — but no answerIn, so it must NOT flip.
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "hojear", sentence: "Me gusta hojear revistas.", lang: "es", l1: "en", lens: "ref_senses" });
+    const sys = createSpy.mock.calls[0][0].messages[0].content;
+    expect(sys).not.toContain(FLIP_MARK);
+    expect(sys).toContain('"tú"'); // still the target-language register line
+  });
+
+  it("explicit answerIn 'target': behaves exactly like the default (no flip)", async () => {
+    const api = await client();
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "hojear", lang: "es", l1: "en", lens: "ref_senses", answerIn: "target" });
+    const sys = createSpy.mock.calls[0][0].messages[0].content;
+    expect(sys).not.toContain(FLIP_MARK);
+  });
+
+  it("answerIn 'l1' flips the reference scaffold: prose in the L1, examples in the target", async () => {
+    const api = await client();
+    // es pack (target Spanish), l1 en -> prose flips to English.
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "hojear", sentence: "Me gusta hojear revistas.", lang: "es", l1: "en", lens: "ref_senses", answerIn: "l1" });
+    const sys = createSpy.mock.calls[0][0].messages[0].content;
+    expect(sys).toContain(FLIP_MARK);
+    expect(sys).toContain("in English"); // prose language is the L1 name
+    expect(sys).toContain("wrapping Spanish examples"); // target material stays in target
+  });
+
+  it("does NOT flip a coach lens even when answerIn 'l1' is sent (coach byte-identical)", async () => {
+    const api = await client();
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "hola", lang: "es", l1: "en", lens: "meaning", answerIn: "l1" });
+    const sys = createSpy.mock.calls[0][0].messages[0].content;
+    expect(sys).toContain("pronunciation and language coach");
+    expect(sys).not.toContain(FLIP_MARK);
+  });
+
+  it("unknown answerIn value falls back to target (no flip)", async () => {
+    const api = await client();
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "hojear", lang: "es", l1: "en", lens: "ref_senses", answerIn: "sideways" });
+    const sys = createSpy.mock.calls[0][0].messages[0].content;
+    expect(sys).not.toContain(FLIP_MARK);
+  });
+
+  it("is inert when the l1 equals the target language (nothing to flip into)", async () => {
+    const api = await client();
+    // es pack, l1 es -> same language, so answerIn 'l1' must not flip.
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "hojear", lang: "es", l1: "es", lens: "ref_senses", answerIn: "l1" });
+    const sys = createSpy.mock.calls[0][0].messages[0].content;
+    expect(sys).not.toContain(FLIP_MARK);
+  });
+
+  it("is inert when the l1 is unknown/'universal'", async () => {
+    const api = await client();
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "hojear", lang: "es", lens: "ref_senses", answerIn: "l1" }); // no l1 -> universal
+    const sys = createSpy.mock.calls[0][0].messages[0].content;
+    expect(sys).not.toContain(FLIP_MARK);
+  });
+
+  it("ref_headline carries the off-language check (equivalents in the target language)", async () => {
+    const api = await client();
+    await api
+      .post("/api/router?route=coach-ask")
+      .set("x-admin-token", "test_admin_token")
+      .send({ word: "shelf", lang: "es", l1: "en", lens: "ref_headline" });
+    const sys = createSpy.mock.calls[0][0].messages[0].content;
+    expect(sys).toContain("OFF-LANGUAGE CHECK");
+    expect(sys).toContain("saved on the Spanish side");
+    expect(sys).toContain("principal translation");
+  });
+});
