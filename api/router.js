@@ -33,6 +33,7 @@ import userRecent from "../routes/user-recent.js";
 import voiceClone from "../routes/voice-clone.js";
 import voiceMirror from "../routes/voice-mirror.js";
 import wordHistory from "../routes/word-history.js";
+import wordImage from "../routes/word-image.js";
 import wordInfo from "../routes/word-info.js";
 import coachExplain from "../routes/coach-explain.js";
 
@@ -195,6 +196,7 @@ const ROUTES = {
   "voice-clone": voiceClone,
   "voice-mirror": voiceMirror,
   "word-history": wordHistory,
+  "word-image": wordImage,
   "word-info": wordInfo,
   "coach-explain": coachExplain,
 };
@@ -299,6 +301,7 @@ const ADMIN_ONLY = new Set([
   "voice-clone",
   "voice-mirror",
   "word-history",
+  "word-image",
   "word-info",
 ]);
 
