@@ -22,7 +22,13 @@ const { createSpy } = vi.hoisted(() => ({
 
 vi.mock("openai", () => ({
   OpenAI: class {
-    constructor() {
+    constructor(opts) {
+      // Mirror the real openai v4 constructor, which throws synchronously when the
+      // API key is missing. This makes the init-error degradation path genuinely
+      // testable (the route constructs the client inside its init guard).
+      if (!opts || !opts.apiKey) {
+        throw new Error("The OPENAI_API_KEY environment variable is missing or empty");
+      }
       this.chat = { completions: { create: createSpy } };
     }
   },
@@ -66,6 +72,7 @@ beforeEach(() => {
   global.fetch = fetchSpy;
   process.env.ADMIN_TOKEN = "test_admin_token";
   process.env.PEXELS_API_KEY = "test_pexels_key";
+  process.env.OPENAI_API_KEY = "test_openai_key";
 });
 
 async function client() {
@@ -205,6 +212,19 @@ describe("word-image contract", () => {
 
     expect(r.body.imageable).toBe(true);
     expect(r.body.images.length).toBe(3);
+  });
+
+  it("a missing OPENAI_API_KEY degrades gracefully (reason init_error, no model or Pexels call)", async () => {
+    // The openai v4 constructor throws synchronously on a missing key; the route
+    // must catch that and degrade, never surfacing a 500 to the caller.
+    delete process.env.OPENAI_API_KEY;
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ ok: true, imageable: false, images: [], reason: "init_error" });
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("a model-call failure degrades gracefully (reason model_failed, no Pexels call)", async () => {

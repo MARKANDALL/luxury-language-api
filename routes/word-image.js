@@ -81,21 +81,21 @@ export default async function handler(req, res) {
     return res.status(200).json(empty("no_word"));
   }
 
-  // 4) Imports & init (mirrors coach-ask). On an import failure we degrade to the
+  // 4) Imports & init (mirrors coach-ask). On any init failure we degrade to the
   //    graceful empty shape rather than 500 — this route never throws to the
-  //    caller.
-  let OpenAI, jsonrepair;
+  //    caller. The OpenAI client is constructed INSIDE this guard on purpose: the
+  //    openai v4 constructor throws synchronously when OPENAI_API_KEY is missing,
+  //    and that throw must degrade to the empty shape, not surface as a 500.
+  let jsonrepair, openai;
   try {
     const modAI = await import("openai");
     const modRepair = await import("jsonrepair");
-    OpenAI = modAI.OpenAI;
     jsonrepair = modRepair.jsonrepair;
+    openai = new modAI.OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   } catch (e) {
-    console.error("[word-image] import error", e);
+    console.error("[word-image] init error", e);
     return res.status(200).json(empty("init_error"));
   }
-
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
   const MODEL =
     (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
@@ -244,5 +244,11 @@ Output MUST be valid JSON only, with exactly these keys:
     })
     .filter((im) => im.thumb || im.full);
 
+  // NB: a picturable word with zero Pexels matches returns imageable:true with an
+  // empty images array. `imageable` reflects the WORD's nature (decided in Step 1),
+  // not whether Pexels happened to stock a photo — the task defines imageable:false
+  // as abstract/function/cognition words, which this is not. The frontend should
+  // key its gallery on images.length, and may show a distinct message for a
+  // picturable-but-unmatched word.
   return res.status(200).json({ ok: true, imageable: true, query, images });
 }
