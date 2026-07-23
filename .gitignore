@@ -7,3 +7,5 @@ repomix-*.xml
 # Local secrets
 .env
 .env.local
+
+body.json
