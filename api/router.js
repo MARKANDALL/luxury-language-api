@@ -26,6 +26,7 @@ import convoTurn from "../routes/convo-turn.js";
 import dictate from "../routes/dictate.js";
 import learnerModel from "../routes/learner-model.js";
 import migrate from "../routes/migrate.js";
+import practicePod from "../routes/practice-pod.js";
 import realtimeWebrtcSession from "../routes/realtime-webrtc-session.js";
 import sessionAnalyst from "../routes/session-analyst.js";
 import updateAttempt from "../routes/update-attempt.js";
@@ -187,6 +188,7 @@ const ROUTES = {
   "admin/expenses/summary": expensesSummary,
   "admin/expenses/manual": expensesManual,
   "admin/expenses/refresh": expensesRefresh,
+  "practice-pod": practicePod,
   "pronunciation-gpt": pronunciationGpt,
   "realtime/webrtc/session": realtimeWebrtcSession,
   "session-analyst": sessionAnalyst,
@@ -296,6 +298,7 @@ const ADMIN_ONLY = new Set([
   "coach-ask",
   "coach-explain",
   "learner-model",
+  "practice-pod",
   "realtime/webrtc/session",
   "session-analyst",
   "voice-clone",
