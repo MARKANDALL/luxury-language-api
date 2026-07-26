@@ -12,20 +12,43 @@
 // separate route.
 //
 // Contract (POST /api/word-image):
-//   Request:  { word, sentence, lang, l1, uid }
-//   Response: { ok: true, imageable: true, query, images: [
+//   Request:  { word, sentence, lang, l1, uid, variant }
+//   Response: { ok: true, imageable: true, variant, query, images: [
 //                { thumb, full, alt, photographer, sourceUrl }, ... ] }   (<= 3)
 //
 //   - imageable:false means the word has no useful picture (abstract nouns,
 //     function words, most verbs of cognition). Then images:[] — this is a
 //     SUCCESS, not an error.
 //   - This route NEVER throws to the caller. On any internal failure it returns
-//     { ok:true, imageable:false, images:[], reason:"<short code>" } so the UI
-//     degrades to a friendly empty state.
+//     { ok:true, imageable:false, images:[], variant, reason:"<short code>" } so
+//     the UI degrades to a friendly empty state.
 //   - Determinism replaces caching for v1: classification runs at temperature 0
-//     and we keep Pexels' own result order and take the first 3, so the same word
-//     returns the same pictures every time (a word that changes its picture on
-//     each visit harms memory anchoring — the whole point of the feature).
+//     and we keep Pexels' own result order and take a fixed window, so the same
+//     word returns the same pictures every time (a word that changes its picture
+//     on each visit harms memory anchoring — the whole point of the feature).
+//
+// Variants (optional `variant`, default "reference"):
+//   Two surfaces ask for pictures of the same word with two different jobs.
+//   Reference ("look it up") wants the thing itself — bare, canonical, isolated.
+//   Coach ("help me learn it") wants the thing in life — in a scene, in use,
+//   ideally matching the learner's own sentence. That difference is real
+//   information for the learner, so the two surfaces must never show identical
+//   photos. Two mechanisms keep them apart:
+//     1. The classifier is asked for a different KIND of query per variant
+//        (one model call, not two — the variant only extends the prompt).
+//     2. The Pexels result window is disjoint by construction:
+//          reference -> per_page=3, results 1-3
+//          context   -> per_page=6, results 4-6
+//        So even when both variants collapse to the same query (short concrete
+//        word, no sentence), the two image sets cannot overlap — and each stays
+//        deterministic. A context query with fewer than 4 results returns
+//        whatever exists at position 4+, possibly [] (the UI's empty state).
+//   `imageable` is identical for both variants: a word is picturable or it is
+//   not, and only the query differs.
+//
+//   Backward compatibility: a request with no `variant` takes exactly today's
+//   path — the same prompt bytes, the same per_page=3, the same first-3 window.
+//   The variant prompt text and the wider window are added ONLY for "context".
 
 export const config = {
   api: {
@@ -41,11 +64,22 @@ const PEXELS_ENDPOINT = "https://api.pexels.com/v1/search";
 const PEXELS_TIMEOUT_MS = 6000;
 const MAX_IMAGES = 3;
 
+// How many results to ASK Pexels for, and which slice of them to return, per
+// variant. The windows are disjoint by construction (1-3 vs 4-6), which is what
+// guarantees the two surfaces never show the same photo even for an identical
+// query. `start` is a 0-based index into Pexels' own (stable) result order.
+const VARIANT_WINDOW = {
+  reference: { perPage: MAX_IMAGES, start: 0 },
+  context: { perPage: MAX_IMAGES * 2, start: MAX_IMAGES },
+};
+
 // The graceful empty shape. A `reason` is attached ONLY for internal failures
 // (no_key, model_failed, ...); a legitimately non-picturable word returns this
-// with no reason (it is a success, not a failure).
-function empty(reason) {
-  const out = { ok: true, imageable: false, images: [] };
+// with no reason (it is a success, not a failure). `variant` is echoed on every
+// outcome, not just the happy path, so the frontend can cache empty results per
+// surface without having to remember what it asked for.
+function empty(variant, reason) {
+  const out = { ok: true, imageable: false, images: [], variant };
   if (reason) out.reason = reason;
   return out;
 }
@@ -75,10 +109,17 @@ export default async function handler(req, res) {
   const lang = (body.lang || "en").toString().trim() === "es" ? "es" : "en";
   const targetLangName = lang === "es" ? "Spanish" : "English";
 
+  // Optional. Anything that is not exactly "context" — including absent, empty
+  // and unknown values — normalises to "reference", so an older frontend that
+  // sends no variant keeps today's behaviour untouched. The NORMALISED value is
+  // what gets echoed back, so the frontend cache always keys on a real variant.
+  const variant = (body.variant || "").toString().trim() === "context" ? "context" : "reference";
+  const resultWindow = VARIANT_WINDOW[variant];
+
   // A missing/empty word simply is not picturable — degrade gracefully (the
   // contract is "always 200, never throw"), so the UI shows its empty state.
   if (!word) {
-    return res.status(200).json(empty("no_word"));
+    return res.status(200).json(empty(variant, "no_word"));
   }
 
   // 4) Imports & init (mirrors coach-ask). On any init failure we degrade to the
@@ -94,7 +135,7 @@ export default async function handler(req, res) {
     openai = new modAI.OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   } catch (e) {
     console.error("[word-image] init error", e);
-    return res.status(200).json(empty("init_error"));
+    return res.status(200).json(empty(variant, "init_error"));
   }
 
   const MODEL =
@@ -107,7 +148,11 @@ export default async function handler(req, res) {
   // two things: (a) is a photograph a good teacher for this word, and (b) the
   // best 1-to-3-word ENGLISH search query (Pexels searches best in English, so a
   // Spanish word is translated; the sentence disambiguates sense).
-  const system = `
+  //
+  // The variant does NOT add a second model call — it only extends this one
+  // prompt, and only when it is "context". A reference request sends the exact
+  // prompt bytes this route has always sent.
+  const BASE_SYSTEM = `
 You decide whether a single vocabulary word can be taught with a PHOTOGRAPH, and
 if so, what to search for on a stock-photo site (Pexels).
 
@@ -138,6 +183,36 @@ Output MUST be valid JSON only, with exactly these keys:
 { "imageable": true, "query": "shelf" }
 `.trim();
 
+  // Appended for variant:"context" only. The coaching surface teaches the word
+  // by showing it at work, so it needs a scene rather than the bare object.
+  const CONTEXT_SYSTEM = `
+VARIANT: context
+
+This request is for a LEARNING surface, not a dictionary. It wants the concept
+IN USE or IN A SCENE, not the bare object isolated on a plain background.
+
+The imageable decision above is UNCHANGED — a word is picturable or it is not,
+and the variant never affects that judgment. Only the query changes:
+
+- Search for the thing in real life: being used, in its natural setting, with
+  the objects that normally surround it.
+- If the SENTENCE is present, let it steer the scene. Word "estante" in a
+  sentence about a kitchen gives "kitchen shelf with dishes", not "shelf".
+- If the SENTENCE is empty, pick a natural in-use scene for the concept on your
+  own. "shelf" gives "person reaching bookshelf".
+- Still ENGLISH, still concrete and photographable, still no punctuation. This
+  REPLACES the 1-to-3-word limit above: use 1 to 4 words.
+- If imageable is false, still return an empty string for query.
+`.trim();
+
+  const system =
+    variant === "context" ? BASE_SYSTEM + "\n\n" + CONTEXT_SYSTEM : BASE_SYSTEM;
+
+  // `variant` is added to the payload only for context, so the reference
+  // request body is byte-for-byte what it is today.
+  const userPayload = { word, sentence, language: targetLangName };
+  if (variant === "context") userPayload.variant = variant;
+
   let imageable = false;
   let query = "";
   {
@@ -150,15 +225,12 @@ Output MUST be valid JSON only, with exactly these keys:
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: system },
-          {
-            role: "user",
-            content: JSON.stringify({ word, sentence, language: targetLangName }),
-          },
+          { role: "user", content: JSON.stringify(userPayload) },
         ],
       });
     } catch (e) {
       console.error("[word-image] classify model call failed", e?.message || e);
-      return res.status(200).json(empty("model_failed"));
+      return res.status(200).json(empty(variant, "model_failed"));
     }
 
     const raw = resp?.choices?.[0]?.message?.content || "{}";
@@ -171,7 +243,7 @@ Output MUST be valid JSON only, with exactly these keys:
       }
     } catch (e) {
       console.warn("[word-image] could not parse model JSON", e?.message || e);
-      return res.status(200).json(empty("bad_model_json"));
+      return res.status(200).json(empty(variant, "bad_model_json"));
     }
 
     imageable = parsed?.imageable === true;
@@ -181,7 +253,7 @@ Output MUST be valid JSON only, with exactly these keys:
   // Not picturable (or no usable query) -> success with empty images. Crucially,
   // we do NOT call Pexels here: a non-imageable word must never reach the network.
   if (!imageable || !query) {
-    return res.status(200).json(empty());
+    return res.status(200).json(empty(variant));
   }
 
   // ── STEP 2 — query Pexels ───────────────────────────────────────────────────
@@ -191,12 +263,14 @@ Output MUST be valid JSON only, with exactly these keys:
     console.warn(
       "[word-image] PEXELS_API_KEY is not set — returning an empty image set"
     );
-    return res.status(200).json(empty("no_key"));
+    return res.status(200).json(empty(variant, "no_key"));
   }
 
+  // per_page is the variant's window size: 3 for reference (results 1-3), 6 for
+  // context (so results 4-6 exist to be sliced out below).
   const url = `${PEXELS_ENDPOINT}?${new URLSearchParams({
     query,
-    per_page: String(MAX_IMAGES),
+    per_page: String(resultWindow.perPage),
     orientation: "landscape",
   }).toString()}`;
 
@@ -210,7 +284,7 @@ Output MUST be valid JSON only, with exactly these keys:
     });
     if (!pr.ok) {
       console.warn(`[word-image] Pexels responded ${pr.status}`);
-      return res.status(200).json(empty("pexels_error"));
+      return res.status(200).json(empty(variant, "pexels_error"));
     }
     data = await pr.json();
   } catch (e) {
@@ -220,18 +294,25 @@ Output MUST be valid JSON only, with exactly these keys:
         e?.message || e
       }`
     );
-    return res.status(200).json(empty(timedOut ? "pexels_timeout" : "pexels_error"));
+    return res
+      .status(200)
+      .json(empty(variant, timedOut ? "pexels_timeout" : "pexels_error"));
   } finally {
     clearTimeout(timer);
   }
 
   // ── STEP 3 — shape the result ───────────────────────────────────────────────
-  // Preserve Pexels' own order and take the first 3 (determinism). Use the
-  // medium/large sizes rather than the very large originals. `alt` is the search
-  // query, so screen readers and broken-image states both say something useful.
+  // Preserve Pexels' own order and take this variant's window (determinism):
+  // results 1-3 for reference, 4-6 for context. Because the windows never
+  // overlap, the two surfaces cannot show the same photo even when both
+  // variants produced the same query. A context search with fewer than 4 hits
+  // simply slices to [] — a picturable word with no second-window photo, which
+  // the frontend's empty state already handles. Use the medium/large sizes
+  // rather than the very large originals. `alt` is the search query, so screen
+  // readers and broken-image states both say something useful.
   const photos = Array.isArray(data?.photos) ? data.photos : [];
   const images = photos
-    .slice(0, MAX_IMAGES)
+    .slice(resultWindow.start, resultWindow.start + MAX_IMAGES)
     .map((p) => {
       const src = p?.src || {};
       return {
@@ -250,5 +331,5 @@ Output MUST be valid JSON only, with exactly these keys:
   // as abstract/function/cognition words, which this is not. The frontend should
   // key its gallery on images.length, and may show a distinct message for a
   // picturable-but-unmatched word.
-  return res.status(200).json({ ok: true, imageable: true, query, images });
+  return res.status(200).json({ ok: true, imageable: true, variant, query, images });
 }
