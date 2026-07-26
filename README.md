@@ -72,6 +72,7 @@ This makes feedback structured and maintainable, and keeps the coaching behavior
 - `convo-turn` — generate AI conversation turns and suggested replies
 - `convo-report` — aggregate recent turns into a post-session report with trouble rollups
 - `pronunciation-gpt` — modular GPT-based coaching layered on Azure results
+- `coach-page` — the unified AI Coach page. THE COACH ROUTER (`routes/coach-page/router.js`) runs inside it as a cheap pre-pass that classifies each message into one of seven lanes; an off-scope verdict short-circuits with a canned redirect before the expensive call, everything else proceeds to the main call with the lane attached. Every classification lands in `coach_log`
 - `tts` — Azure TTS with SSML and optional word-boundary timing
 - `realtime-webrtc-session` — OpenAI Realtime API WebRTC handshake
 - `voice-clone` — create, check, or delete a user's ElevenLabs voice clone

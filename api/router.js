@@ -20,6 +20,7 @@ import adminUserStats from "../routes/admin-user-stats.js";
 import attempt from "../routes/attempt.js";
 import altMeaning from "../routes/alt-meaning.js";
 import coachAsk from "../routes/coach-ask.js";
+import coachPage from "../routes/coach-page.js";
 import convoImage from "../routes/convo-image.js";
 import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
@@ -177,6 +178,7 @@ const ROUTES = {
   assess,
   attempt,
   "coach-ask": coachAsk,
+  "coach-page": coachPage,
   "convo-image": convoImage,
   "convo-report": convoReport,
   "convo-turn": convoTurn,
@@ -297,6 +299,7 @@ const ADMIN_ONLY = new Set([
   "alt-meaning",
   "coach-ask",
   "coach-explain",
+  "coach-page",
   "learner-model",
   "practice-pod",
   "realtime/webrtc/session",
