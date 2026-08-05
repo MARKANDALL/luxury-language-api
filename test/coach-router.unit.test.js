@@ -16,8 +16,11 @@ import {
   buildRouterUser,
   buildSystemPrompt,
   classify,
+  luxMap,
   normalizeClassification,
   offScopeReply,
+  pageBlurb,
+  pageName,
   routeDeepLink,
 } from "../routes/coach-page/router.js";
 
@@ -50,6 +53,62 @@ describe("coach router — lanes and prompt", () => {
     expect(sys).toContain("Ties go to the learner.");
     expect(sys).toContain("PAGES (the only valid route_target values)");
     for (const key of Object.keys(PAGES)) expect(sys).toContain(`- ${key}:`);
+  });
+
+  it("still shows the classifier keys, because route_target is validated on them", () => {
+    const sys = buildSystemPrompt();
+    for (const key of Object.keys(PAGES)) {
+      expect(sys).toContain(`- ${key}: ${PAGES[key].blurb}`);
+    }
+  });
+});
+
+// ── HUMAN PAGE NAMES ────────────────────────────────────────────────────────
+// The coach once told a learner to "go to guidedChat". The key is the
+// classifier's vocabulary and the route chip's; it is never the learner's.
+describe("coach router — the page registry carries human names", () => {
+  it("gives every page a name in en and es-MX", () => {
+    for (const [key, page] of Object.entries(PAGES)) {
+      expect(page.name.en, `${key} has no English name`).toBeTruthy();
+      expect(page.name["es-MX"], `${key} has no es-MX name`).toBeTruthy();
+      expect(page.blurb, `${key} has no blurb`).toBeTruthy();
+    }
+  });
+
+  it("never names a page with something that looks like its key", () => {
+    for (const [key, page] of Object.entries(PAGES)) {
+      for (const name of Object.values(page.name)) {
+        expect(name).not.toBe(key);
+        expect(name).toMatch(/^[^a-z]|.*\s/); // a real name, not a camelCase token
+      }
+    }
+  });
+
+  it("resolves the name in the learner's language", () => {
+    expect(pageName("guidedChat", "en")).toBe("Guided Chat");
+    expect(pageName("guidedChat", "es")).toBe("Conversación guiada");
+    expect(pageName("allData", "es")).toBe("Todos los datos");
+  });
+
+  it("falls back to English for an unknown language, and to nothing for an unknown page", () => {
+    expect(pageName("allData", "fr")).toBe("All Data");
+    expect(pageName("streaming")).toBe(""); // charter row with no registry entry yet
+    expect(pageName("")).toBe("");
+    expect(pageName(null)).toBe("");
+  });
+
+  it("builds an answering map of names only — no keys anywhere in it", () => {
+    for (const lang of ["en", "es"]) {
+      const map = luxMap(lang);
+      for (const key of Object.keys(PAGES)) {
+        expect(map, `key "${key}" leaked into the answering map`).not.toContain(key);
+        expect(map).toContain(pageName(key, lang));
+      }
+    }
+  });
+
+  it("keeps the blurbs beside the names so the coach knows what each page is for", () => {
+    expect(luxMap("en")).toContain(`- All Data: ${pageBlurb("allData")}`);
   });
 });
 
