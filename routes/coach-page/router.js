@@ -50,15 +50,93 @@ export const DEFAULT_LANE = "LANGUAGE_GENERAL";
 // The valid `route_target` values, and the destinations shown to the classifier.
 // Add a page here and it becomes routable in the same edit — the prompt block
 // and the output validation both read this one constant.
+//
+// EACH PAGE NOW CARRIES A HUMAN NAME, and that is not decoration. A coach once
+// told a learner to "go to guidedChat" — a charter key, an internal identifier,
+// a thing that appears nowhere in the app the learner is looking at. The key is
+// the classifier's vocabulary and the route chip's vocabulary; it is never the
+// learner's. So the registry holds both: the key the machinery routes on, and
+// the name a person is allowed to hear, in en and es-MX (Law 10).
 export const PAGES = Object.freeze({
-  practiceSkills: "record a phrase and get pronunciation scores, per-sound detail, and drills",
-  picker: "choose a conversation scenario, character, and language pack",
-  guidedChat: "the guided AI conversation itself — chat bubbles, replies, and in-line feedback",
-  myWords: "the learner's saved words and word cards",
-  allData: "the full progress dashboard — history, charts, and change over time",
-  journey: "the guided tour of how speech and the mouth work",
+  practiceSkills: Object.freeze({
+    name: Object.freeze({ en: "Practice Skills", "es-MX": "Práctica de pronunciación" }),
+    blurb: "record a phrase and get pronunciation scores, per-sound detail, and drills",
+  }),
+  picker: Object.freeze({
+    name: Object.freeze({ en: "Conversation Picker", "es-MX": "Selector de conversaciones" }),
+    blurb: "choose a conversation scenario, character, and language pack",
+  }),
+  guidedChat: Object.freeze({
+    name: Object.freeze({ en: "Guided Chat", "es-MX": "Conversación guiada" }),
+    blurb: "the guided AI conversation itself — chat bubbles, replies, and in-line feedback",
+  }),
+  myWords: Object.freeze({
+    name: Object.freeze({ en: "My Words", "es-MX": "Mis palabras" }),
+    blurb: "the learner's saved words and word cards",
+  }),
+  allData: Object.freeze({
+    name: Object.freeze({ en: "All Data", "es-MX": "Todos los datos" }),
+    blurb: "the full progress dashboard — history, charts, and change over time",
+  }),
+  journey: Object.freeze({
+    name: Object.freeze({ en: "The Journey", "es-MX": "El recorrido" }),
+    blurb: "the guided tour of how speech and the mouth work",
+  }),
 });
 export const PAGE_SET = new Set(Object.keys(PAGES));
+
+// The UI language ("en" | "es") to the locale the names are written in. es-MX
+// with tuteo is the house Spanish everywhere else in Lux; the coach is no
+// exception.
+export const PAGE_NAME_LOCALES = Object.freeze({ en: "en", es: "es-MX" });
+
+// Tolerant read: an entry may still be a bare blurb string (that is what the
+// registry was before names landed), and a caller may hold a page key that no
+// longer exists.
+const pageEntry = (pageId) => {
+  const row = PAGES[String(pageId || "")];
+  if (!row) return null;
+  return typeof row === "string" ? { name: null, blurb: row } : row;
+};
+
+/**
+ * The name a learner may hear for a page, or "" when there is none. An empty
+ * string is the honest answer for an unknown page and the callers treat it as
+ * "do not name this page at all" — better a nameless page than a leaked key.
+ *
+ * @param {string} pageId charter key
+ * @param {string} lang   "en" | "es"
+ */
+export function pageName(pageId, lang = "en") {
+  const entry = pageEntry(pageId);
+  if (!entry?.name) return "";
+  const locale = PAGE_NAME_LOCALES[lang === "es" ? "es" : "en"];
+  return entry.name[locale] || entry.name.en || "";
+}
+
+/** The one-line description of a page, or "". */
+export function pageBlurb(pageId) {
+  return pageEntry(pageId)?.blurb || "";
+}
+
+/**
+ * THE MAP THE ANSWERING MODEL SEES. Human names only — no charter keys, no
+ * hrefs, no file names — so there is nothing in front of it to copy that a
+ * learner would not recognize. (The classifier's map, built by
+ * buildSystemPrompt below, is the opposite: it is keys, because keys are what
+ * route_target is validated against.)
+ *
+ * @param {string} lang "en" | "es"
+ */
+export function luxMap(lang = "en") {
+  return Object.keys(PAGES)
+    .map((key) => {
+      const name = pageName(key, lang);
+      return name ? `- ${name}: ${pageBlurb(key)}` : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
 
 // Under this, the lane is advisory only (see normalizeClassification). The
 // Khanmigo lesson: over-tightening hurts more than the occasional tangent.
@@ -171,7 +249,7 @@ pageId guidedChat · no anchor · "how much do people tip at restaurants in Mexi
  */
 export function buildSystemPrompt(pages = PAGES) {
   const lines = Object.entries(pages)
-    .map(([key, blurb]) => `- ${key}: ${blurb}`)
+    .map(([key, row]) => `- ${key}: ${typeof row === "string" ? row : row?.blurb || ""}`)
     .join("\n");
   return `${SYSTEM_PROMPT_BASE}
 

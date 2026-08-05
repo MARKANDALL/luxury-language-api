@@ -10,7 +10,7 @@
 import request from "supertest";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mkServer } from "./_helpers/mkServer.js";
-import { OFF_SCOPE_REPLIES } from "../routes/coach-page/router.js";
+import { OFF_SCOPE_REPLIES, PAGES } from "../routes/coach-page/router.js";
 
 const { state, insertSpy, fromSpy, createSpy } = vi.hoisted(() => {
   const state = {
@@ -372,5 +372,349 @@ describe("coach-page — coach_log", () => {
       in_scope: true,
       advisory: true,
     });
+  });
+});
+
+// ── THE COACH ACTUALLY READS `context` ──────────────────────────────────────
+// The frontend has been sending the charter row's contextSlice on every ask
+// since the rows shipped; the server ignored it. These pin the wiring end to
+// end: the lane picks the diet, the diet reaches the expensive call, and the
+// bounding holds at the transport layer and not only in the unit test.
+
+const mainUser = () => JSON.parse(mainCall().messages[1].content);
+const mainSystem = () => String(mainCall().messages[0].content);
+
+const PRACTICE_CONTEXT = {
+  referenceText: "The birch canoe slid on the smooth planks.",
+  partIndex: 1,
+  partCount: 3,
+  azureResultLatest: { pron: 78, worstPhonemes: [{ ipa: "ɜr", score: 41, word: "birch" }] },
+};
+
+const ALL_DATA_CONTEXT = {
+  historyAggregates: {
+    totals: { attempts: 214, sessions: 31, avgScore: 82.4 },
+    stubborn: [{ ipa: "ɜr", avg: 61.2, recentAvg: 58, count: 44 }],
+  },
+  learnerModelFull: { totals: { sessions: 31, events: 402 } },
+  streaks: { current: 4, longest: 11 },
+  perTypeAccumulatives: { conversation: { attempts: 34, daysSince: 19 } },
+};
+
+describe("coach-page — the context slice reaches the answering call", () => {
+  it("hands EXPLAIN the page state it was given", async () => {
+    state.classification = { lane: "EXPLAIN", in_scope: true, confidence: 0.96 };
+    const api = await client();
+    await ask(api, {
+      pageId: "practiceSkills",
+      anchor: { type: "passageSentence", text: "The birch canoe slid on the smooth planks." },
+      message: "what should I listen for here",
+      context: PRACTICE_CONTEXT,
+    });
+
+    const sent = mainUser();
+    expect(sent.context.referenceText).toContain("birch canoe");
+    expect(sent.context.azureResultLatest.worstPhonemes[0].ipa).toBe("ɜr");
+    expect(sent.context.partIndex).toBe(1);
+    expect(mainSystem()).toContain("PAGE CONTEXT");
+  });
+
+  it("hands PATTERNS the aggregates — the reason it stops inventing a stubborn sound", async () => {
+    state.classification = { lane: "PATTERNS", in_scope: true, confidence: 0.94 };
+    const api = await client();
+    await ask(api, {
+      pageId: "allData",
+      message: "what's my most stubborn sound",
+      context: ALL_DATA_CONTEXT,
+    });
+
+    const sent = mainUser();
+    expect(sent.context.historyAggregates.stubborn[0].ipa).toBe("ɜr");
+    expect(sent.context.learnerModelFull).toBeTruthy();
+    expect(sent.context.streaks.current).toBe(4);
+    expect(sent.context.perTypeAccumulatives.conversation.daysSince).toBe(19);
+  });
+
+  it("hands guided chat the turns it can see", async () => {
+    state.classification = { lane: "EXPLAIN", in_scope: true, confidence: 0.96 };
+    const api = await client();
+    await ask(api, {
+      pageId: "guidedChat",
+      anchor: { type: "bubbleText", text: "No manches, ¿en serio?" },
+      message: "why did she say it like that",
+      context: {
+        lastThreeTurns: [
+          { role: "assistant", text: "No manches, ¿en serio?" },
+          { role: "user", text: "Sí, de verdad." },
+        ],
+        characterCard: { label: "Daniela", npc: "A patient store employee." },
+        scenario: { id: "phone-repair", title: "At the Phone Store" },
+      },
+    });
+
+    const sent = mainUser();
+    expect(sent.context.lastThreeTurns).toHaveLength(2);
+    expect(sent.context.characterCard.label).toBe("Daniela");
+  });
+
+  it("never pays to send the context to the cheap classifier", async () => {
+    const api = await client();
+    await ask(api, { pageId: "allData", message: "what's improving", context: ALL_DATA_CONTEXT });
+    expect(routerCall().messages[1].content).not.toContain("historyAggregates");
+  });
+
+  it("sends no context key at all when the page sent none", async () => {
+    state.classification = { lane: "EXPLAIN", in_scope: true, confidence: 0.95 };
+    const api = await client();
+    await ask(api, { pageId: "picker", anchor: { type: "scenarioCard", text: "At the Vet" }, message: "what is this one" });
+    const sent = mainUser();
+    expect("context" in sent).toBe(false);
+    expect("contextNote" in sent).toBe(false);
+    expect(mainSystem()).not.toContain("PAGE CONTEXT");
+  });
+});
+
+describe("coach-page — the lane chooses the diet", () => {
+  const bothSlices = { ...PRACTICE_CONTEXT, ...ALL_DATA_CONTEXT };
+
+  it("PATTERNS gets history and not the passage in the box", async () => {
+    state.classification = { lane: "PATTERNS", in_scope: true, confidence: 0.9 };
+    const api = await client();
+    await ask(api, { pageId: "allData", message: "do I always miss the r", context: bothSlices });
+    const { context } = mainUser();
+    expect(context).toHaveProperty("historyAggregates");
+    expect(context).not.toHaveProperty("referenceText");
+    expect(context).not.toHaveProperty("azureResultLatest");
+  });
+
+  it("EXPLAIN gets the page state and not last month", async () => {
+    state.classification = { lane: "EXPLAIN", in_scope: true, confidence: 0.9 };
+    const api = await client();
+    await ask(api, {
+      pageId: "practiceSkills",
+      anchor: { type: "phonemeChip", text: "/ɜr/" },
+      message: "why is this one red",
+      context: bothSlices,
+    });
+    const { context } = mainUser();
+    expect(context).toHaveProperty("referenceText");
+    expect(context).not.toHaveProperty("historyAggregates");
+    expect(context).not.toHaveProperty("learnerModelFull");
+  });
+
+  it("NAV_HELP takes the knowledge doc instead of the page's context", async () => {
+    state.classification = { lane: "NAV_HELP", in_scope: true, confidence: 0.92 };
+    const api = await client();
+    await ask(api, { pageId: "allData", message: "where's the minimal pairs practice", context: bothSlices });
+    expect("context" in mainUser()).toBe(false);
+    expect(mainSystem()).toContain("LUX KNOWLEDGE");
+  });
+
+  it("CREATOR_INFO takes the knowledge doc too", async () => {
+    state.classification = { lane: "CREATOR_INFO", in_scope: true, confidence: 0.93 };
+    const api = await client();
+    await ask(api, { pageId: "journey", message: "who made this app", context: bothSlices });
+    expect("context" in mainUser()).toBe(false);
+    expect(mainSystem()).toContain("LUX KNOWLEDGE");
+  });
+
+  it("LANGUAGE_GENERAL gets the learner profile and nothing else", async () => {
+    const api = await client();
+    await ask(api, { pageId: "picker", message: "what does órale mean", context: bothSlices });
+    const sent = mainUser();
+    expect("context" in sent).toBe(false);
+    expect(sent.learner).toMatchObject({ level: "B1" });
+    expect(mainSystem()).not.toContain("LUX KNOWLEDGE");
+  });
+
+  it("ROUTE_TO_PAGE still gets page state for its short local answer (Law 5)", async () => {
+    state.classification = {
+      lane: "ROUTE_TO_PAGE",
+      in_scope: true,
+      route_target: "allData",
+      route_question: "How has my /r/ changed?",
+      confidence: 0.9,
+    };
+    const api = await client();
+    await ask(api, { pageId: "practiceSkills", message: "how has my r changed", context: bothSlices });
+    const { context } = mainUser();
+    expect(context).toHaveProperty("referenceText");
+    expect(context).not.toHaveProperty("historyAggregates");
+  });
+});
+
+describe("coach-page — context is bounded before it reaches the model", () => {
+  const catalog = (n) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `s-${i}`,
+      title: `Scenario ${i}`,
+      desc: `A situation to practice, number ${i}, with enough words in it to matter.`,
+    }));
+
+  it("caps the picker's 26-scenario catalog and tells the model it was capped", async () => {
+    state.classification = { lane: "EXPLAIN", in_scope: true, confidence: 0.95 };
+    const api = await client();
+    await ask(api, {
+      pageId: "picker",
+      anchor: { type: "scenarioCard", text: "At the Vet" },
+      message: "how do these two compare",
+      context: { scenarioCatalog: catalog(26), knobValues: "B1 · friendly · medium" },
+    });
+
+    const sent = mainUser();
+    expect(sent.context.scenarioCatalog.length).toBeLessThan(26);
+    expect(sent.contextNote).toContain("of 26");
+    expect(sent.context.knobValues).toBe("B1 · friendly · medium");
+    expect(mainSystem()).toContain("not absent from Lux");
+  });
+
+  it("never lets a hostile payload blow the window", async () => {
+    state.classification = { lane: "PATTERNS", in_scope: true, confidence: 0.9 };
+    const api = await client();
+    await ask(api, {
+      pageId: "allData",
+      message: "what's improving",
+      context: {
+        historyAggregates: { stubborn: catalog(2000) },
+        learnerModelFull: { categories: catalog(2000) },
+        streaks: { current: 4 },
+        perTypeAccumulatives: { practice: { attempts: 1 } },
+      },
+    });
+    expect(JSON.stringify(mainUser().context).length).toBeLessThanOrEqual(4000);
+  });
+});
+
+describe("coach-page — human page names only", () => {
+  it("names the page the learner is on in words, never by its charter key", async () => {
+    state.classification = { lane: "EXPLAIN", in_scope: true, confidence: 0.96 };
+    const api = await client();
+    await ask(api, {
+      pageId: "guidedChat",
+      anchor: { type: "bubbleText", text: "No manches" },
+      message: "what does that mean",
+    });
+
+    expect(mainSystem()).toContain("Guided Chat");
+    expect(mainUser().page).toBe("Guided Chat");
+    expect("pageId" in mainUser()).toBe(false);
+  });
+
+  it("puts no charter key anywhere in the answering prompt", async () => {
+    state.classification = {
+      lane: "ROUTE_TO_PAGE",
+      in_scope: true,
+      route_target: "allData",
+      route_question: "How has my /r/ sound changed?",
+      confidence: 0.9,
+    };
+    const api = await client();
+    await ask(api, {
+      pageId: "myWords",
+      message: "how has my r sound changed",
+      logTail: [{ pageId: "guidedChat", lane: "EXPLAIN", message: "what did that mean" }],
+    });
+
+    const both = `${mainSystem()}\n${mainCall().messages[1].content}`;
+    for (const key of Object.keys(PAGES)) {
+      expect(both, `charter key "${key}" leaked into the answering call`).not.toContain(key);
+    }
+  });
+
+  it("names the route destination in words too", async () => {
+    state.classification = {
+      lane: "ROUTE_TO_PAGE",
+      in_scope: true,
+      route_target: "allData",
+      route_question: "How has my /r/ sound changed?",
+      confidence: 0.9,
+    };
+    const api = await client();
+    await ask(api, { pageId: "myWords", message: "how has my r sound changed" });
+    expect(mainSystem()).toContain("a link to All Data");
+  });
+
+  it("uses the es-MX names under the Spanish pack", async () => {
+    state.classification = { lane: "NAV_HELP", in_scope: true, confidence: 0.92 };
+    const api = await client();
+    await ask(api, { pageId: "guidedChat", message: "¿dónde practico los sonidos?", lang: "es" });
+    expect(mainSystem()).toContain("Conversación guiada");
+    expect(mainSystem()).toContain("Práctica de pronunciación");
+  });
+
+  it("does not name a page it has no human name for", async () => {
+    state.classification = { lane: "EXPLAIN", in_scope: true, confidence: 0.95 };
+    const api = await client();
+    await ask(api, { pageId: "lifeMode", anchor: { type: "page", text: "x" }, message: "what is this" });
+    expect(mainSystem()).toContain("on a page of Lux");
+    expect(mainSystem()).not.toContain("lifeMode");
+  });
+});
+
+describe("coach-page — grounding rules", () => {
+  it("ships the four grounding rules on every answering call", async () => {
+    const api = await client();
+    await ask(api, { pageId: "picker", message: "what does órale mean" });
+    const sys = mainSystem();
+    expect(sys).toContain("GROUNDING");
+    expect(sys).toContain("State a fact about Lux ONLY if");
+    expect(sys).toContain("Never promise, describe, or imply a feature");
+    expect(sys).toContain("Never tell the learner that Lux CANNOT do something");
+    expect(sys).toContain(`"I don't know that one"`);
+    expect(sys).toContain("HUMAN NAMES ONLY");
+  });
+
+  it("tells NAV_HELP the reference doc is missing rather than letting it invent", async () => {
+    // The Lux Bible is not written yet; this is the degrade path, wired end to end.
+    state.classification = { lane: "NAV_HELP", in_scope: true, confidence: 0.92 };
+    const api = await client();
+    const r = await ask(api, { pageId: "allData", message: "where's the minimal pairs practice" });
+    expect(r.status).toBe(200);
+    expect(r.body.answer).toBe(state.answer); // the lane still answers
+    expect(mainSystem()).toContain("LUX KNOWLEDGE: the reference document is not available");
+  });
+});
+
+describe("coach-page — the explanation language (Law 8)", () => {
+  it("writes in the target language by default", async () => {
+    const api = await client();
+    await ask(api, { pageId: "picker", message: "what does órale mean", learner: { l1: "es" } });
+    expect(mainSystem()).toContain("Write in English.");
+  });
+
+  it("keeps the es-MX tuteo register under the Spanish pack", async () => {
+    const api = await client();
+    await ask(api, { pageId: "picker", message: "¿qué significa órale?", lang: "es" });
+    expect(mainSystem()).toContain("Write in Spanish.");
+    expect(mainSystem()).toContain(`informal "tú" register`);
+  });
+
+  it("answers in the learner's L1 when they chose that", async () => {
+    const api = await client();
+    await ask(api, {
+      pageId: "picker",
+      message: "what does órale mean",
+      learner: { l1: "es" },
+      answerIn: "l1",
+    });
+    expect(mainSystem()).toContain("Write your whole answer in Spanish");
+    expect(mainSystem()).toContain(`informal "tú" register`);
+  });
+
+  it("answers in both when they chose both", async () => {
+    const api = await client();
+    await ask(api, {
+      pageId: "picker",
+      message: "what does órale mean",
+      learner: { l1: "pt" },
+      answerIn: "both",
+    });
+    expect(mainSystem()).toContain("in English first, then the same point in ONE short line in Portuguese");
+  });
+
+  it("falls back to the target language when there is no usable L1", async () => {
+    const api = await client();
+    await ask(api, { pageId: "picker", message: "hola", learner: { l1: "universal" }, answerIn: "l1" });
+    expect(mainSystem()).toContain("Write in English.");
   });
 });

@@ -21,9 +21,11 @@
 //     pageId,                     // charter key: practiceSkills, picker, guidedChat, ...
 //     anchor: { type, text } | null,
 //     message,                    // typed text or the chip's ask
+//     context: {} | absent,       // the charter row's contextSlice (see below)
 //     learner: { level, l1, flags: [] },
 //     logTail: [],                // last ~5 coach_log rows, all pages
 //     lang,                       // "en" | "es" — the UI language (redirect language)
+//     answerIn,                   // "target" | "l1" | "both" (Law 8), optional
 //     conversionUsed,             // has this session already spent the Law 6 conversion?
 //     persona,                    // tutor | drill | linguist (coach voice)
 //     uid, sessionId              // optional, for coach_log
@@ -50,16 +52,35 @@
 // write happens BEFORE the main call, so a failed answer still leaves a record.
 // Table: migrations/0004_coach_log.sql.
 //
+// THE CONTEXT THE PAGE HANDS US, AND THE DIET THE LANE PUTS IT ON. Every coach
+// row sends a `context` slice (ui/coach-charter.js names the keys per row;
+// ui/coach-row-logic.js prunes what a page cannot fill truthfully and omits the
+// field entirely when nothing survives). The lane the classifier just chose
+// decides which of those keys are worth paying for: PATTERNS gets the aggregates
+// and the learner model, EXPLAIN gets the immediate page state, NAV_HELP and
+// CREATOR_INFO get the knowledge doc instead, LANGUAGE_GENERAL gets neither.
+// routes/coach-page/context.js owns that policy and the bounding; this route
+// only wires it in and logs what survived.
+//
+// GROUNDING. Two failures seen in the wild, in one session: the coach invented a
+// feature that does not exist AND denied one that does. The answering prompt now
+// carries hard rules against both, and the context note tells it when a list it
+// is holding was trimmed — so "I only see eight scenarios" can never become
+// "Lux only has eight scenarios".
+//
 // NOT IN THIS ROUTE: usage limits (protection layer 4 — after N OFF_SCOPE hits
 // in one session, skip classification entirely and return the plain redirect).
 // Not needed pre-launch.
 
 import {
-  PAGES,
   classify,
+  luxMap,
   offScopeReply,
+  pageName,
   routeDeepLink,
 } from "./coach-page/router.js";
+import { laneWantsKnowledge, selectContext } from "./coach-page/context.js";
+import { knowledgeBlock, knowledgeDoc } from "./coach-page/knowledge.js";
 
 export const config = {
   api: {
@@ -93,12 +114,12 @@ const L1_NAMES = {
   zh: "Chinese",
 };
 
-// The map of Lux the answering model is allowed to describe, built from the same
-// registry the router validates route_target against. Given to the lanes that
-// talk about the app so the coach points at real screens instead of inventing them.
-const LUX_MAP = Object.entries(PAGES)
-  .map(([key, blurb]) => `- ${key}: ${blurb}`)
-  .join("\n");
+// The explanation language, per Law 8: "target language, L1, or both (the
+// answerIn pattern already shipped in REF)". The coach rows send `lang` today
+// and nothing else, so "target" is the default and today's behavior is unchanged
+// — but the field is read when it arrives, because the pattern is the charter's
+// and the frontend payload is not ours to change.
+const ANSWER_IN_VALUES = new Set(["target", "l1", "both"]);
 
 // ── The main call, one task per lane ────────────────────────────────────────
 // The lane the router chose selects the task; everything else in the scaffold is
@@ -109,25 +130,25 @@ const LANE_TASKS = {
     maxTokens: 320,
     temp: 0.4,
     task:
-      "TASK — EXPLAIN: The learner is asking about what they selected or about something in front of them on this page. Answer THAT, directly, using the anchor as the subject. Lead with the answer in one line, then at most two lines of why it matters or what to do about it. Do not restate the anchor back at them, and do not wander off the page.",
+      "TASK — EXPLAIN: The learner is asking about what they selected or about something in front of them on this page. Answer THAT, directly, using the anchor as the subject and the `context` object as the page around it — the passage, the take, the scene, the settings, the scenarios on the deck are all real values you were handed, so read them instead of guessing at them. Lead with the answer in one line, then at most two lines of why it matters or what to do about it. Do not restate the anchor back at them, and do not wander off the page.",
   },
   NAV_HELP: {
     maxTokens: 300,
     temp: 0.3,
     task:
-      "TASK — NAV HELP: The learner wants to know how Lux works, where something lives, or what a feature does. Say plainly where to go and what they will find there, using ONLY the pages listed in LUX above. If you are not certain a feature exists, say so in one line and point at the nearest page that does exist — never invent a screen, button, or menu.",
+      "TASK — NAV HELP: The learner wants to know how Lux works, where something lives, or what a feature does. Say plainly where to go and what they will find there, using ONLY the pages listed in LUX above and whatever the LUX KNOWLEDGE block gives you. If you are not certain a feature exists, say so in one line and point at the nearest page that does exist — never invent a screen, button, or menu, and never tell them Lux cannot do something just because you were not told that it can.",
   },
   PATTERNS: {
     maxTokens: 320,
     temp: 0.4,
     task:
-      "TASK — PATTERNS: The learner is asking about their own history, habits, progress, or recurring errors. Answer from the pattern flags and recent activity you were given. Name the pattern concretely and give ONE thing to do about it next. If what you were given is too thin to see a trend, say that honestly in one line and point them at where the full history lives — never invent a statistic, a streak, or a trend.",
+      "TASK — PATTERNS: The learner is asking about their own history, habits, progress, or recurring errors. Answer from the `context` object — the history aggregates, the learner model, the streaks and the per-type totals are already computed and handed to you, with the real sounds and the real numbers in them. Cite what is there; do not re-derive it and do not round it into a story it does not support. Name the pattern concretely and give ONE thing to do about it next. If what you were given is too thin to see a trend, say that honestly in one line — never invent a statistic, a streak, or a trend.",
   },
   CREATOR_INFO: {
     maxTokens: 300,
     temp: 0.6,
     task:
-      "TASK — CREATOR INFO: The learner is asking about Mark, the teacher who built Lux, or about why Lux is built the way it is. Answer warmly and briefly, from the design philosophy: Lux is built by a language teacher for learners, it explains rather than scores, and it is meant to be the one place for every language question. Speak to the WHY. If you do not know a specific fact about Mark, say so plainly in one line instead of inventing biography.",
+      "TASK — CREATOR INFO: The learner is asking about Mark, the teacher who built Lux, or about why Lux is built the way it is. Answer warmly and briefly, from the LUX KNOWLEDGE block when it has something and from the design philosophy otherwise: Lux is built by a language teacher for learners, it explains rather than scores, and it is meant to be the one place for every language question. Speak to the WHY. If you do not know a specific fact about Mark, say so plainly in one line instead of inventing biography.",
   },
   LANGUAGE_GENERAL: {
     maxTokens: 340,
@@ -164,6 +185,52 @@ function routerModel() {
 
 const cap = (v, n) => (v == null ? "" : String(v)).trim().slice(0, n);
 
+/**
+ * LAW 8 — the explanation language is the learner's choice. `lang` is the pack:
+ * the language the learner is studying and the language the UI speaks. `l1` is
+ * the language they already have. `answerIn` picks between them.
+ *
+ * Falls back to the target language whenever the L1 cannot serve: no L1 chosen
+ * ("universal"), an L1 we have no name for, or an L1 that IS the target. Never
+ * returns an empty instruction — the coach always knows what to write in.
+ *
+ * @returns {{ note: string, targetName: string, l1Name: string, resolved: string }}
+ */
+export function explanationLanguage({ answerIn = "target", lang = "en", l1 = "" } = {}) {
+  const targetName = lang === "es" ? "Spanish" : "English";
+  const code = String(l1 || "").trim().toLowerCase();
+  const named = L1_NAMES[code] || (code && code !== "universal" ? String(l1).trim() : "");
+  const l1Name = named && named.toLowerCase() !== targetName.toLowerCase() ? named : "";
+
+  // es-MX with tuteo is the house Spanish everywhere in Lux, whether Spanish is
+  // the language being learned or the language being explained in.
+  const tuteo = ` Use the informal "tú" register (never "usted").`;
+  const spanishNote = (name) => (name === "Spanish" ? tuteo : "");
+
+  if (answerIn === "l1" && l1Name) {
+    return {
+      resolved: "l1",
+      targetName,
+      l1Name,
+      note: `Write your whole answer in ${l1Name} — the learner chose to have things explained in their first language.${spanishNote(l1Name)}`,
+    };
+  }
+  if (answerIn === "both" && l1Name) {
+    return {
+      resolved: "both",
+      targetName,
+      l1Name,
+      note: `Write the answer in ${targetName} first, then the same point in ONE short line in ${l1Name}.${spanishNote(targetName)}${spanishNote(l1Name)}`,
+    };
+  }
+  return {
+    resolved: "target",
+    targetName,
+    l1Name,
+    note: `Write in ${targetName}.${spanishNote(targetName)}`,
+  };
+}
+
 // The last ~5 coach_log rows the client carries between pages. Tolerant of both
 // the camelCase the client uses and the snake_case the table returns.
 function normalizeLogTail(rows) {
@@ -181,6 +248,20 @@ function normalizeLogTail(rows) {
       return row;
     })
     .filter((r) => r.message || r.lane);
+}
+
+// The same tail, with every charter key swapped for the name a learner may hear.
+// The classifier keeps the keys (they are its vocabulary); the answering model
+// never sees one, so it cannot echo one back. A page with no human name is
+// simply unnamed rather than named with its key.
+function logTailForAnswer(rows, lang) {
+  return rows.map((r) => {
+    const out = { lane: r.lane, message: r.message };
+    const name = pageName(r.pageId, lang);
+    if (name) out.page = name;
+    if (r.answer) out.answer = r.answer;
+    return out;
+  });
 }
 
 // Fire-and-forget classification log. Never blocks the answer, never throws, and
@@ -242,6 +323,17 @@ export default async function handler(req, res) {
   };
 
   const logTail = normalizeLogTail(body.logTail);
+
+  // The charter row's contextSlice, exactly as the page sent it. NOT shaped here:
+  // the lane decides what is worth reading, and the lane is not known until the
+  // pre-pass has run. Anything that is not a plain object is no context at all.
+  const contextIn =
+    body.context && typeof body.context === "object" && !Array.isArray(body.context)
+      ? body.context
+      : null;
+
+  const answerInRaw = cap(body.answerIn, 12).toLowerCase();
+  const answerIn = ANSWER_IN_VALUES.has(answerInRaw) ? answerInRaw : "target";
 
   const personaRaw = cap(body.persona ?? body.style, 24).toLowerCase();
   const persona = PERSONA_NOTES[personaRaw] ? personaRaw : "tutor";
@@ -327,42 +419,98 @@ export default async function handler(req, res) {
     });
   }
 
-  // 8) The main call, with the lane attached.
-  const chosen = LANE_TASKS[verdict.lane] || LANE_TASKS.LANGUAGE_GENERAL;
-  const L1NAME = L1_NAMES[learner.l1.toLowerCase()] || learner.l1;
-  const targetLangName = lang === "es" ? "Spanish" : "English";
-  const registerNote =
-    lang === "es"
-      ? `Write in Spanish using the informal "tú" register (never "usted").`
-      : `Write in English.`;
+  // 8) THE DIET. The lane is known, so what the expensive call is allowed to see
+  //    is known too: aggregates for PATTERNS, page state for EXPLAIN, the
+  //    knowledge doc for NAV_HELP and CREATOR_INFO, nothing at all for
+  //    LANGUAGE_GENERAL. routes/coach-page/context.js bounds whatever survives.
+  const picked = selectContext({ lane: verdict.lane, context: contextIn });
+  const doc = laneWantsKnowledge(verdict.lane) ? await knowledgeDoc() : null;
 
-  // The Lux map goes only to the lanes that talk about the app; the language
-  // lanes do not need it and should not be tempted to name screens.
-  const showsLuxMap = verdict.lane === "NAV_HELP" || verdict.lane === "ROUTE_TO_PAGE";
+  // Tuning telemetry, deliberately console-only. coach_log's columns ARE the
+  // insert payload in this file (migrations/0004), and PostgREST rejects the
+  // whole row on an unknown column — adding fields here would silently drop
+  // every classification on any deployment that had not run a new migration.
+  // A log line costs nothing and cannot break the analytics we already have.
+  console.log(
+    "[coach-page] context",
+    JSON.stringify({
+      page_id: pageId || null,
+      lane: verdict.lane,
+      present: picked.stats.present,
+      offered: picked.stats.offered,
+      kept: picked.stats.kept,
+      dropped: picked.stats.dropped,
+      off_diet: picked.stats.skipped,
+      chars: picked.stats.chars,
+      budget: picked.stats.budget,
+      truncated: picked.stats.truncated,
+      knowledge_chars: doc ? doc.chars : null,
+    })
+  );
+
+  // 9) The main call, with the lane attached.
+  const chosen = LANE_TASKS[verdict.lane] || LANE_TASKS.LANGUAGE_GENERAL;
+  const answerLang = explanationLanguage({ answerIn, lang, l1: learner.l1 });
+
+  // The Lux map goes to every lane that might mention the app; LANGUAGE_GENERAL
+  // is the one lane with no business naming a screen, so it does not get it —
+  // and is told plainly not to name one.
+  const showsLuxMap = verdict.lane !== "LANGUAGE_GENERAL";
   const luxBlock = showsLuxMap
-    ? `\nLUX (the only pages you may name):\n${LUX_MAP}\n`
+    ? `\nLUX (the only pages you may name — and the only names you may use for them):\n${luxMap(lang)}\n`
     : "";
-  const routeNote =
-    routed && routed.target
-      ? `\nThe app will offer this learner a link to the "${routed.target}" page for: "${routed.question}". Do not mention the link itself.\n`
-      : "";
+  const namingRule = showsLuxMap
+    ? "Name a page only as it is written in LUX above."
+    : "Do not name a Lux page in this answer at all.";
+
+  const knowledge = doc ? knowledgeBlock(doc) : "";
+
+  const contextBlock = picked.context
+    ? `\nPAGE CONTEXT: the \`context\` object in the user message is real data from this learner's own screen and history, handed to you by the app. Read it and answer FROM it — never guess at a number, a sound, a name, or a setting that is sitting right there.${
+        picked.note
+          ? " `contextNote` says what had to be trimmed to fit: a trimmed or missing key is unknown to you, not absent from Lux."
+          : ""
+      }\n`
+    : "";
+
+  const routeName = routed?.target ? pageName(routed.target, lang) : "";
+  const routeNote = routed?.target
+    ? `\nThe app will offer this learner a link${
+        routeName ? ` to ${routeName}` : " to another page"
+      } for: "${routed.question}". Do not mention the link itself.\n`
+    : "";
+
+  const humanPage = pageName(pageId, lang);
+  const whereLine = humanPage ? `on the ${humanPage} page of Lux` : "on a page of Lux";
 
   const system = `
-You are the Lux AI Coach, talking to a ${targetLangName} learner at CEFR level ${learner.level}.
+You are the Lux AI Coach, talking to a ${answerLang.targetName} learner at CEFR level ${learner.level}.
 
 ${PERSONA_NOTES[persona]}
 
-You are on the "${pageId || "unknown"}" page of Lux. You get: where the learner is, what
-they selected (the anchor, when there is one), what they asked, who they are, and
-the last few coach exchanges.
-${luxBlock}${routeNote}
+You are ${whereLine}. You get: where the learner is, what they selected (the anchor,
+when there is one), what they asked, who they are, the last few coach exchanges, and
+— when the question needs it — a \`context\` object of real data from their screen
+and their history.
+${luxBlock}${knowledge}${contextBlock}${routeNote}
 Rules:
-- ${registerNote}
+- ${answerLang.note}
 - Use NO words harder than the learner's ${learner.level} level.
 - Lead with the answer. No preamble, no restating the question, no filler.
 - Speak TO the learner ("you"/"tú"). Short beats complete.
-- Never invent facts about the learner, about Lux, or about the language. If you
-  do not know, say so in one short line.
+
+GROUNDING — these bind harder than anything else here:
+- State a fact about Lux ONLY if it appears in the context you were given or in the
+  LUX blocks above. Otherwise say you are not sure.
+- Never promise, describe, or imply a feature that is not in what you were given.
+- Never tell the learner that Lux CANNOT do something unless you were told so here.
+  Not being mentioned is not the same as not existing.
+- "I don't know that one" is always a better answer than a confident invention. The
+  same goes for the learner and for the language: no invented score, streak, sound,
+  word, or setting.
+- HUMAN NAMES ONLY. Never write an internal name in your answer — a camelCase or
+  snake_case identifier, a route or file name, a URL, or anything else that reads
+  like code rather than like a sentence. ${namingRule}
 
 ${chosen.task}
 
@@ -371,13 +519,17 @@ Output MUST be valid JSON only, with exactly this key:
 `.trim();
 
   const user = {
-    pageId,
     anchor,
     message,
     learner,
-    recent: logTail,
+    recent: logTailForAnswer(logTail, lang),
     lane: verdict.lane,
   };
+  // The page rides as its human name, never its charter key: the answering model
+  // cannot echo back an identifier it was never shown.
+  if (humanPage) user.page = humanPage;
+  if (picked.context) user.context = picked.context;
+  if (picked.note) user.contextNote = picked.note;
 
   try {
     const resp = await openai.chat.completions.create({
