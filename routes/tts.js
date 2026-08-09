@@ -107,6 +107,9 @@ export default async function handler(req, res) {
           audioBase64: Buffer.from(buf).toString("base64"),
           contentType: "audio/mpeg",
           wordBoundaries: Array.isArray(wordBoundaries) ? wordBoundaries : [],
+          // Viseme timeline ({id, t} in ms) for the animated mouth. Empty on the
+          // REST fallback path, exactly like wordBoundaries.
+          visemes: Array.isArray(extra?.visemes) ? extra.visemes : [],
           ...(extra?.timingsFallback
             ? { timingsFallback: true, timingsError: extra?.timingsError || "" }
             : {}),
