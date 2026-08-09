@@ -65,6 +65,20 @@ export async function speakSDK({ key, region, ssmlXml }) {
     synthesizer = new sdk.SpeechSynthesizer(speechConfig);
 
     const wordBoundaries = [];
+
+    // Viseme timeline for the animated mouth: Azure viseme IDs (0-21) stamped
+    // against the audio clock. `e.audioOffset` is in 100ns ticks, so /10000 = ms.
+    // e.animation (Microsoft's own SVG art) is deliberately ignored — it comes
+    // back empty in practice, and the IDs + offsets are the whole product here.
+    const visemes = [];
+    synthesizer.visemeReceived = (_s, e) => {
+      try {
+        visemes.push({ id: e.visemeId, t: e.audioOffset / 10000 });
+      } catch (err) {
+        console.warn("[tts:speakSDK] failed to record viseme", err);
+      }
+    };
+
     synthesizer.wordBoundary = (_s, e) => {
       try {
         wordBoundaries.push({
@@ -93,7 +107,7 @@ export async function speakSDK({ key, region, ssmlXml }) {
     }
 
     const buf = Buffer.from(result.audioData);
-    return { ok: true, buf, wordBoundaries };
+    return { ok: true, buf, wordBoundaries, visemes };
   } catch (e) {
     try {
       if (synthesizer) synthesizer.close();
@@ -115,6 +129,7 @@ export async function speak({ wantTimings, endpoint, hdrBase, key, region, ssmlX
   const restTry = await speakRest({ endpoint, hdrBase, ssmlXml });
   if (restTry?.ok) {
     restTry.wordBoundaries = [];
+    restTry.visemes = [];
     restTry.timingsFallback = true;
     restTry.timingsError = sdkTry?.detail || "SDK unavailable";
     return restTry;
