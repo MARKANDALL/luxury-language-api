@@ -371,6 +371,32 @@ describe("convo-image-targets validation", () => {
     expect(r.body.targets.map((t) => t.label)).toEqual(["a plant"]);
   });
 
+  it("catches a MULTI-WORD answer leaking into its own cloze", async () => {
+    // A single-token comparison would miss this: the head noun is three words,
+    // so "taza de cafe" has to be matched as a phrase or the answer ships in
+    // plain sight next to its own blank.
+    createSpy.mockResolvedValue(
+      modelReply([
+        { label: "la taza de café", point: { x: 0.3, y: 0.6 }, cloze: "La taza de café está junto a ___.", choices: ["la taza de café", "el plato", "la olla", "la cuchara"] },
+        { label: "la planta", point: { x: 0.7, y: 0.68 }, cloze: "Hay ___ aquí.", choices: ["la planta", "la silla", "la cesta", "el cajón"] },
+      ])
+    );
+    const api = await client();
+    const r = await post(api, { lang: "es" });
+    expect(r.body.targets.map((t) => t.label)).toEqual(["la planta"]);
+  });
+
+  it("blanks a MULTI-WORD answer when the model forgot the blank", async () => {
+    createSpy.mockResolvedValue(
+      modelReply([
+        { label: "the coffee cup", point: { x: 0.3, y: 0.6 }, cloze: "She is holding the coffee cup.", choices: ["the coffee cup", "the plate", "the kettle", "the spoon"] },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets[0].cloze).toBe("She is holding the ___");
+  });
+
   it("drops a target with no usable cloze at all", async () => {
     createSpy.mockResolvedValue(
       modelReply([
@@ -509,6 +535,18 @@ describe("convo-image-targets localization", () => {
     expect(createSpy.mock.calls[0][0].messages[0].content).toContain('"a mug"');
   });
 
+  it("forgives case and region on the pack value", async () => {
+    // A Spanish learner silently handed an English round is the worst failure
+    // here — nothing about it looks like an error — so "ES" and "es-MX" count.
+    for (const value of ["ES", "es-MX", "es-mx", " es "]) {
+      vi.resetModules();
+      createSpy.mockClear();
+      const api = await client();
+      const r = await post(api, { lang: value });
+      expect(r.body.lang, `lang=${value}`).toBe("es");
+    }
+  });
+
   it("strips the Spanish article when comparing, so el/la duplicates collapse", async () => {
     createSpy.mockResolvedValue(
       modelReply([
@@ -535,7 +573,7 @@ describe("convo-image-targets degradation", () => {
 
   it("an oversized image degrades gracefully (image_too_large, no model call)", async () => {
     const api = await client();
-    const r = await post(api, { imageUrl: "d".repeat(4_000_001) });
+    const r = await post(api, { imageUrl: "d".repeat(3_500_001) });
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ ok: true, targets: [], reason: "image_too_large" });
     expect(createSpy).not.toHaveBeenCalled();
@@ -584,13 +622,37 @@ describe("convo-image-targets degradation", () => {
     expect(r.body.targets[0].label).toBe("a mug");
   });
 
-  it("a set where nothing validates degrades gracefully (no_targets, no cache write)", async () => {
+  it("a set where nothing validates is no_valid_targets, NOT no_targets", async () => {
+    // The distinction is the whole point: this is a prompt/model regression, and
+    // reporting it as "nothing nameable in the picture" would hide it forever.
     createSpy.mockResolvedValue(
       modelReply([
         { label: "a mug", point: { x: 9, y: 9 }, cloze: "Holding ___.", choices: ["a mug", "a plate"] },
         { label: "", point: { x: 0.5, y: 0.5 }, cloze: "___ here.", choices: ["a plate", "a kettle"] },
       ])
     );
+    const api = await client();
+    const r = await post(api);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ ok: true, targets: [], reason: "no_valid_targets" });
+    expect(sbState.upserts).toHaveLength(0);
+  });
+
+  it("coordinates returned as percentages lose every target and say so", async () => {
+    // The concrete regression the two reasons exist to tell apart: a model that
+    // answers 0-100 instead of 0-1 fails every range check at once.
+    createSpy.mockResolvedValue(
+      modelReply(
+        enTargets().map((t) => ({ ...t, point: { x: t.point.x * 100, y: t.point.y * 100 } }))
+      )
+    );
+    const api = await client();
+    const r = await post(api);
+    expect(r.body).toMatchObject({ ok: true, targets: [], reason: "no_valid_targets" });
+  });
+
+  it("a model that finds nothing nameable is no_targets", async () => {
+    createSpy.mockResolvedValue(modelReply([]));
     const api = await client();
     const r = await post(api);
     expect(r.status).toBe(200);

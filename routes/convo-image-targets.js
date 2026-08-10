@@ -25,7 +25,14 @@
 //     imageKey    — optional caller-supplied stable id for this image. When
 //                   present it IS the cache key, so a caller that can identify
 //                   its own images keeps a stable key even if the bytes are
-//                   re-encoded. Otherwise the key is sha256(imageUrl).
+//                   re-encoded — which also lets it PROBE the cache with the key
+//                   alone and skip uploading megabytes on a replay. Otherwise
+//                   the key is derived here, and a client that wants to
+//                   reproduce it must match this exactly: the lowercase hex
+//                   SHA-256 of the imageUrl STRING (not the decoded bytes),
+//                   truncated to its first 32 characters. Hash anything else —
+//                   the bytes, a re-encoded URI, the full digest — and every
+//                   replay silently misses and re-bills a vision call.
 //     description — the scene description already stored on the image record
 //                   (convo-render.js keeps it on the .lux-convoImage wrapper as
 //                   data-description). Pure grounding: it steers the model
@@ -36,7 +43,10 @@
 //                   (the word-motor routes read `lang`, most others read
 //                   `pack`), so this route reads `body.lang || body.pack` the
 //                   way coach-page.js already does rather than picking a side
-//                   and making the caller guess.
+//                   and making the caller guess. Case and region are forgiven
+//                   too — "ES" and "es-MX" are Spanish. Silently dealing an
+//                   English round to a Spanish learner is the worst possible
+//                   failure here, because nothing about it looks like an error.
 //
 //   Response: { ok: true, cached: boolean, imageKey, lang, targets: [ {
 //                 label,      // target-language noun WITH its article ("la taza")
@@ -71,10 +81,19 @@
 // migrations/0005_image_targets.sql. Degrades gracefully when Supabase env is
 // missing (the route still works, it just pays for the model every time).
 //
-// SIZE: a 1024² PNG data URI runs 2-3 MB, and the platform caps a function body
-// at 4.5 MB. Callers should downscale before sending (a 768px JPEG is plenty for
-// this task and cuts the vision bill); anything past MAX_IMAGE_CHARS degrades to
-// reason:"image_too_large" rather than dying in the body parser.
+// SIZE — READ THIS BEFORE WRITING A CALLER. A 1024² PNG data URI runs 2-3 MB,
+// and the platform rejects a function body over ~4.5 MB AT THE EDGE, before this
+// route runs at all. So MAX_IMAGE_CHARS is not a substitute for the caller
+// behaving: it is deliberately set BELOW the platform ceiling so there is a real
+// window in which an oversized image degrades to reason:"image_too_large"
+// instead of surfacing as an opaque 413 the client has to special-case. Past the
+// platform ceiling nothing here can help — the request never arrives.
+//
+// The caller's job is therefore to downscale before sending. A ~768px JPEG is
+// plenty for this task, keeps the body an order of magnitude under every limit,
+// and cuts the vision bill. A caller that also wants to skip the upload entirely
+// on a replay should send `imageKey` alone (see above) — a cache hit needs no
+// image bytes at all.
 
 import crypto from "node:crypto";
 
@@ -107,9 +126,10 @@ const POINT_INSET = 0.03;
 
 const DIFFICULTY_VALUES = new Set(["easy", "medium", "hard"]);
 
-// ~4 MB of data URI. Past this the model call gets expensive and the platform
-// body limit is in sight, so degrade instead.
-const MAX_IMAGE_CHARS = 4_000_000;
+// Deliberately under the ~4.5 MB platform body cap, so this guard is REACHABLE:
+// an image between here and the cap degrades gracefully instead of 413-ing at
+// the edge where the route never sees it. Past the cap, nothing here runs.
+const MAX_IMAGE_CHARS = 3_500_000;
 
 const MAX_DESCRIPTION_CHARS = 2000;
 
@@ -382,7 +402,10 @@ export default async function handler(req, res) {
 
   // 3) Validate input
   const body = req.body || {};
-  const lang = (body.lang || body.pack || "en").toString().trim() === "es" ? "es" : "en";
+  // Region-tolerant: "es", "ES" and "es-MX" are all the Spanish pack. Anything
+  // else is English, the same closed two-value space every other route uses.
+  const langRaw = (body.lang || body.pack || "en").toString().trim().toLowerCase();
+  const lang = langRaw === "es" || langRaw.startsWith("es-") ? "es" : "en";
   const imageUrl = (body.imageUrl || "").toString().trim();
   const description = (body.description || "").toString().trim().slice(0, MAX_DESCRIPTION_CHARS);
 
@@ -489,9 +512,31 @@ export default async function handler(req, res) {
 
   // 7) Validate. The seed is the image key, so the choice order is stable for
   //    this image forever — cache hit or fresh call, the round is the same.
-  const targets = sanitizeTargets(parsed?.targets, lang, imageKey);
+  const rawTargets = Array.isArray(parsed?.targets) ? parsed.targets : [];
+  const targets = sanitizeTargets(rawTargets, lang, imageKey);
+
   if (!targets.length) {
+    // These two look identical to a caller but mean opposite things, and
+    // collapsing them hides the failure that actually needs fixing. "The model
+    // found nothing nameable in this picture" is a fine outcome for a blurry
+    // close-up. "The model answered and every single target failed validation"
+    // is a prompt or a model regression — the classic shape being coordinates
+    // returned as percentages, where every point fails the [0,1] range check and
+    // the whole set silently evaporates.
+    if (rawTargets.length) {
+      console.warn(
+        `[convo-image-targets] all ${rawTargets.length} targets failed validation ` +
+          `(lang=${lang} model=${MODEL} key=${imageKey})`
+      );
+      return res.status(200).json(empty(imageKey, lang, "no_valid_targets"));
+    }
     return res.status(200).json(empty(imageKey, lang, "no_targets"));
+  }
+
+  if (targets.length < rawTargets.length) {
+    console.log(
+      `[convo-image-targets] kept ${targets.length}/${rawTargets.length} targets (lang=${lang})`
+    );
   }
 
   // 8) Cache write — fire and forget, exactly like word-info's.
