@@ -139,6 +139,17 @@ const expensesSummary = lazyRoute(() => import("../routes/expenses-summary.js"),
 const expensesManual = lazyRoute(() => import("../routes/expenses-manual.js"), "routes/expenses-manual");
 const expensesRefresh = lazyRoute(() => import("../routes/expenses-refresh.js"), "routes/expenses-refresh");
 
+// Convo keepsakes (supabase storage + pg). Lazy for the same reason as the
+// expense routes: these pull the Supabase SDK at module scope, and convo-image
+// is imported eagerly, so keeping these lazy stops a keepsake import problem
+// from reaching an unrelated request.
+const keepsakesUpload = lazyRoute(() => import("../routes/keepsakes-upload.js"), "routes/keepsakes-upload");
+const keepsakesPromote = lazyRoute(() => import("../routes/keepsakes-promote.js"), "routes/keepsakes-promote");
+const keepsakesList = lazyRoute(() => import("../routes/keepsakes-list.js"), "routes/keepsakes-list");
+const keepsakesSet = lazyRoute(() => import("../routes/keepsakes-set.js"), "routes/keepsakes-set");
+const keepsakesDelete = lazyRoute(() => import("../routes/keepsakes-delete.js"), "routes/keepsakes-delete");
+const keepsakesCleanup = lazyRoute(() => import("../routes/keepsakes-cleanup.js"), "routes/keepsakes-cleanup");
+
 // Dev/proxy sanity check endpoint:
 // GET /api/ping   -> { ok: true, ... }
 // GET /api/health -> alias of /api/ping
@@ -203,6 +214,12 @@ const ROUTES = {
   "word-image": wordImage,
   "word-info": wordInfo,
   "coach-explain": coachExplain,
+  "keepsakes/upload": keepsakesUpload,
+  "keepsakes/promote": keepsakesPromote,
+  "keepsakes/list": keepsakesList,
+  "keepsakes/set": keepsakesSet,
+  "keepsakes/delete": keepsakesDelete,
+  "keepsakes/cleanup": keepsakesCleanup,
 };
 
 async function hydrateJsonBodyIfNeeded(req, res) {
@@ -309,6 +326,15 @@ const ADMIN_ONLY = new Set([
   "word-history",
   "word-image",
   "word-info",
+  // Keepsakes: gated like the rest of the browser-facing surface. NOTE the
+  // absence of "keepsakes/cleanup" — Vercel's cron sends Authorization: Bearer
+  // <CRON_SECRET> and no x-admin-token, so listing it here would 401 the cron.
+  // That route self-gates on isVercelCron() || isAdmin() instead.
+  "keepsakes/upload",
+  "keepsakes/promote",
+  "keepsakes/list",
+  "keepsakes/set",
+  "keepsakes/delete",
 ]);
 
     if (ADMIN_ONLY.has(route) && !isAdminRequest(req, u)) {
