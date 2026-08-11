@@ -34,7 +34,16 @@ vi.mock("openai", () => ({
 // `enabled:false` simulates missing Supabase env (getSupabaseAdmin throws).
 // `row` is what a cache read finds; `upserts` records every cache write.
 const { sbState } = vi.hoisted(() => ({
-  sbState: { enabled: true, row: null, upserts: [], readShouldThrow: false },
+  sbState: {
+    enabled: true,
+    row: null,
+    upserts: [],
+    readShouldThrow: false,
+    readError: null,
+    // Lets a test make the write settle LATER than the handler would like, which
+    // is the only way to tell an awaited write from an abandoned one.
+    onUpsert: null,
+  },
 }));
 
 vi.mock("../lib/supabase.js", () => ({
@@ -47,10 +56,11 @@ vi.mock("../lib/supabase.js", () => ({
           eq: () => chain,
           maybeSingle: async () => {
             if (sbState.readShouldThrow) throw new Error("cache read exploded");
-            return { data: sbState.row, error: null };
+            return { data: sbState.row, error: sbState.readError };
           },
           upsert: (payload, opts) => {
             sbState.upserts.push({ table, payload, opts });
+            if (sbState.onUpsert) return sbState.onUpsert(payload);
             return Promise.resolve({ data: null, error: null });
           },
           then: (resolve, reject) => Promise.resolve({ data: null, error: null }).then(resolve, reject),
@@ -89,6 +99,8 @@ beforeEach(() => {
   sbState.row = null;
   sbState.upserts = [];
   sbState.readShouldThrow = false;
+  sbState.readError = null;
+  sbState.onUpsert = null;
   process.env.ADMIN_TOKEN = "test_admin_token";
   process.env.OPENAI_API_KEY = "test_openai_key";
   delete process.env.LUX_AI_VISION_MODEL;
@@ -233,6 +245,58 @@ describe("convo-image-targets cache", () => {
     expect(payload.lang).toBe("en");
     expect(payload.model).toBe("gpt-4.1-mini");
     expect(payload.targets).toEqual(r.body.targets);
+  });
+
+  it("WAITS for the cache write to land before answering", async () => {
+    // The regression this route was actually shipped with: the write was
+    // scheduled and the handler returned, so the promise was abandoned and the
+    // row never appeared. Three calls for one image ran the model three times
+    // and left the table empty, and nothing in the response or the logs said
+    // so. Recording the call is not enough to catch that, because the abandoned
+    // version recorded it too; the write has to settle LATE and still be done
+    // by the time the response arrives.
+    let landed = false;
+    sbState.onUpsert = () =>
+      new Promise((resolve) =>
+        setTimeout(() => {
+          landed = true;
+          resolve({ data: null, error: null });
+        }, 30)
+      );
+
+    const api = await client();
+    const r = await post(api);
+
+    expect(landed).toBe(true);
+    expect(r.body.targets).toHaveLength(6);
+  });
+
+  it("says so when the cache write is rejected instead of swallowing it", async () => {
+    // A missing column or an anon-key RLS block comes back in `error`, not as a
+    // throw. Unchecked, it is indistinguishable from a working cache.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    sbState.onUpsert = () =>
+      Promise.resolve({ data: null, error: { message: 'relation "image_targets" does not exist' } });
+
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.status).toBe(200);
+    expect(r.body.targets).toHaveLength(6); // the round still happens
+    expect(warn.mock.calls.flat().join(" ")).toContain("cache write failed");
+    warn.mockRestore();
+  });
+
+  it("says so when the cache read is rejected instead of treating it as a miss", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    sbState.readError = { message: "permission denied for table image_targets" };
+
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(false); // still degrades to a fresh call
+    expect(warn.mock.calls.flat().join(" ")).toContain("cache read failed");
+    warn.mockRestore();
   });
 
   it("a caller-supplied imageKey becomes the cache key", async () => {

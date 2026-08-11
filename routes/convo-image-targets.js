@@ -432,12 +432,17 @@ export default async function handler(req, res) {
   //     upsert below overwrites it in place — no migration needed to reshape.
   if (sb) {
     try {
-      const { data } = await sb
+      const { data, error } = await sb
         .from("image_targets")
         .select("targets, v")
         .eq("image_key", imageKey)
         .eq("lang", lang)
         .maybeSingle();
+      // PostgREST reports failure in `error` rather than by rejecting, so an
+      // unchecked read makes a missing table or an anon-key RLS block look
+      // exactly like a cache miss: the game keeps working and silently re-bills
+      // a vision call every time, with nothing in the logs to say why.
+      if (error) console.warn("[convo-image-targets] cache read failed:", error.message);
       if (data?.v === TARGETS_V && Array.isArray(data.targets) && data.targets.length) {
         return res
           .status(200)
@@ -539,15 +544,30 @@ export default async function handler(req, res) {
     );
   }
 
-  // 8) Cache write — fire and forget, exactly like word-info's.
+  // 8) Cache write. AWAITED, not fire and forget.
+  //
+  // word-info.js can afford to abandon its cache write because a missed write
+  // there costs one cheap text call. Here the write IS the feature: the whole
+  // route exists so that opening a picture a second time is free. A promise
+  // scheduled and then abandoned as the handler responds is a cache that never
+  // fills, and the failure is invisible, because the game still works. It just
+  // pays for a vision call every single time.
+  //
+  // That is not hypothetical. The first cut of this route did fire and forget,
+  // and three consecutive calls for the same image ran the model three times
+  // and left zero rows behind. word-info.js already learned the same lesson for
+  // its logOnly insert, which it awaits "so the row lands before the serverless
+  // function can freeze after the response".
   if (sb) {
-    sb.from("image_targets")
-      .upsert(
+    try {
+      const { error } = await sb.from("image_targets").upsert(
         { image_key: imageKey, lang, v: TARGETS_V, targets, model: MODEL, updated_at: new Date().toISOString() },
         { onConflict: "image_key,lang" }
-      )
-      .then(() => {})
-      .catch((e) => console.warn("[convo-image-targets] cache write failed", e?.message || e));
+      );
+      if (error) console.warn("[convo-image-targets] cache write failed:", error.message);
+    } catch (e) {
+      console.warn("[convo-image-targets] cache write failed", e?.message || e);
+    }
   }
 
   return res.status(200).json({ ok: true, cached: false, imageKey, lang, targets });
