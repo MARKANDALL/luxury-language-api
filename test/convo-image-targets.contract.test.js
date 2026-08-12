@@ -614,6 +614,12 @@ describe("convo-image-targets validation", () => {
     expect(system).toContain("LITERALLY TRUE OF THIS IMAGE");
     expect(system).toContain("VISUALLY UNAMBIGUOUS");
     expect(system).toContain("re-read your own list once");
+    // Box quality: a tap lands inside it, so it has to hug the right thing and
+    // must not be a person or a surface.
+    expect(system).toContain("TIGHT");
+    expect(system).toContain("IT MUST CONTAIN THE THING YOU NAMED");
+    expect(system).toContain("NEVER A PERSON'S BODY");
+    expect(system).toContain("NO VAST SURFACES");
   });
 
   it("always offers the bare head noun as an alias", async () => {

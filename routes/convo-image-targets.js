@@ -449,10 +449,19 @@ For each target return:
 - "label": the noun. ${p.articleRule}
 - "box": { "x", "y", "w", "h" } — the thing's BOUNDING BOX as fractions of the
   image: x and y are its top-left corner from the left and top edges, w and h are
-  its width and height. Draw it around the object itself, tight enough that it
-  contains little else. This is what tells a learner WHICH thing is meant, so a
-  box drawn around the desk when you meant the calculator makes the question
-  unanswerable.
+  its width and height.
+  The box is not decoration: a learner will TAP inside it to answer, so it has
+  to be right.
+  * TIGHT. It must hug the object. A box with room to spare around the thing
+    accepts taps on whatever is beside it.
+  * IT MUST CONTAIN THE THING YOU NAMED. If the box you would draw does not have
+    the object inside it, the target is wrong. Check this before you keep it.
+  * NEVER A PERSON'S BODY. A box over someone's chest, neck, face or arm is only
+    acceptable when the thing you named IS what they are wearing or holding, and
+    then the box goes around the garment or the item, not the person.
+  * NO VAST SURFACES. Do not target a desk, a wall, a floor, a ceiling or a
+    counter top. Their boxes swallow half the picture and every tap lands in
+    them, which makes the question meaningless.
 - "point": { "x": 0.00-1.00, "y": 0.00-1.00 } — the centre of that same thing, as
   a fallback if the box is unusable. 0.5/0.5 is the middle of the picture.
 - "cloze": ONE natural sentence about this picture, in ${p.langName}, with the
@@ -478,8 +487,11 @@ For each target return:
   learner.
 
 Before you answer, re-read your own list once and drop or rewrite anything that
-fails either check: a sentence that is not literally true of this image, and a
-target another nearby object could just as well answer.
+fails any of these: a sentence that is not literally true of this image, a
+target another nearby object could just as well answer, a box that does not
+contain the thing it names, a box drawn over a person's body when the target is
+not their clothing or something they hold, and any target that is really a
+surface rather than an object.
 
 Output MUST be valid JSON only, exactly:
 { "targets": [ { "label": "...",
