@@ -2,6 +2,12 @@
 // Vercel/Next-style API route that validates an admin token, builds a scenario-driven system prompt, calls OpenAI chat completions, and returns an in-character reply plus 3 learner suggested replies as JSON.
 
 import { renderHearingBlock } from "../lib/hearing.js";
+import {
+  EMOTION_BLOCK,
+  EMOTION_OUTPUT_SCHEMA,
+  normalizeEmotion,
+  neutralEmotion,
+} from "../lib/emotion.js";
 
 export const config = {
   api: { bodyParser: true, externalResolver: true },
@@ -567,8 +573,10 @@ SUGGESTED REPLIES — WINDING DOWN / CLOSING:
 - When the phase is "winding_down," at least 1 of the 3 suggested_replies should be a natural farewell or closing remark.
 - When the phase is "closing," all 3 suggested_replies should be farewell variants — different ways to say goodbye or wrap up.
 
+${EMOTION_BLOCK}
+
 OUTPUT: JSON only, no other text:
-{"assistant":"your reply","narration":"optional stage direction or null","imageDirection":"required visual scene description for image generator","phase":"opening|active|winding_down|closing","suggested_replies":["option 1","option 2","option 3"]}
+{"assistant":"your reply","narration":"optional stage direction or null","imageDirection":"required visual scene description for image generator","phase":"opening|active|winding_down|closing","suggested_replies":["option 1","option 2","option 3"],${EMOTION_OUTPUT_SCHEMA}}
 `.trim();
 }
 
@@ -638,6 +646,8 @@ export default async function handler(req, res) {
         phase: "closing",
         status: "ended",
         suggested_replies: [],
+        // No model turn happened, so there is no signal to read — neutral, never absent.
+        emotion: neutralEmotion(),
       });
     }
 
@@ -704,6 +714,8 @@ const model =
         phase: "closing",
         status: "ended",
         suggested_replies: [],
+        // Safety layer ate the turn — no trustworthy signal. Neutral, never absent.
+        emotion: neutralEmotion(),
       });
     }
 
@@ -721,6 +733,12 @@ const model =
     const narration = json.narration && json.narration !== "null" ? json.narration : null;
     const imageDirection = json.imageDirection && json.imageDirection !== "null" ? json.imageDirection : null;
     const phase = json.phase || (isOpeningTurn ? "opening" : "active");
+
+    // Per-turn emotion signal. Read from the ORIGINAL model output — the length
+    // repair pass rewrites only `assistant`, so it cannot disturb this. Anything
+    // unknown, malformed, or absent collapses to neutral; the field is never absent.
+    const emotion = normalizeEmotion(json.emotion);
+    console.log(`[emotion] name=${emotion.name} level=${emotion.level ?? ""} raw=${JSON.stringify(json.emotion ?? null)}`);
 
     let sr = Array.isArray(json.suggested_replies)
       ? json.suggested_replies.filter(s => typeof s === "string" && s.trim()).slice(0, 3)
@@ -747,6 +765,7 @@ const model =
       imageDirection: imageDirection || null,
       phase,
       suggested_replies: sr,
+      emotion,
     });
 
   } catch (err) {
@@ -786,6 +805,8 @@ const model =
         phase: "closing",
         status: "ended",
         suggested_replies: [],
+        // Content filter refused the turn — no trustworthy signal. Neutral, never absent.
+        emotion: neutralEmotion(),
       });
     }
 
