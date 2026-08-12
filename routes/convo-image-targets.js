@@ -51,11 +51,20 @@
 //   Response: { ok: true, cached: boolean, imageKey, lang, targets: [ {
 //                 label,      // target-language noun WITH its article ("la taza")
 //                 point,      // { x, y } normalized 0..1 within the image
+//                 box?,       // { x, y, w, h } the thing's extent, when usable
 //                 cloze,      // natural sentence with a ___ blank
 //                 choices,    // the answer + up to 3 plausible distractors
 //                 answerIndex,// index of `label` inside `choices`
+//                 aliases,    // other acceptable ways to name the same thing
 //                 difficulty  // "easy" | "medium" | "hard"
 //               } ] }
+//
+//   `box` is the answer to the second playtest's grounding failure: a marker
+//   placed slightly off a calculator read as the desk behind it, and a point
+//   alone cannot say which was meant. When present, `point` IS the box's centre,
+//   so a caller that only understands points is already better off. `box` is
+//   absent on every row cached before it existed, and callers must treat it as
+//   optional rather than assume it.
 //
 //   - This route NEVER throws to the caller. The game is optional, so on any
 //     internal failure it returns { ok:true, cached:false, targets:[],
@@ -129,6 +138,12 @@ const MAX_CHOICES = 4;
 // call for every picture anyone has already played. Old sets simply come back
 // without aliases, and the frontend's fuzzy tier covers them.
 const MAX_ALIASES = 4;
+
+// A box smaller than this is a mis-drawn sliver rather than an object; a box
+// bigger than this in BOTH directions is the whole scene, which points at
+// nothing. Either way the point is the better answer.
+const MIN_BOX_SIDE = 0.02;
+const MAX_BOX_SIDE = 0.9;
 
 // Keep the marker off the very edge so a 28px dot is never half outside the
 // frame. Points outside [0,1] are INVALID (dropped); a valid point inside the
@@ -227,6 +242,46 @@ function unitCoord(v) {
   return Math.min(1 - POINT_INSET, Math.max(POINT_INSET, n));
 }
 
+/** A finite number inside [0,1], unclamped. Box edges may legitimately be 0 or 1. */
+function unitRaw(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > 1) return null;
+  return n;
+}
+
+/**
+ * The thing's extent, not just a spot on it.
+ *
+ * A point alone was the second playtest's first grounding failure: a marker
+ * placed a little off the calculator read as the desk behind it, and the learner
+ * had no way to tell which of the two was meant. A box says how big the thing
+ * is, which lets the frontend put the dot at its true centre and, when an answer
+ * goes wrong, show the extent so there is no doubt.
+ *
+ * Accepts { x, y, w, h } from the model. Rejects a box that is inverted, empty,
+ * out of bounds, or so large it is really "the whole picture" (which teaches
+ * nothing and would dim nothing). Returns null on any of those, and the caller
+ * falls back to the point, exactly as every already-cached row does.
+ */
+function unitBox(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const x = unitRaw(raw.x);
+  const y = unitRaw(raw.y);
+  const w = unitRaw(raw.w);
+  const h = unitRaw(raw.h);
+  if (x === null || y === null || w === null || h === null) return null;
+  if (w < MIN_BOX_SIDE || h < MIN_BOX_SIDE) return null;
+  if (w > MAX_BOX_SIDE && h > MAX_BOX_SIDE) return null;
+  if (x + w > 1.0001 || y + h > 1.0001) return null;
+  // Trim the rounding slop the bounds check just tolerated.
+  return {
+    x,
+    y,
+    w: Math.min(w, 1 - x),
+    h: Math.min(h, 1 - y),
+  };
+}
+
 /**
  * Turn one raw model item into a valid target, or null.
  *
@@ -244,10 +299,17 @@ function sanitizeTarget(raw, lang, seed) {
     .slice(0, 60);
   if (!label) return null;
 
-  // 1) The point must land inside the image.
-  const x = unitCoord(raw.point?.x);
-  const y = unitCoord(raw.point?.y);
-  if (x === null || y === null) return null;
+  // 1) Where the thing is. A valid box wins, because its CENTRE is a better
+  //    marker spot than a point the model estimated separately: a point drawn a
+  //    little low reads as the desk behind the calculator, and the box says
+  //    which of the two was meant. A missing or broken box falls back to the
+  //    point, which is also what every row cached before boxes existed does.
+  const box = unitBox(raw.box);
+  const px = box ? unitCoord(box.x + box.w / 2) : unitCoord(raw.point?.x);
+  const py = box ? unitCoord(box.y + box.h / 2) : unitCoord(raw.point?.y);
+  if (px === null || py === null) return null;
+  const x = px;
+  const y = py;
 
   // 2) The cloze must actually have a blank, and must not give the answer away.
   const head = headNoun(label, lang);
@@ -313,6 +375,9 @@ function sanitizeTarget(raw, lang, seed) {
   return {
     label,
     point: { x, y },
+    // Omitted rather than null when there is no usable box, so a target from a
+    // fresh call and a target from the pre-box cache are the same shape.
+    ...(box ? { box } : null),
     cloze,
     choices: shuffled,
     answerIndex,
@@ -372,18 +437,34 @@ Choose targets that are:
 - WORTH LEARNING: everyday nouns a learner will meet again. Skip abstractions,
   skip anything you are guessing at, and skip anything too small to point at.
 - Prefer things the scene is actually about over background filler.
+- VISUALLY UNAMBIGUOUS. This is the one that matters most. Before you keep a
+  target, look at what surrounds it: if a NEARBY object could plausibly be given
+  the same name, or could plausibly answer the same sentence, then the question
+  has two right answers and the learner will be told they are wrong for giving
+  one of them. A folder on a desk covered in paper is not a safe target for
+  "pamphlet". Either pick a different thing, or write a sentence that only the
+  thing you mean can complete.
 
 For each target return:
 - "label": the noun. ${p.articleRule}
-- "point": { "x": 0.00-1.00, "y": 0.00-1.00 } — where to put a marker, as a
-  fraction of the image: x from the LEFT edge, y from the TOP edge. Put it on the
-  CENTER of the thing itself. 0.5/0.5 is the middle of the picture. Be accurate:
-  a marker in the wrong place makes the question unanswerable.
+- "box": { "x", "y", "w", "h" } — the thing's BOUNDING BOX as fractions of the
+  image: x and y are its top-left corner from the left and top edges, w and h are
+  its width and height. Draw it around the object itself, tight enough that it
+  contains little else. This is what tells a learner WHICH thing is meant, so a
+  box drawn around the desk when you meant the calculator makes the question
+  unanswerable.
+- "point": { "x": 0.00-1.00, "y": 0.00-1.00 } — the centre of that same thing, as
+  a fallback if the box is unusable. 0.5/0.5 is the middle of the picture.
 - "cloze": ONE natural sentence about this picture, in ${p.langName}, with the
   target word replaced by exactly three underscores: ___
   Example: "${p.clozeExample}"
   The sentence must NOT contain the answer word anywhere else, and must read like
   something a person would say. Max 14 words.
+  It must also be LITERALLY TRUE OF THIS IMAGE. Describe only what is actually
+  depicted: do not write "holding" unless the thing is in someone's hand, do not
+  write "wearing" unless it is on their body, do not write "on the table" unless
+  it is on the table. A sentence that describes a plausible scene rather than
+  THIS scene will be answered correctly and marked wrong.
 - "choices": exactly 4 options — the label itself plus 3 plausible wrong answers
   in the same language and the same style (same kind of thing, same article
   form). A distractor should be temptingly wrong, not absurd.
@@ -396,8 +477,14 @@ For each target return:
 - "difficulty": "easy", "medium" or "hard" — roughly how hard this word is for a
   learner.
 
+Before you answer, re-read your own list once and drop or rewrite anything that
+fails either check: a sentence that is not literally true of this image, and a
+target another nearby object could just as well answer.
+
 Output MUST be valid JSON only, exactly:
-{ "targets": [ { "label": "...", "point": { "x": 0.0, "y": 0.0 },
+{ "targets": [ { "label": "...",
+                 "box": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 },
+                 "point": { "x": 0.0, "y": 0.0 },
                  "cloze": "...", "choices": ["...","...","...","..."],
                  "aliases": ["...","..."],
                  "difficulty": "easy" } ] }

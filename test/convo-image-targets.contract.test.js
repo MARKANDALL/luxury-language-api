@@ -549,6 +549,73 @@ describe("convo-image-targets validation", () => {
     expect(r.body.targets).toHaveLength(8);
   });
 
+  it("puts the marker at the BOX CENTRE when there is a usable box", async () => {
+    // The second playtest's grounding failure: a point a little off the
+    // calculator read as the desk behind it. The box says which was meant, and
+    // its centre beats a separately-estimated point.
+    createSpy.mockResolvedValue(
+      modelReply([
+        {
+          label: "a calculator",
+          box: { x: 0.4, y: 0.5, w: 0.2, h: 0.1 },
+          point: { x: 0.9, y: 0.9 }, // deliberately wrong; the box wins
+          cloze: "She is using ___.",
+          choices: ["a calculator", "a phone", "a stapler", "a ruler"],
+        },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    const target = r.body.targets[0];
+    expect(target.point.x).toBeCloseTo(0.5, 5);
+    expect(target.point.y).toBeCloseTo(0.55, 5);
+    expect(target.box).toEqual({ x: 0.4, y: 0.5, w: 0.2, h: 0.1 });
+  });
+
+  it("falls back to the point when the box is unusable, and omits the box", async () => {
+    const bad = [
+      { tag: "out of bounds", box: { x: 0.9, y: 0.1, w: 0.4, h: 0.1 } },
+      { tag: "a sliver", box: { x: 0.4, y: 0.4, w: 0.001, h: 0.2 } },
+      { tag: "the whole picture", box: { x: 0, y: 0, w: 1, h: 1 } },
+      { tag: "negative", box: { x: -0.2, y: 0.4, w: 0.2, h: 0.2 } },
+      { tag: "not numbers", box: { x: "left", y: 0.4, w: 0.2, h: 0.2 } },
+      { tag: "missing", box: undefined },
+    ];
+    for (const { tag, box } of bad) {
+      vi.resetModules();
+      createSpy.mockClear();
+      createSpy.mockResolvedValue(
+        modelReply([
+          {
+            label: "a mug",
+            box,
+            point: { x: 0.31, y: 0.62 },
+            cloze: "Holding ___.",
+            choices: ["a mug", "a plate", "a kettle", "a spoon"],
+          },
+        ])
+      );
+      const api = await client();
+      const r = await post(api);
+      const target = r.body.targets[0];
+      expect(target, `box case: ${tag}`).toBeTruthy();
+      expect(target.point.x, `box case: ${tag}`).toBeCloseTo(0.31, 5);
+      expect(target.box, `box case: ${tag}`).toBeUndefined();
+    }
+  });
+
+  it("asks for a box and for a literal, unambiguous cloze, in the same one call", async () => {
+    const api = await client();
+    await post(api);
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    const system = createSpy.mock.calls[0][0].messages[0].content;
+    expect(system).toContain('"box"');
+    expect(system).toContain("BOUNDING BOX");
+    expect(system).toContain("LITERALLY TRUE OF THIS IMAGE");
+    expect(system).toContain("VISUALLY UNAMBIGUOUS");
+    expect(system).toContain("re-read your own list once");
+  });
+
   it("always offers the bare head noun as an alias", async () => {
     // Dropping the article is the commonest near miss there is, and it must
     // never be graded wrong, whatever the model chose to return.
