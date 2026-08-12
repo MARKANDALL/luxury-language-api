@@ -160,16 +160,231 @@ const DIFFICULTY_VALUES = new Set(["easy", "medium", "hard"]);
 
 const CEFR_VALUES = new Set(["A1", "A2", "B1", "B2", "C1", "C2"]);
 
-// How to talk to the model about each band. The two ends lean inward on
-// purpose: a picture has only so many A1 nouns in it, and a C2 round of
-// genuinely rare words stops being a game about the scene.
+// The bands where a basic noun is a failure rather than a gentle round.
+const HIGH_BANDS = new Set(["C1", "C2"]);
+
+// How few targets a round may be served with before it is worth paying for a
+// fresh vision call. Below four, the round is over before it starts.
+const MIN_SERVED_TARGETS = 4;
+
+// A box this big is the scene, not a thing in it. The side-length rule above
+// only catches a box that is huge in BOTH directions, which lets a full-width
+// band of sky, sand or floor through: exactly the "Where is the sand?" round
+// the fourth playtest hit, served from a row cached before the rule existed.
+const MAX_BOX_AREA = 0.5;
+const MAX_BOX_BAND = 0.9;
+
+// Things whose name is a surface rather than an object. A learner cannot point
+// at "the sand": their tap lands in it wherever they put it, and the question
+// has no answer that is more right than any other. Head nouns, folded, so the
+// article is already gone by the time they are compared.
+const SURFACE_NOUNS = {
+  en: [
+    "sand", "sky", "water", "sea", "ocean", "lake", "river", "grass", "lawn",
+    "wall", "floor", "ceiling", "ground", "desk", "table", "counter",
+    "countertop", "tabletop", "road", "street", "sidewalk", "pavement", "snow",
+    "beach", "shore", "shoreline", "coast", "coastline", "field", "background",
+    "foreground", "horizon", "dirt", "mud", "wave", "waves", "surf", "foam",
+  ],
+  es: [
+    "arena", "cielo", "agua", "mar", "oceano", "lago", "rio", "cesped",
+    "hierba", "pasto", "pared", "muro", "piso", "suelo", "techo", "escritorio",
+    "mesa", "mostrador", "barra", "carretera", "calle", "camino", "acera",
+    "banqueta", "nieve", "playa", "orilla", "costa", "campo", "fondo",
+    "horizonte", "tierra", "lodo", "barro", "ola", "olas", "oleaje", "espuma",
+  ],
+};
+
+// Nouns a B1 learner already produces on sight. Harmless lower down, wrong at
+// C1 and C2, where the whole point of the band is the precise word, the part or
+// the material. This is a floor, not the mechanism: the prompt's per-band
+// exemplars and self-check do the work, and this catches what slips past.
+const BASIC_NOUNS = {
+  en: [
+    "chair", "door", "window", "book", "car", "dog", "cat", "house", "tree",
+    "bed", "phone", "cup", "glass", "shirt", "shoe", "shoes", "bag", "hat",
+    "ball", "clock", "box", "bottle", "cake", "bread", "apple", "man", "woman",
+    "boy", "girl", "child", "baby", "hand", "head", "face", "hair", "eye",
+    "eyes", "food", "plate", "spoon", "fork", "knife", "lamp", "television",
+    "computer", "bike", "bicycle", "bus", "train", "flower", "bird", "fish",
+    "sun", "moon", "star", "pen", "pencil", "paper", "key", "sock", "coat",
+    "jacket", "pants", "trousers", "dress", "towel", "soap", "toy", "chair",
+    "picture", "bowl", "shelf", "basket", "mirror", "suitcase", "umbrella",
+  ],
+  es: [
+    "silla", "puerta", "ventana", "libro", "coche", "carro", "auto", "perro",
+    "gato", "casa", "arbol", "cama", "telefono", "taza", "vaso", "camisa",
+    "zapato", "zapatos", "bolsa", "sombrero", "pelota", "reloj", "caja",
+    "botella", "pastel", "pan", "manzana", "hombre", "mujer", "nino", "nina",
+    "bebe", "mano", "cabeza", "cara", "pelo", "cabello", "ojo", "ojos",
+    "comida", "plato", "cuchara", "tenedor", "cuchillo", "lampara",
+    "television", "computadora", "bicicleta", "autobus", "tren", "flor",
+    "pajaro", "pez", "sol", "luna", "estrella", "boligrafo", "lapiz", "papel",
+    "llave", "calcetin", "abrigo", "chaqueta", "pantalones", "vestido",
+    "toalla", "jabon", "juguete", "cuadro", "tazon", "estante", "canasta",
+    "espejo", "maleta", "paraguas",
+  ],
+};
+
+const SURFACE_SETS = {
+  en: new Set(SURFACE_NOUNS.en),
+  es: new Set(SURFACE_NOUNS.es),
+};
+const BASIC_SETS = {
+  en: new Set(BASIC_NOUNS.en),
+  es: new Set(BASIC_NOUNS.es),
+};
+
+/**
+ * The one word the label is really about.
+ *
+ * "the sandy beach" is a beach and "a lifeguard shirt" is a shirt, but neither
+ * matches a list of plain nouns, which is how both walked into a live round: the
+ * first check compared whole phrases and a modifier was enough to slip past it.
+ *
+ * English puts the head last, Spanish puts it first. Both put it before "of" /
+ * "de", so "the brim of the hat" is a brim, not a hat — without that, naming a
+ * PART of a basic object, which is exactly what C1 is for, would be rejected as
+ * the basic object.
+ */
+function headWord(label, lang) {
+  let head = headNoun(label, lang);
+  if (!head) return "";
+  const cut = lang === "es" ? / de la | del | de los | de las | de / : / of the | of a | of /;
+  const m = cut.exec(` ${head} `);
+  if (m) head = ` ${head} `.slice(0, m.index).trim();
+  const parts = head.split(" ").filter(Boolean);
+  if (!parts.length) return "";
+  return lang === "es" ? parts[0] : parts[parts.length - 1];
+}
+
+/** The word, and its singular if it looks plural. Beaches, waves, walls. */
+function wordForms(w) {
+  const forms = [w];
+  if (w.length > 3 && w.endsWith("es")) forms.push(w.slice(0, -2));
+  if (w.length > 3 && w.endsWith("s")) forms.push(w.slice(0, -1));
+  return forms;
+}
+
+function inSet(set, label, lang) {
+  if (!set) return false;
+  const whole = headNoun(label, lang);
+  const head = headWord(label, lang);
+  for (const w of [...wordForms(whole), ...wordForms(head)]) {
+    if (w && set.has(w)) return w;
+  }
+  return false;
+}
+
+/**
+ * Why this target may not be served, or "".
+ *
+ * Applied in two places on purpose. Fresh model output runs through it, so a
+ * bad target never reaches the cache. Cached rows run through it AS THEY ARE
+ * READ, so a row written before a rule existed cannot keep serving what the
+ * rule now forbids. That second half is the one that matters: the rules against
+ * vast surfaces were already in the prompt when the fourth playtest was asked
+ * "Where is the sand?", because the row predated them and nothing re-checked it.
+ */
+function ruleFailure(target, lang, level) {
+  if (!target || typeof target !== "object") return "not_an_object";
+  if (!headNoun(target.label, lang)) return "no_label";
+
+  const surface = inSet(SURFACE_SETS[lang], target.label, lang);
+  if (surface) return `surface:${surface}`;
+
+  const box = target.box;
+  if (box && typeof box === "object") {
+    const w = Number(box.w);
+    const h = Number(box.h);
+    if (Number.isFinite(w) && Number.isFinite(h)) {
+      if (w * h > MAX_BOX_AREA) return "box_area";
+      if (w >= MAX_BOX_BAND || h >= MAX_BOX_BAND) return "box_band";
+    }
+  }
+
+  if (HIGH_BANDS.has(level)) {
+    // Matched on the HEAD word, so a modifier cannot buy a basic noun its way
+    // in. The first C2 run of this rule came back with "a bucket hat" and
+    // "a lifeguard shirt", which are a hat and a shirt with a word in front.
+    const basic = inSet(BASIC_SETS[lang], target.label, lang);
+    if (basic) return `too_basic:${basic}`;
+  }
+
+  return "";
+}
+
+// How to talk to the model about each band.
+//
+// Describing a band ("more precise vocabulary") does not move the model: the
+// fourth playtest asked for C2 and got "a first-aid kit", which is a B1 label.
+// What moves it is a worked contrast, so every band carries examples IN THE
+// TARGET LANGUAGE of what belongs and what does not, and the two high bands say
+// out loud that a part or a material is the right kind of answer there.
+//
+// The two ends still lean inward: a picture has only so many A1 nouns in it,
+// and a C2 round of words that are not really visible stops being a game about
+// the scene.
 const LEVEL_GUIDE = {
-  A1: "A1 beginner. The most common concrete nouns only: things a learner meets in their first weeks. If the picture does not hold enough of them, lean up to A2 rather than inventing obscure ones.",
-  A2: "A2 elementary. Everyday objects and clothing a learner would meet in the first year.",
-  B1: "B1 intermediate. Ordinary specific nouns, including compounds a learner would meet in daily life.",
-  B2: "B2 upper intermediate. More precise words, including the specific name for a thing rather than its general category.",
-  C1: "C1 advanced. Precise and less common vocabulary, including materials, parts and specialist names for what is shown.",
-  C2: "C2 mastery. The most precise word available for each thing, including technical and regional names. Where a picture cannot honestly support that, lean down to C1 rather than straining.",
+  en: {
+    A1: `A1 beginner. The commonest concrete nouns, the first words anyone learns.
+YES: "a dog", "a car", "a chair", "a book", "a door".
+NO: parts of objects, materials, or any word a beginner has not met.
+If the picture will not yield enough of these, lean up to A2 rather than inventing obscure ones.`,
+    A2: `A2 elementary. Everyday objects, clothes and furniture from a first year of study.
+YES: "a jacket", "a towel", "a mirror", "a suitcase", "a shelf".
+NO: parts of objects, materials, or specialist names.`,
+    B1: `B1 intermediate. Ordinary specific nouns, including everyday compounds.
+YES: "a backpack", "a paper cup", "a life jacket", "a windowsill", "a first-aid kit".
+NO: bare basics a beginner already owns ("a bag", "a cup"), and nothing technical.`,
+    B2: `B2 upper intermediate. The specific name for the thing rather than its category.
+YES: "a windbreaker" rather than "a jacket"; "a thermos" rather than "a bottle";
+     "a stretcher" rather than "a bed"; "a paperback" rather than "a book".
+NO: the general category word when a more specific one is plainly visible.`,
+    C1: `C1 advanced. Precise hyponyms, MATERIALS, and PARTS of the objects shown.
+Parts and materials are not merely allowed at this band, they are what it is for.
+YES: "driftwood" rather than "wood"; "a tourniquet" rather than "a bandage";
+     "whitecaps" rather than "waves"; "the visor" rather than "the helmet";
+     "gauze", "the hem", "the lapel", "the tread", "the shoulder strap".
+NO: any noun a B1 learner would produce on sight. If you would teach the word at
+    B1, it does not belong in a C1 round.`,
+    C2: `C2 mastery. The most precise word that exists for what is shown: technical terms,
+trade names for parts, materials, and regional names.
+YES: "the ferrule", "a carabiner", "hoarfrost", "a cannula", "the selvage",
+     "the escutcheon", "the plimsoll line", "the aglet".
+NO: anything you could equally have offered at B1 or B2. Where the picture cannot
+    honestly support this band, lean down to C1 rather than naming something that
+    is not really there.`,
+  },
+  es: {
+    A1: `A1 beginner. The commonest concrete nouns, the first words anyone learns.
+YES: "el perro", "el coche", "la silla", "el libro", "la puerta".
+NO: parts of objects, materials, or any word a beginner has not met.
+If the picture will not yield enough of these, lean up to A2 rather than inventing obscure ones.`,
+    A2: `A2 elementary. Everyday objects, clothes and furniture from a first year of study.
+YES: "la chaqueta", "la toalla", "el espejo", "la maleta", "el estante".
+NO: parts of objects, materials, or specialist names.`,
+    B1: `B1 intermediate. Ordinary specific nouns, including everyday compounds.
+YES: "la mochila", "el vaso de papel", "el chaleco salvavidas", "el botiquin".
+NO: bare basics a beginner already owns ("la bolsa", "la taza"), and nothing technical.`,
+    B2: `B2 upper intermediate. The specific name for the thing rather than its category.
+YES: "el cortavientos" rather than "la chaqueta"; "el termo" rather than "la botella";
+     "la camilla" rather than "la cama".
+NO: the general category word when a more specific one is plainly visible.`,
+    C1: `C1 advanced. Precise hyponyms, MATERIALS, and PARTS of the objects shown.
+Parts and materials are not merely allowed at this band, they are what it is for.
+YES: "el torniquete" rather than "la venda"; "la visera" rather than "el casco";
+     "la gasa", "el dobladillo", "la solapa", "la banda de rodadura", "el tirante".
+NO: any noun a B1 learner would produce on sight. If you would teach the word at
+    B1, it does not belong in a C1 round.`,
+    C2: `C2 mastery. The most precise word that exists for what is shown: technical terms,
+trade names for parts, materials, and regional names.
+YES: "la contera", "el mosquiton", "la escarcha", "la canula", "el orillo",
+     "el bocallave", "el herrete".
+NO: anything you could equally have offered at B1 or B2. Where the picture cannot
+    honestly support this band, lean down to C1 rather than naming something that
+    is not really there.`,
+  },
 };
 
 // Deliberately under the ~4.5 MB platform body cap, so this guard is REACHABLE:
@@ -310,7 +525,7 @@ function unitBox(raw) {
  * full hint ladder (point -> cloze -> choices) is dropped rather than shipped
  * half-working.
  */
-function sanitizeTarget(raw, lang, seed) {
+function sanitizeTarget(raw, lang, seed, level) {
   if (!raw || typeof raw !== "object") return null;
 
   const label = String(raw.label == null ? "" : raw.label)
@@ -392,7 +607,7 @@ function sanitizeTarget(raw, lang, seed) {
   if (head) pushAlias(head);
   (Array.isArray(raw.aliases) ? raw.aliases : []).forEach(pushAlias);
 
-  return {
+  const target = {
     label,
     point: { x, y },
     // Omitted rather than null when there is no usable box, so a target from a
@@ -404,14 +619,23 @@ function sanitizeTarget(raw, lang, seed) {
     aliases,
     difficulty: DIFFICULTY_VALUES.has(difficultyRaw) ? difficultyRaw : "medium",
   };
+
+  // The same gate the cache read applies, so nothing a served row would be
+  // filtered for can be written in the first place. Without this the two halves
+  // disagree: a row is stored, then permanently rejected on read, and every
+  // play of that picture pays for a regeneration that stores the same thing.
+  const bad = ruleFailure(target, lang, level);
+  if (bad) return null;
+
+  return target;
 }
 
 /** Sanitize the whole set, drop duplicates by head noun, cap at MAX_TARGETS. */
-function sanitizeTargets(rawList, lang, seed) {
+function sanitizeTargets(rawList, lang, seed, level) {
   const out = [];
   const heads = new Set();
   for (const raw of Array.isArray(rawList) ? rawList : []) {
-    const t = sanitizeTarget(raw, lang, seed);
+    const t = sanitizeTarget(raw, lang, seed, level);
     if (!t) continue;
     // Two markers pointing at the same word is a broken round, not a bonus.
     const head = headNoun(t.label, lang) || fold(t.label);
@@ -442,11 +666,45 @@ const PACK = {
 
 function buildSystemPrompt(lang, level) {
   const p = PACK[lang];
-  const band = level && LEVEL_GUIDE[level]
+  const guide = level ? LEVEL_GUIDE[lang]?.[level] : "";
+  const band = guide
     ? `
 
-VOCABULARY LEVEL: ${LEVEL_GUIDE[level]}
-Pick targets whose NAMES sit at that level. The things themselves are whatever is in the picture; the level decides which of them are worth naming and how precisely to name them.`
+VOCABULARY LEVEL: ${guide}
+
+Pick targets whose NAMES sit at that level. The things themselves are whatever is
+in the picture; the level decides which of them are worth naming and how precisely
+to name them.`
+    : "";
+
+  // The self-check the two high bands need. Stated as a test the model applies
+  // to its own finished list, because the band description alone did not hold:
+  // a C2 round came back with "a first-aid kit", a label this route's own B1
+  // examples use. Naming that failure is the point.
+  const bandCheck = HIGH_BANDS.has(level)
+    ? `
+
+HOW TO FIND ${level} TARGETS. Most photographs hold only three or four objects a
+beginner could name, so do not hunt for more objects. Look HARDER at the objects
+already in front of you and name their PARTS and their MATERIALS. A hat has a
+brim, a crown, an eyelet and a chin cord. A shirt has a collar, a cuff, a hem and
+a seam. A rescue buoy has a tow line, a webbing strap and a moulded handle. Those
+parts are the ${level} round; the hat and the shirt are not.
+
+LEVEL SELF-CHECK (${level} only, do this last). Read your labels back one at a time
+and ask: would a B1 learner name this thing with this same word, on sight? If yes,
+the target is too easy for this round. Replace it with a part of it, the material
+it is made of, or a more precise word for it. If none of those is honestly
+visible, drop the target rather than keeping it.
+Adding a modifier does NOT raise the band. "a bucket hat", "a yellow bucket hat"
+and "a lifeguard shirt" are all a hat and a shirt, and all three fail this check.
+"a first-aid kit" is a B1 label and fails it too; "gauze", "a tourniquet" and
+"the shoulder strap" are the same object seen at ${level}.
+Never target a bare surface (sand, sky, water, waves, a wall, a floor, a desk) at
+any level, and never pad the list with them to reach a count.
+RETURN AS FEW AS ${MIN_SERVED_TARGETS} TARGETS at this band if that is all the picture honestly
+holds. A short round of real ${level} words is the goal; a long round padded with
+easy ones is the failure.`
     : "";
   return `
 You are looking at a photorealistic illustration from a language-learning
@@ -517,7 +775,7 @@ fails any of these: a sentence that is not literally true of this image, a
 target another nearby object could just as well answer, a box that does not
 contain the thing it names, a box drawn over a person's body when the target is
 not their clothing or something they hold, and any target that is really a
-surface rather than an object.
+surface rather than an object.${bandCheck}
 
 Output MUST be valid JSON only, exactly:
 { "targets": [ { "label": "...",
@@ -614,9 +872,40 @@ export default async function handler(req, res) {
       // a vision call every time, with nothing in the logs to say why.
       if (error) console.warn("[convo-image-targets] cache read failed:", error.message);
       if (data?.v === TARGETS_V && Array.isArray(data.targets) && data.targets.length) {
-        return res
-          .status(200)
-          .json({ ok: true, cached: true, imageKey, lang, targets: data.targets });
+        // A cached row is answered against the rules AS THEY ARE NOW, not as
+        // they were the day it was written. The fourth playtest was asked
+        // "Where is the sand?" from a row that predated the no-surfaces rule;
+        // the prompt had been fixed and the cache had not, and nothing between
+        // them looked.
+        const kept = data.targets.filter((t) => {
+          const bad = ruleFailure(t, lang, level);
+          if (bad) {
+            console.log(
+              `[convo-image-targets] dropped cached target (${bad}) key=${imageKey} level=${level || "-"}`
+            );
+          }
+          return !bad;
+        });
+
+        // Serve unless the round has been gutted. Regeneration is one more
+        // vision call, so it is worth paying only when what survives will not
+        // make a game. A row that lost nothing is served whatever its length:
+        // it was already written under these rules, and asking the model again
+        // would return the same short set at the same price, every single play.
+        const dropped = data.targets.length - kept.length;
+        if (kept.length && (dropped === 0 || kept.length >= MIN_SERVED_TARGETS)) {
+          return res.status(200).json({ ok: true, cached: true, imageKey, lang, targets: kept });
+        }
+        if (imageUrl) {
+          console.log(
+            `[convo-image-targets] regenerating: ${kept.length}/${data.targets.length} cached ` +
+              `targets survived current rules (key=${imageKey} level=${level || "-"})`
+          );
+        } else if (kept.length) {
+          // A key-only probe has no bytes to regenerate from. A thin round beats
+          // pretending the picture has nothing in it.
+          return res.status(200).json({ ok: true, cached: true, imageKey, lang, targets: kept });
+        }
       }
     } catch (e) {
       console.warn("[convo-image-targets] cache read failed", e?.message || e);
@@ -688,7 +977,7 @@ export default async function handler(req, res) {
   // 7) Validate. The seed is the image key, so the choice order is stable for
   //    this image forever — cache hit or fresh call, the round is the same.
   const rawTargets = Array.isArray(parsed?.targets) ? parsed.targets : [];
-  const targets = sanitizeTargets(rawTargets, lang, imageKey);
+  const targets = sanitizeTargets(rawTargets, lang, imageKey, level);
 
   if (!targets.length) {
     // These two look identical to a caller but mean opposite things, and

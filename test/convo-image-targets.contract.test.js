@@ -80,7 +80,7 @@ function enTargets() {
   return [
     { label: "a mug", point: { x: 0.31, y: 0.62 }, cloze: "The barista is holding ___.", choices: ["a mug", "a plate", "a kettle", "a spoon"], difficulty: "easy" },
     { label: "an apron", point: { x: 0.48, y: 0.55 }, cloze: "She is wearing ___ over her shirt.", choices: ["an apron", "a scarf", "a jacket", "a hat"], difficulty: "medium" },
-    { label: "a counter", point: { x: 0.5, y: 0.78 }, cloze: "The keys are lying on ___.", choices: ["a counter", "a shelf", "a bench", "a table"], difficulty: "easy" },
+    { label: "a jar", point: { x: 0.5, y: 0.78 }, cloze: "The coffee beans are kept in ___.", choices: ["a jar", "a tin", "a sack", "a crate"], difficulty: "easy" },
     { label: "a window", point: { x: 0.86, y: 0.3 }, cloze: "Light comes in through ___.", choices: ["a window", "a door", "a mirror", "a lamp"], difficulty: "easy" },
     { label: "a chalkboard", point: { x: 0.15, y: 0.22 }, cloze: "The prices are written on ___.", choices: ["a chalkboard", "a poster", "a napkin", "a receipt"], difficulty: "hard" },
     { label: "a plant", point: { x: 0.7, y: 0.68 }, cloze: "There is ___ beside the till.", choices: ["a plant", "a basket", "a stool", "a crate"], difficulty: "medium" },
@@ -229,6 +229,87 @@ describe("convo-image-targets cache", () => {
     expect(r.body.cached).toBe(true);
     expect(r.body.targets).toEqual(legacy);
     expect(r.body.targets[0].aliases).toBeUndefined();
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  // ── The serve-time law ────────────────────────────────────────────────────
+  //
+  // A cached row is answered against the rules as they are NOW. The fourth
+  // playtest was asked "Where is the sand?" from a row written before the
+  // no-surfaces rule existed: the prompt had been fixed months of work earlier
+  // and nothing ever re-read what was already stored.
+
+  it("a cached surface target is filtered out on read, with no new model call", async () => {
+    const stored = [
+      { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle"], answerIndex: 0 },
+      { label: "the sand", point: { x: 0.5, y: 0.8 }, cloze: "Her feet are in ___.", choices: ["the sand", "the grass", "the water", "the snow"], answerIndex: 0 },
+      { label: "an apron", point: { x: 0.4, y: 0.5 }, cloze: "She wears ___.", choices: ["an apron", "a scarf", "a hat"], answerIndex: 0 },
+      { label: "a chalkboard", point: { x: 0.2, y: 0.2 }, cloze: "Prices on ___.", choices: ["a chalkboard", "a poster", "a receipt"], answerIndex: 0 },
+      { label: "a plant", point: { x: 0.7, y: 0.7 }, cloze: "Beside the till, ___.", choices: ["a plant", "a basket", "a crate"], answerIndex: 0 },
+    ];
+    sbState.row = { targets: stored, v: 1 };
+
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(true);
+    expect(r.body.targets.map((t) => t.label)).not.toContain("the sand");
+    expect(r.body.targets).toHaveLength(4);
+    // Four survivors still make a round, so the picture is not re-billed.
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("a cached row gutted below four targets is regenerated once and overwritten", async () => {
+    sbState.row = {
+      targets: [
+        { label: "the sand", point: { x: 0.5, y: 0.8 }, cloze: "Feet in ___.", choices: ["the sand", "the grass", "the snow"], answerIndex: 0 },
+        { label: "the sky", point: { x: 0.5, y: 0.1 }, cloze: "Above them, ___.", choices: ["the sky", "the sea", "the roof"], answerIndex: 0 },
+        { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle"], answerIndex: 0 },
+      ],
+      v: 1,
+    };
+
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(false);
+    expect(createSpy).toHaveBeenCalledTimes(1); // ONCE, not once per bad target
+    expect(sbState.upserts).toHaveLength(1);
+    expect(r.body.targets).toHaveLength(6);
+  });
+
+  it("a short cached row that loses nothing is served as it stands, not re-billed", async () => {
+    // The loop this closes: filter, come up short, regenerate, store the same
+    // short set, and pay for it again on every single play of that picture.
+    // Nothing was dropped, so asking again buys nothing.
+    const stored = [
+      { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle"], answerIndex: 0 },
+      { label: "an apron", point: { x: 0.4, y: 0.5 }, cloze: "She wears ___.", choices: ["an apron", "a scarf", "a hat"], answerIndex: 0 },
+    ];
+    sbState.row = { targets: stored, v: 1 };
+
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(true);
+    expect(r.body.targets).toEqual(stored);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("a probe with no image bytes serves the filtered remainder rather than nothing", async () => {
+    sbState.row = {
+      targets: [
+        { label: "the sand", point: { x: 0.5, y: 0.8 }, cloze: "Feet in ___.", choices: ["the sand", "the grass", "the snow"], answerIndex: 0 },
+        { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle"], answerIndex: 0 },
+      ],
+      v: 1,
+    };
+
+    const api = await client();
+    const r = await post(api, { imageUrl: "", imageKey: "convo-7-shot-3" });
+
+    expect(r.body.cached).toBe(true);
+    expect(r.body.targets.map((t) => t.label)).toEqual(["a mug"]);
     expect(createSpy).not.toHaveBeenCalled();
   });
 
@@ -417,6 +498,136 @@ describe("convo-image-targets cache", () => {
     expect(r.body.cached).toBe(true);
     expect(r.body.targets).toEqual(stored);
     expect(createSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ── Level teeth ─────────────────────────────────────────────────────────────
+//
+// Asking for C2 and being handed "a first-aid kit" is what these cover. The
+// band has to change the vocabulary, not just the label on the request.
+
+describe("convo-image-targets level teeth", () => {
+  const withLevel = (labels) =>
+    labels.map((label, i) => ({
+      label,
+      point: { x: 0.2 + i * 0.1, y: 0.4 },
+      cloze: `Here is ___ number ${i}.`,
+      choices: [label, `other ${i}a`, `other ${i}b`, `other ${i}c`],
+      difficulty: "medium",
+    }));
+
+  it("every band carries worked examples in the target language, not a description", async () => {
+    const api = await client();
+    await post(api, { level: "C1" });
+    const system = createSpy.mock.calls[0][0].messages[0].content;
+    expect(system).toContain("VOCABULARY LEVEL");
+    expect(system).toContain("driftwood");
+    expect(system).toContain("a tourniquet");
+    expect(system).toContain("MATERIALS");
+    expect(system).toContain("PARTS");
+  });
+
+  it("the Spanish pack gets Spanish exemplars", async () => {
+    const api = await client();
+    await post(api, { level: "C1", lang: "es" });
+    const system = createSpy.mock.calls[0][0].messages[0].content;
+    expect(system).toContain("el torniquete");
+    expect(system).toContain("la gasa");
+    expect(system).not.toContain("driftwood");
+  });
+
+  it("only C1 and C2 get the self-check, and it names the failure it exists for", async () => {
+    const api = await client();
+    await post(api, { level: "C2" });
+    const c2 = createSpy.mock.calls[0][0].messages[0].content;
+    expect(c2).toContain("LEVEL SELF-CHECK");
+    expect(c2).toContain("a first-aid kit");
+
+    vi.resetModules();
+    createSpy.mockClear();
+    const api2 = await client();
+    await post(api2, { level: "B1" });
+    expect(createSpy.mock.calls[0][0].messages[0].content).not.toContain("LEVEL SELF-CHECK");
+  });
+
+  it("a basic noun is dropped at C2 and kept at B1", async () => {
+    createSpy.mockResolvedValue(modelReply(withLevel(["a chair", "gauze", "the lapel"])));
+    const api = await client();
+    const hard = await post(api, { level: "C2" });
+    expect(hard.body.targets.map((t) => t.label)).toEqual(["gauze", "the lapel"]);
+
+    vi.resetModules();
+    createSpy.mockClear();
+    createSpy.mockResolvedValue(modelReply(withLevel(["a chair", "gauze", "the lapel"])));
+    const api2 = await client();
+    const easy = await post(api2, { level: "B1" });
+    expect(easy.body.targets.map((t) => t.label)).toEqual(["a chair", "gauze", "the lapel"]);
+  });
+
+  it("a surface is dropped at EVERY band, level or none", async () => {
+    for (const level of ["", "A1", "C2"]) {
+      vi.resetModules();
+      createSpy.mockClear();
+      createSpy.mockResolvedValue(modelReply(withLevel(["the sand", "a mug"])));
+      const api = await client();
+      const r = await post(api, level ? { level } : {});
+      expect(r.body.targets.map((t) => t.label)).toEqual(["a mug"]);
+    }
+  });
+
+  it("a modifier does not buy a basic noun its way into a high band", async () => {
+    // The first live C2 run answered "a bucket hat" and "a lifeguard shirt":
+    // a hat and a shirt with a word in front. Whole-phrase matching saw neither.
+    createSpy.mockResolvedValue(
+      modelReply(withLevel(["a bucket hat", "a lifeguard shirt", "the sandy beach", "a rash guard"]))
+    );
+    const api = await client();
+    const r = await post(api, { level: "C2" });
+    expect(r.body.targets.map((t) => t.label)).toEqual(["a rash guard"]);
+  });
+
+  it("a PART of a basic object survives the high bands, which is what they are for", async () => {
+    createSpy.mockResolvedValue(
+      modelReply(withLevel(["the brim of the hat", "the hem of the shirt", "a chair"]))
+    );
+    const api = await client();
+    const r = await post(api, { level: "C1" });
+    expect(r.body.targets.map((t) => t.label)).toEqual(["the brim of the hat", "the hem of the shirt"]);
+  });
+
+  it("Spanish takes its head noun from the FRONT, not the back", async () => {
+    // "la playa arenosa" is a beach; "el ala del sombrero" is a brim, not a hat.
+    // Reading Spanish from the right, as English is read, gets both backwards.
+    createSpy.mockResolvedValue(
+      modelReply(withLevel(["la playa arenosa", "el ala del sombrero", "la silla plegable", "la gasa"]))
+    );
+    const api = await client();
+    const r = await post(api, { level: "C1", lang: "es" });
+    expect(r.body.targets.map((t) => t.label)).toEqual(["el ala del sombrero", "la gasa"]);
+  });
+
+  it("a box that is half the picture, or a full-width band, is not an object", async () => {
+    createSpy.mockResolvedValue(
+      modelReply([
+        // Over half the frame: the scene, not a thing in it.
+        { label: "a mural", box: { x: 0.1, y: 0.1, w: 0.8, h: 0.8 }, point: { x: 0.5, y: 0.5 }, cloze: "Painted on it, ___.", choices: ["a mural", "a poster", "a flag", "a sign"] },
+        // A full-width strip: a horizon, a floor, a shelf edge. Every tap lands in it.
+        { label: "a ledge", box: { x: 0, y: 0.7, w: 0.95, h: 0.08 }, point: { x: 0.5, y: 0.74 }, cloze: "The cup sits on ___.", choices: ["a ledge", "a rail", "a step", "a sill"] },
+        { label: "a kettle", box: { x: 0.4, y: 0.4, w: 0.12, h: 0.16 }, point: { x: 0.46, y: 0.48 }, cloze: "Steam rises from ___.", choices: ["a kettle", "a pan", "a jug", "a pot"] },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets.map((t) => t.label)).toEqual(["a kettle"]);
+  });
+
+  it("what the filter rejects is never written to the cache", async () => {
+    // Otherwise the two halves disagree: stored, then rejected on every read,
+    // and the picture pays for a regeneration that stores the same thing again.
+    createSpy.mockResolvedValue(modelReply(withLevel(["the sky", "a mug", "a chalkboard"])));
+    const api = await client();
+    await post(api);
+    expect(sbState.upserts[0].payload.targets.map((t) => t.label)).toEqual(["a mug", "a chalkboard"]);
   });
 });
 
