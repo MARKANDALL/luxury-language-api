@@ -214,6 +214,24 @@ describe("convo-image-targets cache", () => {
     expect(sbState.upserts).toHaveLength(0);
   });
 
+  it("a set cached BEFORE aliases existed is still served, not re-billed", async () => {
+    // The promise made when aliases were added: adding a field does not
+    // invalidate the cache. Every picture anyone has already played would
+    // otherwise pay for a fresh vision call.
+    const legacy = [
+      { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle"], answerIndex: 0, difficulty: "easy" },
+    ];
+    sbState.row = { targets: legacy, v: 1 };
+
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(true);
+    expect(r.body.targets).toEqual(legacy);
+    expect(r.body.targets[0].aliases).toBeUndefined();
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
   it("a row stamped with an older schema version is a MISS and is overwritten", async () => {
     sbState.row = { targets: [{ label: "stale" }], v: 0 };
     const api = await client();
@@ -529,6 +547,81 @@ describe("convo-image-targets validation", () => {
     const api = await client();
     const r = await post(api);
     expect(r.body.targets).toHaveLength(8);
+  });
+
+  it("always offers the bare head noun as an alias", async () => {
+    // Dropping the article is the commonest near miss there is, and it must
+    // never be graded wrong, whatever the model chose to return.
+    createSpy.mockResolvedValue(
+      modelReply([
+        { label: "a coffee mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a coffee mug", "a plate", "a kettle", "a spoon"] },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets[0].aliases).toContain("coffee mug");
+  });
+
+  it("keeps the model's own aliases, capped and de-duplicated", async () => {
+    createSpy.mockResolvedValue(
+      modelReply([
+        {
+          label: "a computer monitor",
+          point: { x: 0.3, y: 0.6 },
+          cloze: "She is looking at ___.",
+          choices: ["a computer monitor", "a keyboard", "a printer", "a laptop"],
+          aliases: ["monitor", "screen", "a display", "MONITOR", "computer screen", "one more", "and another"],
+        },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    const aliases = r.body.targets[0].aliases;
+    expect(aliases.length).toBeLessThanOrEqual(4);
+    expect(aliases).toContain("computer monitor"); // the head noun, added first
+    expect(aliases).toContain("screen");
+    // "MONITOR" folds to the same thing as "monitor"; only one survives.
+    expect(aliases.filter((a) => a.toLowerCase() === "monitor")).toHaveLength(1);
+  });
+
+  it("refuses an alias that is one of the wrong choices", async () => {
+    // An alias marks an answer correct. If it collided with a distractor, that
+    // distractor would become a right answer and the question would be broken.
+    createSpy.mockResolvedValue(
+      modelReply([
+        {
+          label: "a mug",
+          point: { x: 0.3, y: 0.6 },
+          cloze: "Holding ___.",
+          choices: ["a mug", "a plate", "a kettle", "a spoon"],
+          aliases: ["a plate", "cup"],
+        },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    const aliases = r.body.targets[0].aliases;
+    expect(aliases).toContain("cup");
+    expect(aliases).not.toContain("a plate");
+  });
+
+  it("a target with no model aliases still has the head noun and never null", async () => {
+    createSpy.mockResolvedValue(
+      modelReply([
+        { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle", "a spoon"] },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    expect(Array.isArray(r.body.targets[0].aliases)).toBe(true);
+    expect(r.body.targets[0].aliases).toEqual(["mug"]);
+  });
+
+  it("asks the model for aliases in the same single call", async () => {
+    const api = await client();
+    await post(api);
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy.mock.calls[0][0].messages[0].content).toContain('"aliases"');
   });
 
   it("normalizes an unknown difficulty to medium", async () => {

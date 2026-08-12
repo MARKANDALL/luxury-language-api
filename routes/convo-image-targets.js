@@ -119,6 +119,17 @@ const MAX_TARGETS = 8;
 const MIN_CHOICES = 3;
 const MAX_CHOICES = 4;
 
+// Other ways of saying the same thing, so a learner who names the object
+// correctly but not in the exact words the model chose is not told they are
+// wrong. Includes the bare head noun, which is the single most common near
+// miss: "monitor" for "a computer monitor".
+//
+// NOT part of TARGETS_V. A set cached before aliases existed is still a
+// perfectly good round, and mass-invalidating the cache would re-bill a vision
+// call for every picture anyone has already played. Old sets simply come back
+// without aliases, and the frontend's fuzzy tier covers them.
+const MAX_ALIASES = 4;
+
 // Keep the marker off the very edge so a 28px dot is never half outside the
 // frame. Points outside [0,1] are INVALID (dropped); a valid point inside the
 // image is only nudged in from the rim.
@@ -280,12 +291,32 @@ function sanitizeTarget(raw, lang, seed) {
 
   const difficultyRaw = String(raw.difficulty == null ? "" : raw.difficulty).trim().toLowerCase();
 
+  // 4) Aliases: other correct ways to name this thing. The head noun is always
+  //    one of them, since dropping the article is the commonest near miss and
+  //    it should never be graded as wrong. Distractors are excluded by
+  //    construction: an alias that matches one of the wrong choices would make
+  //    that choice correct too.
+  const aliasSeen = new Set([fold(label)]);
+  const wrongChoices = new Set(shuffled.map(fold).filter((f) => f !== fold(label)));
+  const aliases = [];
+  const pushAlias = (v) => {
+    const s = String(v == null ? "" : v).trim().replace(/\s+/g, " ").slice(0, 60);
+    if (!s || aliases.length >= MAX_ALIASES) return;
+    const key = fold(s);
+    if (!key || aliasSeen.has(key) || wrongChoices.has(key)) return;
+    aliasSeen.add(key);
+    aliases.push(s);
+  };
+  if (head) pushAlias(head);
+  (Array.isArray(raw.aliases) ? raw.aliases : []).forEach(pushAlias);
+
   return {
     label,
     point: { x, y },
     cloze,
     choices: shuffled,
     answerIndex,
+    aliases,
     difficulty: DIFFICULTY_VALUES.has(difficultyRaw) ? difficultyRaw : "medium",
   };
 }
@@ -356,12 +387,19 @@ For each target return:
 - "choices": exactly 4 options — the label itself plus 3 plausible wrong answers
   in the same language and the same style (same kind of thing, same article
   form). A distractor should be temptingly wrong, not absurd.
+- "aliases": 2 to 4 OTHER ways a learner could correctly name this same thing,
+  each of which you would accept as right. Include the bare noun without its
+  article, a shorter everyday form of a compound ("monitor" for "a computer
+  monitor"), and any common synonym or regional variant. Do NOT include a word
+  for a DIFFERENT object, and do not repeat any of the wrong choices: anything
+  listed here will be marked correct.
 - "difficulty": "easy", "medium" or "hard" — roughly how hard this word is for a
   learner.
 
 Output MUST be valid JSON only, exactly:
 { "targets": [ { "label": "...", "point": { "x": 0.0, "y": 0.0 },
                  "cloze": "...", "choices": ["...","...","...","..."],
+                 "aliases": ["...","..."],
                  "difficulty": "easy" } ] }
 `.trim();
 }
