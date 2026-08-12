@@ -86,9 +86,15 @@
 // and feeds it the same image bytes convo-image.js works with. Set
 // LUX_AI_VISION_MODEL to pin a different vision model without a code change.
 //
-// CACHE: table image_targets, keyed (image_key, lang). See
-// migrations/0005_image_targets.sql. Degrades gracefully when Supabase env is
-// missing (the route still works, it just pays for the model every time).
+// CACHE: table image_targets, keyed (image_key, lang, level). See
+// migrations/0005_image_targets.sql and 0007_image_targets_level.sql. Degrades
+// gracefully when Supabase env is missing (the route still works, it just pays
+// for the model every time).
+//
+// `level` is "" when the caller did not ask for a band, which is what every row
+// cached before levels existed already holds, so those rows keep serving the
+// scenario-default round for free. Asking for a NEW level on a picture is one
+// fresh vision call, cached forever after under its own key.
 //
 // SIZE — READ THIS BEFORE WRITING A CALLER. A 1024² PNG data URI runs 2-3 MB,
 // and the platform rejects a function body over ~4.5 MB AT THE EDGE, before this
@@ -151,6 +157,20 @@ const MAX_BOX_SIDE = 0.9;
 const POINT_INSET = 0.03;
 
 const DIFFICULTY_VALUES = new Set(["easy", "medium", "hard"]);
+
+const CEFR_VALUES = new Set(["A1", "A2", "B1", "B2", "C1", "C2"]);
+
+// How to talk to the model about each band. The two ends lean inward on
+// purpose: a picture has only so many A1 nouns in it, and a C2 round of
+// genuinely rare words stops being a game about the scene.
+const LEVEL_GUIDE = {
+  A1: "A1 beginner. The most common concrete nouns only: things a learner meets in their first weeks. If the picture does not hold enough of them, lean up to A2 rather than inventing obscure ones.",
+  A2: "A2 elementary. Everyday objects and clothing a learner would meet in the first year.",
+  B1: "B1 intermediate. Ordinary specific nouns, including compounds a learner would meet in daily life.",
+  B2: "B2 upper intermediate. More precise words, including the specific name for a thing rather than its general category.",
+  C1: "C1 advanced. Precise and less common vocabulary, including materials, parts and specialist names for what is shown.",
+  C2: "C2 mastery. The most precise word available for each thing, including technical and regional names. Where a picture cannot honestly support that, lean down to C1 rather than straining.",
+};
 
 // Deliberately under the ~4.5 MB platform body cap, so this guard is REACHABLE:
 // an image between here and the cap degrades gracefully instead of 413-ing at
@@ -420,12 +440,18 @@ const PACK = {
   },
 };
 
-function buildSystemPrompt(lang) {
+function buildSystemPrompt(lang, level) {
   const p = PACK[lang];
+  const band = level && LEVEL_GUIDE[level]
+    ? `
+
+VOCABULARY LEVEL: ${LEVEL_GUIDE[level]}
+Pick targets whose NAMES sit at that level. The things themselves are whatever is in the picture; the level decides which of them are worth naming and how precisely to name them.`
+    : "";
   return `
 You are looking at a photorealistic illustration from a language-learning
 conversation. Find the things in it that are worth teaching as vocabulary, and
-describe where each one is.
+describe where each one is.${band}
 
 Return between ${MIN_TARGETS} and ${MAX_TARGETS} targets. Every string you write must be in
 ${p.langName} — labels, sentences and options alike. Return JSON only, no markdown.
@@ -543,6 +569,12 @@ export default async function handler(req, res) {
   // else is English, the same closed two-value space every other route uses.
   const langRaw = (body.lang || body.pack || "en").toString().trim().toLowerCase();
   const lang = langRaw === "es" || langRaw.startsWith("es-") ? "es" : "en";
+
+  // CEFR band for the words this round should teach. Absent means "whatever
+  // the model thinks", which is exactly what every row cached before levels
+  // existed holds, so absent is stored as "" and keeps serving those rows.
+  const levelRaw = (body.level || "").toString().trim().toUpperCase();
+  const level = CEFR_VALUES.has(levelRaw) ? levelRaw : "";
   const imageUrl = (body.imageUrl || "").toString().trim();
   const description = (body.description || "").toString().trim().slice(0, MAX_DESCRIPTION_CHARS);
 
@@ -574,6 +606,7 @@ export default async function handler(req, res) {
         .select("targets, v")
         .eq("image_key", imageKey)
         .eq("lang", lang)
+        .eq("level", level)
         .maybeSingle();
       // PostgREST reports failure in `error` rather than by rejecting, so an
       // unchecked read makes a missing table or an anon-key RLS block look
@@ -624,7 +657,7 @@ export default async function handler(req, res) {
       max_tokens: 1400,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: buildSystemPrompt(lang) },
+        { role: "system", content: buildSystemPrompt(lang, level) },
         {
           role: "user",
           content: [
@@ -698,8 +731,16 @@ export default async function handler(req, res) {
   if (sb) {
     try {
       const { error } = await sb.from("image_targets").upsert(
-        { image_key: imageKey, lang, v: TARGETS_V, targets, model: MODEL, updated_at: new Date().toISOString() },
-        { onConflict: "image_key,lang" }
+        {
+          image_key: imageKey,
+          lang,
+          level,
+          v: TARGETS_V,
+          targets,
+          model: MODEL,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "image_key,lang,level" }
       );
       if (error) console.warn("[convo-image-targets] cache write failed:", error.message);
     } catch (e) {

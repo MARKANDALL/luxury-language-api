@@ -251,14 +251,14 @@ describe("convo-image-targets cache", () => {
     expect(createSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("writes the cache keyed (image_key, lang) with the validated targets", async () => {
+  it("writes the cache keyed (image_key, lang, level) with the validated targets", async () => {
     const api = await client();
     const r = await post(api);
 
     expect(sbState.upserts).toHaveLength(1);
     const { table, payload, opts } = sbState.upserts[0];
     expect(table).toBe("image_targets");
-    expect(opts).toEqual({ onConflict: "image_key,lang" });
+    expect(opts).toEqual({ onConflict: "image_key,lang,level" });
     expect(payload.image_key).toBe(r.body.imageKey);
     expect(payload.lang).toBe("en");
     expect(payload.model).toBe("gpt-4.1-mini");
@@ -315,6 +315,47 @@ describe("convo-image-targets cache", () => {
     expect(r.body.cached).toBe(false); // still degrades to a fresh call
     expect(warn.mock.calls.flat().join(" ")).toContain("cache read failed");
     warn.mockRestore();
+  });
+
+  it("a level joins the cache key and bands the prompt", async () => {
+    const api = await client();
+    const r = await post(api, { level: "A1" });
+
+    expect(r.body.targets).toHaveLength(6);
+    const system = createSpy.mock.calls[0][0].messages[0].content;
+    expect(system).toContain("VOCABULARY LEVEL");
+    expect(system).toContain("A1 beginner");
+
+    const { payload, opts } = sbState.upserts[0];
+    expect(payload.level).toBe("A1");
+    expect(opts).toEqual({ onConflict: "image_key,lang,level" });
+  });
+
+  it("no level asked for stores the empty band, which is what old rows hold", async () => {
+    const api = await client();
+    await post(api);
+    expect(sbState.upserts[0].payload.level).toBe("");
+    expect(createSpy.mock.calls[0][0].messages[0].content).not.toContain("VOCABULARY LEVEL");
+  });
+
+  it("an unknown level is ignored rather than cached under a junk key", async () => {
+    const api = await client();
+    await post(api, { level: "Z9" });
+    expect(sbState.upserts[0].payload.level).toBe("");
+  });
+
+  it("the two ends of the scale are told to lean inward", async () => {
+    // A picture holds only so many A1 nouns, and a C2 round of genuinely rare
+    // words stops being a game about the scene.
+    const api = await client();
+    await post(api, { level: "A1" });
+    expect(createSpy.mock.calls[0][0].messages[0].content).toContain("lean up to A2");
+
+    vi.resetModules();
+    createSpy.mockClear();
+    const api2 = await client();
+    await post(api2, { level: "C2" });
+    expect(createSpy.mock.calls[0][0].messages[0].content).toContain("lean down to C1");
   });
 
   it("a caller-supplied imageKey becomes the cache key", async () => {
