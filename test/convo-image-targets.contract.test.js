@@ -978,6 +978,48 @@ describe("convo-image-targets validation", () => {
     expect(es).toContain("el traje de baño");
   });
 
+  // ── The riddle clue ───────────────────────────────────────────────────────
+
+  it("keeps an attributes-only riddle, without its final stop", async () => {
+    createSpy.mockResolvedValue(
+      modelReply([
+        { label: "a toolbox", point: { x: 0.3, y: 0.6 }, cloze: "He carries ___.", choices: ["a toolbox", "a lunchbox", "a crate", "a bucket"], riddle: "small and red." },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets[0].riddle).toBe("small and red");
+  });
+
+  it("drops a riddle that gives the answer away", async () => {
+    // A clue holding the answer is not a clue. Checked on the whole noun and on
+    // each word of it, so "a red toolbox" fails as surely as "a toolbox".
+    createSpy.mockResolvedValue(
+      modelReply([
+        { label: "a toolbox", point: { x: 0.3, y: 0.6 }, cloze: "He carries ___.", choices: ["a toolbox", "a lunchbox", "a crate", "a bucket"], riddle: "red and a toolbox" },
+        { label: "a first-aid kit", point: { x: 0.5, y: 0.5 }, cloze: "She opens ___.", choices: ["a first-aid kit", "a lunchbox", "a crate", "a bucket"], riddle: "white with a red kit cross" },
+        { label: "a kettle", point: { x: 0.7, y: 0.4 }, cloze: "Steam from ___.", choices: ["a kettle", "a pan", "a jug", "a pot"], riddle: "silver and round" },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets.map((t) => t.riddle)).toEqual([undefined, undefined, "silver and round"]);
+  });
+
+  it("asks each pack for its own riddle, and Spanish for agreement with algo", async () => {
+    const api = await client();
+    await post(api);
+    expect(createSpy.mock.calls[0][0].messages[0].content).toContain("I spy something");
+
+    vi.resetModules();
+    createSpy.mockClear();
+    const api2 = await client();
+    await post(api2, { lang: "es" });
+    const es = createSpy.mock.calls[0][0].messages[0].content;
+    expect(es).toContain("Veo veo");
+    expect(es).toContain("algo rojo");
+  });
+
   it("refuses an alias that is one of the wrong choices", async () => {
     // An alias marks an answer correct. If it collided with a distractor, that
     // distractor would become a right answer and the question would be broken.

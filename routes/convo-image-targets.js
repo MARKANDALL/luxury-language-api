@@ -155,6 +155,9 @@ const MAX_ALIASES = 8;
 // a note invented for those teaches something false.
 const MAX_NOTE_CHARS = 140;
 
+// The riddle clue, which is only ever a handful of adjectives.
+const MAX_RIDDLE_CHARS = 60;
+
 // A box smaller than this is a mis-drawn sliver rather than an object; a box
 // bigger than this in BOTH directions is the whole scene, which points at
 // nothing. Either way the point is the better answer.
@@ -626,6 +629,23 @@ function sanitizeTarget(raw, lang, seed, level) {
     .slice(0, MAX_NOTE_CHARS);
   const hasVariant = aliases.some((a) => fold(a) !== head);
 
+  // 6) The riddle clue: attributes only. A clue holding the answer, or any word
+  //    of it, is not a clue, and the same leak check the cloze gets applies
+  //    here for the same reason. Dropped rather than repaired: a riddle is
+  //    optional and a broken one gives the round away.
+  let riddle = String(raw.riddle == null ? "" : raw.riddle)
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/, "")
+    .slice(0, MAX_RIDDLE_CHARS);
+  if (riddle) {
+    const words = riddle.split(" ");
+    const leaks =
+      findPhrase(words, head) >= 0 ||
+      head.split(" ").some((part) => part.length > 2 && findPhrase(words, part) >= 0);
+    if (leaks) riddle = "";
+  }
+
   const target = {
     label,
     point: { x, y },
@@ -639,6 +659,7 @@ function sanitizeTarget(raw, lang, seed, level) {
     // Omitted rather than empty, so a target from before this field existed and
     // a target that simply has no regional variation are the same shape.
     ...(note && hasVariant ? { americanNote: note } : null),
+    ...(riddle ? { riddle } : null),
     difficulty: DIFFICULTY_VALUES.has(difficultyRaw) ? difficultyRaw : "medium",
   };
 
@@ -688,6 +709,9 @@ const PACK = {
       'Write it exactly like: In American English you\'ll usually hear "swim trunks". Warm, one sentence, no lecture.',
     pluralRule:
       'Some garments and tools are plural only. Write "swim trunks", "shorts", "trousers", "glasses", "scissors", never an invented singular like "a swim trunk".',
+    riddleRule:
+      'Write ONLY the words that follow "I spy something ...", lowercase, no article and no final stop.',
+    riddleExample: 'Like "red and metal", "small and round", "tall and made of glass".',
   },
   es: {
     langName: "Spanish (neutral Latin American)",
@@ -705,6 +729,9 @@ const PACK = {
       'Write it exactly like: En México se dice más "el traje de baño". Warm, one sentence, no lecture.',
     pluralRule:
       'Some garments and tools are plural only. Write "los pantalones", "los lentes", "las tijeras", never an invented singular.',
+    riddleRule:
+      'Write ONLY the words that follow "Veo veo... algo ...", lowercase, no article and no final stop. The adjectives agree with "algo", so they are MASCULINE SINGULAR whatever the noun\'s own gender is: "algo roja" is wrong, "algo rojo" is right.',
+    riddleExample: 'Like "rojo y de metal", "pequeño y redondo", "alto y de vidrio".',
   },
 };
 
@@ -826,6 +853,13 @@ For each target return:
   and for any target whose name is the same everywhere.
   One short sentence in ${p.langName}, addressed to the learner, naming the form
   they will actually hear. ${p.noteRule}
+- "riddle": the ATTRIBUTES of this thing and nothing else, in ${p.langName}, for
+  the game "I spy something red". ${p.riddleRule}
+  Two or three attributes at most, from what is actually visible: colour first,
+  then material, size or shape. ${p.riddleExample}
+  It MUST NOT contain the noun, or any word from the noun, or any word that
+  names what the thing IS. "small and red" is a riddle; "a small red toolbox" is
+  the answer. Omit the field if the thing has no attribute worth saying.
 - "difficulty": "easy", "medium" or "hard" — roughly how hard this word is for a
   learner.
 
@@ -843,6 +877,7 @@ Output MUST be valid JSON only, exactly:
                  "cloze": "...", "choices": ["...","...","...","..."],
                  "aliases": ["...","..."],
                  "americanNote": "...",
+                 "riddle": "...",
                  "difficulty": "easy" } ] }
 `.trim();
 }
