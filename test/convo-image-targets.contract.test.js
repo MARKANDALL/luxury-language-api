@@ -895,18 +895,87 @@ describe("convo-image-targets validation", () => {
           point: { x: 0.3, y: 0.6 },
           cloze: "She is looking at ___.",
           choices: ["a computer monitor", "a keyboard", "a printer", "a laptop"],
-          aliases: ["monitor", "screen", "a display", "MONITOR", "computer screen", "one more", "and another"],
+          aliases: ["monitor", "screen", "a display", "MONITOR", "computer screen", "one more", "and another", "yet another", "and one more still"],
         },
       ])
     );
     const api = await client();
     const r = await post(api);
     const aliases = r.body.targets[0].aliases;
-    expect(aliases.length).toBeLessThanOrEqual(4);
+    expect(aliases.length).toBeLessThanOrEqual(8);
     expect(aliases).toContain("computer monitor"); // the head noun, added first
     expect(aliases).toContain("screen");
     // "MONITOR" folds to the same thing as "monitor"; only one survives.
     expect(aliases.filter((a) => a.toLowerCase() === "monitor")).toHaveLength(1);
+  });
+
+  // ── The usage note ────────────────────────────────────────────────────────
+
+  it("carries a regional usage note when the variants earn one", async () => {
+    createSpy.mockResolvedValue(
+      modelReply([
+        {
+          label: "swim trunks",
+          point: { x: 0.4, y: 0.6 },
+          cloze: "He is wearing ___.",
+          choices: ["swim trunks", "a wetsuit", "a towel", "a raincoat"],
+          aliases: ["trunks", "a bathing suit", "a swimsuit", "board shorts"],
+          americanNote: 'In American English you\'ll usually hear "swim trunks".',
+        },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets[0].americanNote).toBe(
+      'In American English you\'ll usually hear "swim trunks".'
+    );
+    expect(r.body.targets[0].aliases).toContain("a bathing suit");
+  });
+
+  it("drops a note with no variant behind it, rather than lecturing on a plain word", async () => {
+    createSpy.mockResolvedValue(
+      modelReply([
+        {
+          label: "a mug",
+          point: { x: 0.3, y: 0.6 },
+          cloze: "Holding ___.",
+          choices: ["a mug", "a plate", "a kettle", "a spoon"],
+          aliases: [], // only the head noun survives, which is not a variant
+          americanNote: 'In American English you\'ll usually hear "a mug".',
+        },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets[0].americanNote).toBeUndefined();
+  });
+
+  it("omits the note entirely rather than storing an empty one", async () => {
+    createSpy.mockResolvedValue(
+      modelReply([
+        { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle", "a spoon"], aliases: ["a cup"] },
+      ])
+    );
+    const api = await client();
+    const r = await post(api);
+    expect("americanNote" in r.body.targets[0]).toBe(false);
+  });
+
+  it("asks for regional variants, and asks the Spanish pack about Mexico", async () => {
+    const api = await client();
+    await post(api);
+    const en = createSpy.mock.calls[0][0].messages[0].content;
+    expect(en).toContain("REGIONAL VARIANT");
+    expect(en).toContain("swim trunks");
+    expect(en).toContain("American English");
+
+    vi.resetModules();
+    createSpy.mockClear();
+    const api2 = await client();
+    await post(api2, { lang: "es" });
+    const es = createSpy.mock.calls[0][0].messages[0].content;
+    expect(es).toContain("Mexican Spanish");
+    expect(es).toContain("el traje de baño");
   });
 
   it("refuses an alias that is one of the wrong choices", async () => {

@@ -143,7 +143,17 @@ const MAX_CHOICES = 4;
 // perfectly good round, and mass-invalidating the cache would re-bill a vision
 // call for every picture anyone has already played. Old sets simply come back
 // without aliases, and the frontend's fuzzy tier covers them.
-const MAX_ALIASES = 4;
+//
+// Raised from 4 because four slots cannot hold what one garment actually
+// answers to: swim trunks, swimming trunks, trunks, a bathing suit, a swimsuit,
+// board shorts are six names for the same thing, and a learner who produces the
+// wrong one of them should never be told they are wrong.
+const MAX_ALIASES = 8;
+
+// The regional usage note that rides with a set of variants, when there is one.
+// Optional and usually absent: most objects have a single name everywhere, and
+// a note invented for those teaches something false.
+const MAX_NOTE_CHARS = 140;
 
 // A box smaller than this is a mis-drawn sliver rather than an object; a box
 // bigger than this in BOTH directions is the whole scene, which points at
@@ -607,6 +617,15 @@ function sanitizeTarget(raw, lang, seed, level) {
   if (head) pushAlias(head);
   (Array.isArray(raw.aliases) ? raw.aliases : []).forEach(pushAlias);
 
+  // 5) The usage note. Kept only when there is something for it to be about: a
+  //    note with no variant behind it is a lecture attached to the plain word,
+  //    and the frontend only ever says it after an alias was matched anyway.
+  const note = String(raw.americanNote == null ? "" : raw.americanNote)
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, MAX_NOTE_CHARS);
+  const hasVariant = aliases.some((a) => fold(a) !== head);
+
   const target = {
     label,
     point: { x, y },
@@ -617,6 +636,9 @@ function sanitizeTarget(raw, lang, seed, level) {
     choices: shuffled,
     answerIndex,
     aliases,
+    // Omitted rather than empty, so a target from before this field existed and
+    // a target that simply has no regional variation are the same shape.
+    ...(note && hasVariant ? { americanNote: note } : null),
     difficulty: DIFFICULTY_VALUES.has(difficultyRaw) ? difficultyRaw : "medium",
   };
 
@@ -655,12 +677,34 @@ const PACK = {
     articleRule:
       'Write every label as the noun WITH its article, lowercase: "a mug", "the barista", "a window".',
     clozeExample: 'The barista is wearing ___.',
+    synonymExample: '"a couch" and "a sofa"; "a cap" and "a hat"',
+    regionExample:
+      '"swim trunks", "swimming trunks", "trunks", "a bathing suit", "a swimsuit", "board shorts" are all the same garment; so are "a jumper" and "a sweater", "a lift" and "an elevator", "a torch" and "a flashlight"',
+    defaultRegion: "American English",
+    noteYes:
+      'a faucet / a tap, a trash can / a bin, a sweater / a jumper, a flashlight / a torch, sneakers / trainers, an elevator / a lift, swim trunks / a bathing suit / swimming costume, a cookie / a biscuit, an eggplant / an aubergine, an apartment / a flat, a stroller / a pushchair, a diaper / a nappy, the hood / the bonnet, the trunk / the boot',
+    noteNo: 'a mug / a cup, a plate / a dish, a sofa / a couch, a pot / a saucepan',
+    noteRule:
+      'Write it exactly like: In American English you\'ll usually hear "swim trunks". Warm, one sentence, no lecture.',
+    pluralRule:
+      'Some garments and tools are plural only. Write "swim trunks", "shorts", "trousers", "glasses", "scissors", never an invented singular like "a swim trunk".',
   },
   es: {
     langName: "Spanish (neutral Latin American)",
     articleRule:
       'Write every label as the noun WITH its definite article, lowercase: "la taza", "el barista", "la ventana". The article carries the gender, so a label without one is wrong.',
     clozeExample: 'El barista está preparando el café en ___.',
+    synonymExample: '"el sofá" y "el sillón"; "la gorra" y "el sombrero"',
+    regionExample:
+      '"el traje de baño", "el bañador", "la malla", "el short de baño" son la misma prenda; también "la computadora" y "el ordenador", "el celular" y "el móvil", "el elevador" y "el ascensor", "el jugo" y "el zumo"',
+    defaultRegion: "Mexican Spanish",
+    noteYes:
+      'la llave / el grifo / la canilla, la computadora / el ordenador, el celular / el móvil, el jugo / el zumo, la alberca / la piscina, el refrigerador / la nevera, el elevador / el ascensor, el popote / la pajita, los lentes / las gafas, la chamarra / la cazadora, el camión / el autobús, la banqueta / la acera, el clóset / el armario, el fregadero / la pileta',
+    noteNo: 'la taza / el pozuelo, el plato / la fuente, el sillón / el sofá',
+    noteRule:
+      'Write it exactly like: En México se dice más "el traje de baño". Warm, one sentence, no lecture.',
+    pluralRule:
+      'Some garments and tools are plural only. Write "los pantalones", "los lentes", "las tijeras", never an invented singular.',
   },
 };
 
@@ -730,7 +774,7 @@ Choose targets that are:
   thing you mean can complete.
 
 For each target return:
-- "label": the noun. ${p.articleRule}
+- "label": the noun. ${p.articleRule} ${p.pluralRule}
 - "box": { "x", "y", "w", "h" } — the thing's BOUNDING BOX as fractions of the
   image: x and y are its top-left corner from the left and top edges, w and h are
   its width and height.
@@ -761,12 +805,27 @@ For each target return:
 - "choices": exactly 4 options — the label itself plus 3 plausible wrong answers
   in the same language and the same style (same kind of thing, same article
   form). A distractor should be temptingly wrong, not absurd.
-- "aliases": 2 to 4 OTHER ways a learner could correctly name this same thing,
-  each of which you would accept as right. Include the bare noun without its
-  article, a shorter everyday form of a compound ("monitor" for "a computer
-  monitor"), and any common synonym or regional variant. Do NOT include a word
-  for a DIFFERENT object, and do not repeat any of the wrong choices: anything
-  listed here will be marked correct.
+- "aliases": up to ${MAX_ALIASES} OTHER ways a learner could correctly name this same thing,
+  each of which you would accept as right. Anything listed here is marked
+  correct, so it must be a real name for THIS object, and must not repeat any of
+  the wrong choices.
+  Be generous. This is what stops a learner who knows the word being told they
+  are wrong for knowing a different one. Include:
+  * the bare noun without its article;
+  * a shorter everyday form of a compound ("monitor" for "a computer monitor");
+  * every common SYNONYM (${p.synonymExample});
+  * every common REGIONAL VARIANT, including the ones from other countries
+    (${p.regionExample}).
+- "americanNote": include this field when the names above differ BY REGION OR
+  COUNTRY and one of them is the usual one in ${p.defaultRegion}.
+  THE TEST IS THE LIST YOU JUST WROTE. If any two names in your own "aliases"
+  are used in different countries or different regions, this field is REQUIRED.
+  Pairs like these DO earn a note whenever they appear: ${p.noteYes}.
+  Ordinary synonyms do NOT: ${p.noteNo}. Those are two words everyone uses, and
+  a note about them teaches something false. Omit the field entirely for those,
+  and for any target whose name is the same everywhere.
+  One short sentence in ${p.langName}, addressed to the learner, naming the form
+  they will actually hear. ${p.noteRule}
 - "difficulty": "easy", "medium" or "hard" — roughly how hard this word is for a
   learner.
 
@@ -783,6 +842,7 @@ Output MUST be valid JSON only, exactly:
                  "point": { "x": 0.0, "y": 0.0 },
                  "cloze": "...", "choices": ["...","...","...","..."],
                  "aliases": ["...","..."],
+                 "americanNote": "...",
                  "difficulty": "easy" } ] }
 `.trim();
 }
