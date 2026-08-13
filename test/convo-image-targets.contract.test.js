@@ -109,7 +109,12 @@ function reply(obj) {
 // checks, and since v7 must not be counting the enumeration pass or the top-up
 // either. Detected by a phrase unique to each prompt.
 const KIND = {
-  crop: "clearly visible in this crop",
+  // Anchored on the opening line rather than on the question, which is reworded
+  // whenever the check gains a new one. When the crop prompt grew its
+  // prominence question the old phrase vanished, every crop check was routed to
+  // the generation branch, and twelve tests failed for a reason that had nothing
+  // to do with the route.
+  crop: "a small crop taken from a larger photograph",
   relocalize: "give its bounding box",
   enumerate: "find EVERY separate instance",
   topUp: "Already taken, do NOT return any of these",
@@ -146,7 +151,10 @@ function mockRound(targets, opts = {}) {
     switch (kindOf(req)) {
       case "crop": {
         const shows = typeof opts.shows === "function" ? opts.shows(text) : opts.shows !== false;
-        return Promise.resolve(reply(shows ? { shows: true } : { shows: false, why: "not in crop" }));
+        if (!shows) return Promise.resolve(reply({ shows: false, why: "not in crop" }));
+        const prom =
+          typeof opts.prominence === "function" ? opts.prominence(text) : opts.prominence || "main";
+        return Promise.resolve(reply({ shows: true, prominence: prom }));
       }
       case "relocalize":
         return Promise.resolve(reply(opts.relocalized ?? { box: { x: 0.4, y: 0.4, w: 0.1, h: 0.1 } }));
@@ -612,13 +620,13 @@ describe("convo-image-targets crop verification", () => {
     expect(cropSpy).toHaveBeenCalledTimes(3);
     const asked = createSpy.mock.calls
       .map((c) => JSON.stringify(c[0].messages))
-      .filter((t) => t.includes("clearly visible in this crop"));
+      .filter((t) => t.includes(KIND.crop));
     expect(asked).toHaveLength(3);
     // The crop is the ONLY thing sent. If the whole picture went too, the model
     // could see the thing elsewhere in frame and agree for the wrong reason.
     for (const call of createSpy.mock.calls) {
       const text = JSON.stringify(call[0].messages);
-      if (!text.includes("clearly visible in this crop")) continue;
+      if (!text.includes(KIND.crop)) continue;
       const images = call[0].messages[0].content.filter((c) => c.type === "image_url");
       expect(images).toHaveLength(1);
       expect(images[0].image_url.url).toBe("data:image/jpeg;base64,QQ==");
@@ -808,6 +816,50 @@ describe("convo-image-targets serve-time verification", () => {
     const chair = r.body.targets.find((t) => t.label === "a chair");
     expect(chair.boxes).toBeUndefined();
     expect(chair.box).toEqual({ x: 0.1, y: 0.6, w: 0.12, h: 0.25 });
+  });
+
+  it("marks a target uncroppable when no instance is more than a sliver of its own crop", async () => {
+    // The filmed chair. The box is RIGHT, so it still scores; what it cannot do
+    // is be cut out and shown as a picture of a chair.
+    mockRound(
+      [{ label: "a chair", point: { x: 0.7, y: 0.8 }, box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, cloze: "Each pupil has ___.", choices: ["a chair", "a stool", "a bench", "a desk"] }],
+      { shows: () => true, prominence: "edge" },
+    );
+    const api = await client();
+    const r = await post(api);
+
+    const chair = r.body.targets.find((t) => t.label === "a chair");
+    expect(chair.boxOk).toBe(true);
+    expect(chair.cropOk).toBe(false);
+  });
+
+  it("ranks the instance that makes the best crop first, not merely the first one found", async () => {
+    mockRound(
+      [{ label: "a chair", point: { x: 0.7, y: 0.8 }, box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, cloze: "Each pupil has ___.", choices: ["a chair", "a stool", "a bench", "a desk"] }],
+      {
+        instances: [
+          {
+            label: "a chair",
+            instances: [
+              { box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, visibility: "full" },
+              { box: { x: 0.1, y: 0.6, w: 0.12, h: 0.25 }, visibility: "full" },
+            ],
+          },
+        ],
+        // The first crop is a sliver, the second is the whole chair.
+        prominence: (text) => (text.includes("SECOND") ? "main" : "edge"),
+      },
+    );
+    // Each box cuts a distinguishable crop, so the checker can rate them apart.
+    cropSpy.mockImplementation((_url, box) =>
+      Promise.resolve(box?.x === 0.1 ? "data:image/jpeg;base64,SECOND" : "data:image/jpeg;base64,FIRST"),
+    );
+    const api = await client();
+    const r = await post(api);
+
+    const chair = r.body.targets.find((t) => t.label === "a chair");
+    expect(chair.box).toEqual({ x: 0.1, y: 0.6, w: 0.12, h: 0.25 });
+    expect(chair.cropOk).toBe(true);
   });
 
   it("never re-checks a row already stamped", async () => {

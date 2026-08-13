@@ -187,6 +187,17 @@ const MAX_INSTANCES = 6;
 const VISIBILITY_ORDER = ["full", "partial", "sliver"];
 const VISIBILITY = new Set(VISIBILITY_ORDER);
 
+// How much of its own crop an instance actually IS, judged on the crop rather
+// than on the scene. This is the stage C gate: a crop is a promise that the
+// thing is in the picture you are about to be shown, and the sixth playtest's
+// chair crop kept that promise only in the sense that a sliver of chair was
+// present behind a table, some papers, a lap and an arm.
+const PROMINENCE_ORDER = ["main", "part", "edge"];
+const PROMINENCE = new Set(PROMINENCE_ORDER);
+
+// What a crop must be at least, for a crop-based mode to use it.
+const CROP_GATE = new Set(["main", "part"]);
+
 // How many previously-missed words are offered to a scan. Enough to give the
 // picture a real chance of containing one, few enough that the list does not
 // start steering the whole round.
@@ -983,17 +994,28 @@ const VERIFY_CONCURRENCY = 6;
 
 function verifyPrompt(label, langName) {
   return `You are shown a small crop taken from a larger photograph.
-Answer one question about the crop ALONE. You cannot see the rest of the photo
-and must not guess what is outside the crop.
+Answer about the crop ALONE. You cannot see the rest of the photo and must not
+guess what is outside the crop.
 
-Question: is "${label}" (${langName}) clearly visible in this crop?
+Question 1: is "${label}" (${langName}) visible in this crop at all?
 
 Say yes ONLY if the thing itself is in the crop and a learner shown this crop
 could point at it. Say no if it is absent, if it is cut off past recognition, if
 you can only infer it from context, or if what is here is a different object
 that merely sits near it.
 
-Return JSON only: { "shows": true } or { "shows": false, "why": "<six words>" }`;
+Question 2, only if yes: how much of this crop IS the thing?
+
+  "main" the thing is what this crop is a picture of, plainly identifiable
+  "part" clearly there and identifiable, but sharing the crop with other things
+  "edge" only a fragment, or off at the side, or you had to hunt for it
+
+Be strict about "edge". A crop that is mostly a table, some papers and an arm,
+with a sliver of the thing behind them, is "edge" however certain you are that
+the thing is there.
+
+Return JSON only: { "shows": true, "prominence": "main" }
+or { "shows": false, "why": "<six words>" }`;
 }
 
 async function askCrop(openai, model, crop, label, langName) {
@@ -1014,13 +1036,20 @@ async function askCrop(openai, model, crop, label, langName) {
       ],
     });
     const parsed = JSON.parse(resp?.choices?.[0]?.message?.content || "{}");
-    return { shows: parsed?.shows === true, why: String(parsed?.why || "").slice(0, 60) };
+    const prom = String(parsed?.prominence || "").toLowerCase();
+    return {
+      shows: parsed?.shows === true,
+      why: String(parsed?.why || "").slice(0, 60),
+      // Unrated but shown is treated as "part": good enough to score, not
+      // asserted to be worth cropping.
+      prominence: PROMINENCE.has(prom) ? prom : "part",
+    };
   } catch (e) {
     // A verification that could not be run is NOT a failure of the target. The
     // alternative, dropping targets when the checker itself breaks, empties
     // rounds for a reason that has nothing to do with the picture.
     console.warn("[convo-image-targets] verify call failed:", e?.message || e);
-    return { shows: true, why: "verifier unavailable" };
+    return { shows: true, why: "verifier unavailable", prominence: "part" };
   }
 }
 
@@ -1207,10 +1236,11 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
     p.cands.forEach((c, ci) =>
       jobs.push(async () => {
         const crop = await cropRegion(imageUrl, c.box, size);
-        // Could not be cut: not the target's fault, so it stays unjudged.
-        if (!crop) return { ti, ci, shows: true, prominence: c.visibility };
+        // Could not be cut: not the target's fault, so it stays unjudged, and
+        // unjudged is not evidence that it would make a good crop.
+        if (!crop) return { ti, ci, shows: true, prominence: "part" };
         const a = await askCrop(openai, model, crop, p.t.label, langName);
-        return { ti, ci, shows: a.shows, why: a.why, prominence: a.prominence || c.visibility };
+        return { ti, ci, shows: a.shows, why: a.why, prominence: a.prominence };
       }),
     ),
   );
@@ -1221,7 +1251,9 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
   for (const v of verdicts) {
     if (!v) continue;
     const cand = plan[v.ti].cands[v.ci];
-    if (v.shows) byTarget[v.ti].push({ ...cand, visibility: v.prominence || cand.visibility });
+    // A sliver still SCORES: it is a real instance of the thing and a learner
+    // who taps it is right. What it does not do is earn the right to be cropped.
+    if (v.shows) byTarget[v.ti].push({ ...cand, prominence: v.prominence });
     else notes[v.ti].push(v.why);
   }
 
@@ -1256,8 +1288,14 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
       return { ...t, boxOk: false, boxWhy: notes[ti][0] || "not in crop" };
     }
     // Most visible first, so box[0] is the one the marker and the crops use.
+    //
+    // Ranked on the CROP first and the scene second. Prominence was judged on
+    // the cut-out itself, which is the thing a crop-based mode will actually
+    // show, and the scene rating only breaks its ties.
     kept.sort(
-      (a, b) => VISIBILITY_ORDER.indexOf(a.visibility) - VISIBILITY_ORDER.indexOf(b.visibility),
+      (a, b) =>
+        PROMINENCE_ORDER.indexOf(a.prominence) - PROMINENCE_ORDER.indexOf(b.prominence) ||
+        VISIBILITY_ORDER.indexOf(a.visibility) - VISIBILITY_ORDER.indexOf(b.visibility),
     );
     const boxes = kept.map((k) => k.box);
     const first = boxes[0];
@@ -1274,6 +1312,11 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
       ...(boxes.length > 1 ? { boxes } : null),
       // How well each kept instance can be seen, in the same order as `boxes`.
       vis: kept.map((k) => k.visibility),
+      // Whether ANY instance is worth cutting out and showing. False excludes
+      // this target from the crop-based modes for this picture; it stays a
+      // perfectly good name and find target, because a box that is right is
+      // still right even when the view of it is poor.
+      cropOk: CROP_GATE.has(kept[0].prominence),
       // The point follows the box it belongs to, or the marker keeps pointing
       // at where the box used to be.
       point: { x: clampPoint(first.x + first.w / 2), y: clampPoint(first.y + first.h / 2) },
