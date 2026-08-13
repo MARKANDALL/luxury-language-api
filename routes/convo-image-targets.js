@@ -168,6 +168,11 @@ const MAX_RIDDLE_CHARS = 60;
 // describing a crowd rather than a thing, and the target should not exist.
 const MAX_INSTANCES = 4;
 
+// How many previously-missed words are offered to a scan. Enough to give the
+// picture a real chance of containing one, few enough that the list does not
+// start steering the whole round.
+const MAX_MISSES_OFFERED = 8;
+
 // A box smaller than this is a mis-drawn sliver rather than an object; a box
 // bigger than this in BOTH directions is the whole scene, which points at
 // nothing. Either way the point is the better answer.
@@ -685,6 +690,7 @@ function sanitizeTarget(raw, lang, seed, level) {
     // a target that simply has no regional variation are the same shape.
     ...(note && hasVariant ? { americanNote: note } : null),
     ...(riddle ? { riddle } : null),
+    ...(raw.revisit === true ? { revisit: true } : null),
     difficulty: DIFFICULTY_VALUES.has(difficultyRaw) ? difficultyRaw : "medium",
   };
 
@@ -927,6 +933,7 @@ Output MUST be valid JSON only, exactly:
                  "aliases": ["...","..."],
                  "americanNote": "...",
                  "riddle": "...",
+                 "revisit": false,
                  "difficulty": "easy" } ] }
 `.trim();
 }
@@ -1183,11 +1190,24 @@ async function writeRow(sb, { imageKey, lang, level, targets, model }) {
   }
 }
 
-function buildUserText(description, lang) {
+function buildUserText(description, lang, misses) {
   const p = PACK[lang];
   const lines = [
     `Find ${MIN_TARGETS}-${MAX_TARGETS} vocabulary targets in this image. Answer in ${p.langName}.`,
   ];
+  // Words this learner has already been beaten by. Offered, never demanded:
+  // a word planted in a picture that does not contain it is a question with no
+  // answer, which is worse than not revisiting it at all.
+  if (misses?.length) {
+    lines.push(
+      "",
+      "This learner has previously failed to name these words. If ANY of them is",
+      "genuinely present in this image and would make a fair target, include it,",
+      "mark it with \"revisit\": true, and follow every other rule for it as normal.",
+      "Include NONE of them if none is really there. Do not stretch:",
+      misses.map((m) => `- ${m}`).join("\n"),
+    );
+  }
   if (description) {
     lines.push(
       "",
@@ -1229,6 +1249,14 @@ export default async function handler(req, res) {
   // existed holds, so absent is stored as "" and keeps serving those rows.
   const levelRaw = (body.level || "").toString().trim().toUpperCase();
   const level = CEFR_VALUES.has(levelRaw) ? levelRaw : "";
+
+  // Offered to the scan, never part of the cache key: a cached row is a
+  // property of the picture, and keying it by who is asking would give every
+  // learner a private copy of every scan.
+  const misses = (Array.isArray(req.body?.misses) ? req.body.misses : [])
+    .map((m) => String(m || "").trim().slice(0, 60))
+    .filter(Boolean)
+    .slice(0, MAX_MISSES_OFFERED);
   const imageUrl = (body.imageUrl || "").toString().trim();
   const description = (body.description || "").toString().trim().slice(0, MAX_DESCRIPTION_CHARS);
 
@@ -1376,7 +1404,7 @@ export default async function handler(req, res) {
         {
           role: "user",
           content: [
-            { type: "text", text: buildUserText(description, lang) },
+            { type: "text", text: buildUserText(description, lang, misses) },
             { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
           ],
         },
