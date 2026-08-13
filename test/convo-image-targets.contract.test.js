@@ -104,25 +104,59 @@ function reply(obj) {
   return { choices: [{ message: { content: JSON.stringify(obj) } }] };
 }
 
+// The KINDS of call the route makes on the one client. Tests that care about
+// how many times the model was asked to GENERATE must not be counting crop
+// checks, and since v7 must not be counting the enumeration pass or the top-up
+// either. Detected by a phrase unique to each prompt.
+const KIND = {
+  crop: "clearly visible in this crop",
+  relocalize: "give its bounding box",
+  enumerate: "find EVERY separate instance",
+  topUp: "Already taken, do NOT return any of these",
+};
+
+function kindOf(req) {
+  const text = JSON.stringify(req?.messages || "");
+  for (const [name, phrase] of Object.entries(KIND)) if (text.includes(phrase)) return name;
+  return "generate";
+}
+
+/** Every call of one kind, so a count assertion means what it says. */
+function callsOf(kind) {
+  return createSpy.mock.calls.filter(([req]) => kindOf(req) === kind);
+}
+
 /**
  * Install the model mock for a round whose generation returns `targets`.
  *
- * The route makes three KINDS of call on one client now: generate the set,
- * crop-check one box, and re-localize a box that failed. A test that answered
- * all three with the same canned target list had its verification read
- * {"targets":[...]}, find no "shows", and drop every boxed target it checked.
+ * The route makes five KINDS of call on one client now: generate the set,
+ * enumerate every instance of every label, crop-check one box, re-localize a
+ * box that failed, and top up a set the crop check left thin. A test that
+ * answered all of them with the same canned target list had its verification
+ * read {"targets":[...]}, find no "shows", and drop every boxed target.
+ *
+ * Enumeration and top-up default to finding NOTHING, which is what keeps the
+ * other eighty tests about what they were about: with no instances found the
+ * route falls back to the boxes generation gave it, and with no extra targets
+ * the set is whatever survived. Tests that exercise those two pass opts.
  */
 function mockRound(targets, opts = {}) {
   createSpy.mockImplementation((req) => {
     const text = JSON.stringify(req?.messages || "");
-    if (text.includes("clearly visible in this crop")) {
-      const shows = typeof opts.shows === "function" ? opts.shows(text) : opts.shows !== false;
-      return Promise.resolve(reply(shows ? { shows: true } : { shows: false, why: "not in crop" }));
+    switch (kindOf(req)) {
+      case "crop": {
+        const shows = typeof opts.shows === "function" ? opts.shows(text) : opts.shows !== false;
+        return Promise.resolve(reply(shows ? { shows: true } : { shows: false, why: "not in crop" }));
+      }
+      case "relocalize":
+        return Promise.resolve(reply(opts.relocalized ?? { box: { x: 0.4, y: 0.4, w: 0.1, h: 0.1 } }));
+      case "enumerate":
+        return Promise.resolve(reply({ items: opts.instances ?? [] }));
+      case "topUp":
+        return Promise.resolve(modelReply(opts.topUp ?? []));
+      default:
+        return Promise.resolve(modelReply(targets));
     }
-    if (text.includes("give its bounding box")) {
-      return Promise.resolve(reply(opts.relocalized ?? { box: { x: 0.4, y: 0.4, w: 0.1, h: 0.1 } }));
-    }
-    return Promise.resolve(modelReply(targets));
   });
 }
 
@@ -195,14 +229,14 @@ describe("convo-image-targets contract", () => {
     }
 
     // Exactly ONE model call for the whole set — the cost promise.
-    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(callsOf("generate")).toHaveLength(1);
   });
 
   it("sends the image as a vision content part at temperature 0", async () => {
     const api = await client();
     await post(api);
 
-    const call = createSpy.mock.calls[0][0];
+    const call = callsOf("generate")[0][0];
     expect(call.temperature).toBe(0);
     expect(call.model).toBe("gpt-4.1-mini");
     expect(call.response_format).toEqual({ type: "json_object" });
@@ -221,7 +255,7 @@ describe("convo-image-targets contract", () => {
     process.env.LUX_AI_VISION_MODEL = "vision-model";
     const api = await client();
     await post(api);
-    expect(createSpy.mock.calls[0][0].model).toBe("vision-model");
+    expect(callsOf("generate")[0][0].model).toBe("vision-model");
   });
 
   it("enforces the admin gate (401, no model call)", async () => {
@@ -261,7 +295,7 @@ describe("convo-image-targets cache", () => {
     // current rules. A set with no boxes has nothing to crop-check, and the
     // stamp is what stops every future read asking the same question again.
     expect(sbState.upserts).toHaveLength(1);
-    expect(sbState.upserts[0].payload.verified).toBe(2);
+    expect(sbState.upserts[0].payload.verified).toBe(3);
     expect(sbState.upserts[0].payload.targets).toEqual(stored);
   });
 
@@ -324,7 +358,7 @@ describe("convo-image-targets cache", () => {
     const r = await post(api);
 
     expect(r.body.cached).toBe(false);
-    expect(createSpy).toHaveBeenCalledTimes(1); // ONCE, not once per bad target
+    expect(callsOf("generate")).toHaveLength(1); // ONCE, not once per bad target
     expect(sbState.upserts).toHaveLength(1);
     expect(r.body.targets).toHaveLength(6);
   });
@@ -370,7 +404,7 @@ describe("convo-image-targets cache", () => {
     const r = await post(api);
 
     expect(r.body.cached).toBe(false);
-    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(callsOf("generate")).toHaveLength(1);
     expect(sbState.upserts).toHaveLength(1);
     expect(sbState.upserts[0].payload.v).toBe(1);
   });
@@ -380,7 +414,7 @@ describe("convo-image-targets cache", () => {
     const api = await client();
     const r = await post(api);
     expect(r.body.cached).toBe(false);
-    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(callsOf("generate")).toHaveLength(1);
   });
 
   it("writes the cache keyed (image_key, lang, level) with the validated targets", async () => {
@@ -454,7 +488,7 @@ describe("convo-image-targets cache", () => {
     const r = await post(api, { level: "A1" });
 
     expect(r.body.targets).toHaveLength(6);
-    const system = createSpy.mock.calls[0][0].messages[0].content;
+    const system = callsOf("generate")[0][0].messages[0].content;
     expect(system).toContain("VOCABULARY LEVEL");
     expect(system).toContain("A1 beginner");
 
@@ -467,7 +501,7 @@ describe("convo-image-targets cache", () => {
     const api = await client();
     await post(api);
     expect(sbState.upserts[0].payload.level).toBe("");
-    expect(createSpy.mock.calls[0][0].messages[0].content).not.toContain("VOCABULARY LEVEL");
+    expect(callsOf("generate")[0][0].messages[0].content).not.toContain("VOCABULARY LEVEL");
   });
 
   it("an unknown level is ignored rather than cached under a junk key", async () => {
@@ -481,13 +515,13 @@ describe("convo-image-targets cache", () => {
     // words stops being a game about the scene.
     const api = await client();
     await post(api, { level: "A1" });
-    expect(createSpy.mock.calls[0][0].messages[0].content).toContain("lean up to A2");
+    expect(callsOf("generate")[0][0].messages[0].content).toContain("lean up to A2");
 
     vi.resetModules();
     createSpy.mockClear();
     const api2 = await client();
     await post(api2, { level: "C2" });
-    expect(createSpy.mock.calls[0][0].messages[0].content).toContain("lean down to C1");
+    expect(callsOf("generate")[0][0].messages[0].content).toContain("lean down to C1");
   });
 
   it("a caller-supplied imageKey becomes the cache key", async () => {
@@ -679,7 +713,7 @@ describe("convo-image-targets crop verification", () => {
   it("asks the prompt for every instance, and forbids a silent pick", async () => {
     const api = await client();
     await post(api);
-    const system = createSpy.mock.calls[0][0].messages[0].content;
+    const system = callsOf("generate")[0][0].messages[0].content;
     expect(system).toContain('"boxes"');
     expect(system).toContain("Never pick one of several lookalikes silently");
   });
@@ -701,11 +735,83 @@ describe("convo-image-targets serve-time verification", () => {
     expect(r.body.cached).toBe(true);
     expect(cropSpy).toHaveBeenCalledTimes(4);
     expect(sbState.upserts).toHaveLength(1);
-    expect(sbState.upserts[0].payload.verified).toBe(2);
+    expect(sbState.upserts[0].payload.verified).toBe(3);
+  });
+
+  it("re-examines a row stamped by the older audit, then re-stamps it", async () => {
+    // v2 said "the boxes this row carries are right". It could not say "and
+    // there are no others", which is exactly what the sixth playtest's one
+    // chair box in a room of seven chairs turned out to mean. So a v2 row is
+    // stale under the instance law and heals on its next serve.
+    sbState.row = { targets: storedBoxed, v: 1, verified: 2 };
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(true);
+    expect(callsOf("enumerate")).toHaveLength(1);
+    expect(sbState.upserts).toHaveLength(1);
+    expect(sbState.upserts[0].payload.verified).toBe(3);
+  });
+
+  it("finds instances the generating call never mentioned, and keeps each one that checks out", async () => {
+    // The sixth playtest's classroom in miniature: one box stored for a label
+    // the picture holds several of. v6 audited that one box, found it fine, and
+    // stamped the row fully examined. Every other chair stayed a rejected tap.
+    mockRound(
+      [{ label: "a chair", point: { x: 0.7, y: 0.8 }, box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, cloze: "Each pupil has ___.", choices: ["a chair", "a stool", "a bench", "a desk"] }],
+      {
+        instances: [
+          {
+            label: "a chair",
+            instances: [
+              { box: { x: 0.1, y: 0.6, w: 0.12, h: 0.25 }, visibility: "full" },
+              { box: { x: 0.3, y: 0.62, w: 0.12, h: 0.25 }, visibility: "full" },
+              { box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, visibility: "sliver" },
+            ],
+          },
+        ],
+      },
+    );
+    const api = await client();
+    const r = await post(api);
+
+    const chair = r.body.targets.find((t) => t.label === "a chair");
+    expect(chair.boxes).toHaveLength(3);
+    // Most visible first, so the marker and the crops take the chair a learner
+    // can actually see rather than the one behind the table.
+    expect(chair.box).toEqual({ x: 0.1, y: 0.6, w: 0.12, h: 0.25 });
+    expect(chair.vis).toEqual(["full", "full", "sliver"]);
+    expect(callsOf("enumerate")).toHaveLength(1);
+  });
+
+  it("keeps only the enumerated instances that survive their own crop check", async () => {
+    let seen = 0;
+    mockRound(
+      [{ label: "a chair", point: { x: 0.7, y: 0.8 }, box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, cloze: "Each pupil has ___.", choices: ["a chair", "a stool", "a bench", "a desk"] }],
+      {
+        instances: [
+          {
+            label: "a chair",
+            instances: [
+              { box: { x: 0.1, y: 0.6, w: 0.12, h: 0.25 }, visibility: "full" },
+              { box: { x: 0.3, y: 0.62, w: 0.12, h: 0.25 }, visibility: "full" },
+            ],
+          },
+        ],
+        // Only the first crop shows a chair.
+        shows: () => ++seen <= 1,
+      },
+    );
+    const api = await client();
+    const r = await post(api);
+
+    const chair = r.body.targets.find((t) => t.label === "a chair");
+    expect(chair.boxes).toBeUndefined();
+    expect(chair.box).toEqual({ x: 0.1, y: 0.6, w: 0.12, h: 0.25 });
   });
 
   it("never re-checks a row already stamped", async () => {
-    sbState.row = { targets: storedBoxed, v: 1, verified: 2 };
+    sbState.row = { targets: storedBoxed, v: 1, verified: 3 };
     const api = await client();
     const r = await post(api);
 
@@ -746,7 +852,7 @@ describe("convo-image-targets level teeth", () => {
   it("every band carries worked examples in the target language, not a description", async () => {
     const api = await client();
     await post(api, { level: "C1" });
-    const system = createSpy.mock.calls[0][0].messages[0].content;
+    const system = callsOf("generate")[0][0].messages[0].content;
     expect(system).toContain("VOCABULARY LEVEL");
     expect(system).toContain("driftwood");
     expect(system).toContain("a tourniquet");
@@ -757,7 +863,7 @@ describe("convo-image-targets level teeth", () => {
   it("the Spanish pack gets Spanish exemplars", async () => {
     const api = await client();
     await post(api, { level: "C1", lang: "es" });
-    const system = createSpy.mock.calls[0][0].messages[0].content;
+    const system = callsOf("generate")[0][0].messages[0].content;
     expect(system).toContain("el torniquete");
     expect(system).toContain("la gasa");
     expect(system).not.toContain("driftwood");
@@ -766,7 +872,7 @@ describe("convo-image-targets level teeth", () => {
   it("only C1 and C2 get the self-check, and it names the failure it exists for", async () => {
     const api = await client();
     await post(api, { level: "C2" });
-    const c2 = createSpy.mock.calls[0][0].messages[0].content;
+    const c2 = callsOf("generate")[0][0].messages[0].content;
     expect(c2).toContain("LEVEL SELF-CHECK");
     expect(c2).toContain("a first-aid kit");
 
@@ -774,7 +880,7 @@ describe("convo-image-targets level teeth", () => {
     createSpy.mockClear();
     const api2 = await client();
     await post(api2, { level: "B1" });
-    expect(createSpy.mock.calls[0][0].messages[0].content).not.toContain("LEVEL SELF-CHECK");
+    expect(callsOf("generate")[0][0].messages[0].content).not.toContain("LEVEL SELF-CHECK");
   });
 
   it("a basic noun is dropped at C2 and kept at B1", async () => {
@@ -1068,8 +1174,8 @@ describe("convo-image-targets validation", () => {
   it("asks for a box and for a literal, unambiguous cloze, in the same one call", async () => {
     const api = await client();
     await post(api);
-    expect(createSpy).toHaveBeenCalledTimes(1);
-    const system = createSpy.mock.calls[0][0].messages[0].content;
+    expect(callsOf("generate")).toHaveLength(1);
+    const system = callsOf("generate")[0][0].messages[0].content;
     expect(system).toContain('"box"');
     expect(system).toContain("BOUNDING BOX");
     expect(system).toContain("LITERALLY TRUE OF THIS IMAGE");
@@ -1168,7 +1274,7 @@ describe("convo-image-targets validation", () => {
   it("asks for regional variants, and asks the Spanish pack about Mexico", async () => {
     const api = await client();
     await post(api);
-    const en = createSpy.mock.calls[0][0].messages[0].content;
+    const en = callsOf("generate")[0][0].messages[0].content;
     expect(en).toContain("REGIONAL VARIANT");
     expect(en).toContain("swim trunks");
     expect(en).toContain("American English");
@@ -1177,7 +1283,7 @@ describe("convo-image-targets validation", () => {
     createSpy.mockClear();
     const api2 = await client();
     await post(api2, { lang: "es" });
-    const es = createSpy.mock.calls[0][0].messages[0].content;
+    const es = callsOf("generate")[0][0].messages[0].content;
     expect(es).toContain("Mexican Spanish");
     expect(es).toContain("el traje de baño");
   });
@@ -1211,13 +1317,13 @@ describe("convo-image-targets validation", () => {
   it("asks each pack for its own riddle, and Spanish for agreement with algo", async () => {
     const api = await client();
     await post(api);
-    expect(createSpy.mock.calls[0][0].messages[0].content).toContain("I spy something");
+    expect(callsOf("generate")[0][0].messages[0].content).toContain("I spy something");
 
     vi.resetModules();
     createSpy.mockClear();
     const api2 = await client();
     await post(api2, { lang: "es" });
-    const es = createSpy.mock.calls[0][0].messages[0].content;
+    const es = callsOf("generate")[0][0].messages[0].content;
     expect(es).toContain("Veo veo");
     expect(es).toContain("algo rojo");
   });
@@ -1256,8 +1362,8 @@ describe("convo-image-targets validation", () => {
   it("asks the model for aliases in the same single call", async () => {
     const api = await client();
     await post(api);
-    expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createSpy.mock.calls[0][0].messages[0].content).toContain('"aliases"');
+    expect(callsOf("generate")).toHaveLength(1);
+    expect(callsOf("generate")[0][0].messages[0].content).toContain('"aliases"');
   });
 
   it("normalizes an unknown difficulty to medium", async () => {
@@ -1291,7 +1397,7 @@ describe("convo-image-targets localization", () => {
   it("the es pack asks for Spanish labels with their article", async () => {
     const api = await client();
     await post(api, { lang: "es" });
-    const system = createSpy.mock.calls[0][0].messages[0].content;
+    const system = callsOf("generate")[0][0].messages[0].content;
     expect(system).toContain("Spanish (neutral Latin American)");
     expect(system).toContain("la taza");
     expect(system).toContain("The article carries the gender");
@@ -1301,7 +1407,7 @@ describe("convo-image-targets localization", () => {
   it("the en pack asks for English labels with their article", async () => {
     const api = await client();
     await post(api, { lang: "en" });
-    const system = createSpy.mock.calls[0][0].messages[0].content;
+    const system = callsOf("generate")[0][0].messages[0].content;
     expect(system).toContain("English");
     expect(system).toContain('"a mug"');
     expect(system).not.toContain("neutral Latin American");
@@ -1311,7 +1417,7 @@ describe("convo-image-targets localization", () => {
     const api = await client();
     const r = await post(api, { lang: undefined, pack: "es" });
     expect(r.body.lang).toBe("es");
-    expect(createSpy.mock.calls[0][0].messages[0].content).toContain("neutral Latin American");
+    expect(callsOf("generate")[0][0].messages[0].content).toContain("neutral Latin American");
   });
 
   it("an explicit lang wins over pack", async () => {
@@ -1324,7 +1430,7 @@ describe("convo-image-targets localization", () => {
     const api = await client();
     const r = await post(api, { lang: "fr" });
     expect(r.body.lang).toBe("en");
-    expect(createSpy.mock.calls[0][0].messages[0].content).toContain('"a mug"');
+    expect(callsOf("generate")[0][0].messages[0].content).toContain('"a mug"');
   });
 
   it("forgives case and region on the pack value", async () => {

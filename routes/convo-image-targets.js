@@ -126,9 +126,22 @@ export const config = {
 // invalidation trick word-info.js plays with card.v.
 const TARGETS_V = 1;
 
-// Bumped when a row must be re-checked rather than merely re-read. v2 is the
-// first generation whose boxes were shown to the model on their own.
-const VERIFIED_V = 2;
+// Bumped when a row must be re-checked rather than merely re-read.
+//
+//   v2  every box the row already carried was cut out and shown to the model on
+//       its own. It says nothing about boxes the row does NOT carry.
+//   v3  every LABEL was re-examined for instances the row never held, and each
+//       instance found was crop-checked in turn.
+//
+// The distinction is the whole point of bumping it. The sixth playtest's row was
+// written by current v6 code, was stamped v2, and every one of its targets was
+// boxOk:true: a perfectly audited row holding one chair box in a room with seven
+// chairs, because "audited" meant "the boxes present are right", and nothing
+// could express "and there are no others". A v2 row is therefore stale now, and
+// says so, which is what makes the healing on next serve decidable rather than
+// guessed. Distinct from TARGETS_V, which discards the row and re-bills a full
+// generation; this re-examines it in place.
+const VERIFIED_V = 3;
 
 const MIN_TARGETS = 5;
 const MAX_TARGETS = 8;
@@ -166,7 +179,13 @@ const MAX_RIDDLE_CHARS = 60;
 
 // How many instances of one label are worth carrying. Past a few, the label is
 // describing a crowd rather than a thing, and the target should not exist.
-const MAX_INSTANCES = 4;
+const MAX_INSTANCES = 6;
+
+// How well one instance can be seen, as the enumeration pass rates it, best
+// first. Ordering matters: the crops in stage C take the most visible instance,
+// and "most visible" is decided by this list.
+const VISIBILITY_ORDER = ["full", "partial", "sliver"];
+const VISIBILITY = new Set(VISIBILITY_ORDER);
 
 // How many previously-missed words are offered to a scan. Enough to give the
 // picture a real chance of containing one, few enough that the list does not
@@ -956,7 +975,11 @@ Output MUST be valid JSON only, exactly:
 // or it does not.
 
 /** How many crops to have in the air at once. */
-const VERIFY_CONCURRENCY = 4;
+// Raised with the flat job pool: the work is now one crop check per INSTANCE
+// across the whole set, not one per target, so there is more of it and it is
+// finer grained. These are low-detail calls on a small crop, which is the
+// cheapest request this route makes.
+const VERIFY_CONCURRENCY = 6;
 
 function verifyPrompt(label, langName) {
   return `You are shown a small crop taken from a larger photograph.
@@ -999,6 +1022,96 @@ async function askCrop(openai, model, crop, label, langName) {
     console.warn("[convo-image-targets] verify call failed:", e?.message || e);
     return { shows: true, why: "verifier unavailable" };
   }
+}
+
+/**
+ * Every instance of every label, in ONE call.
+ *
+ * v6 could carry several boxes per label, and the fifth playtest's two parking
+ * tickets are why. But nothing ever WENT LOOKING for the second one: the
+ * generating call volunteered instances or it did not, and verifyTargets only
+ * ever audited the boxes it was handed. So the sixth playtest's classroom, with
+ * four empty chairs and three occupied ones, stored exactly one chair box (the
+ * mostly hidden one behind the table), passed its crop check, and was stamped
+ * fully audited. Every visible chair was a rejected tap.
+ *
+ * One call for all labels rather than one per label: the picture is the
+ * expensive half of a vision request, and sending it once with a list is the
+ * difference between two high-detail calls per scan and eight.
+ *
+ * The visibility rating is asked for here, where the model is already looking at
+ * the whole scene and can compare the instances against each other. A crop shown
+ * on its own cannot say whether it is the best view of the thing available.
+ */
+async function enumerateInstances(openai, model, imageUrl, targets, lang) {
+  const langName = PACK[lang].langName;
+  const out = new Map();
+  const labels = targets.map((t) => t.label).filter(Boolean);
+  if (!labels.length) return out;
+
+  const prompt = `You are shown one photograph and a list of things that are in it.
+
+For EACH thing in the list, find EVERY separate instance of it that is visible in
+the photograph, and give one box per instance.
+
+A box HUGS a single instance: x and y are its top-left corner as fractions of the
+image from the left and top edges, w and h are its width and height as fractions.
+One box holds ONE instance. Never draw a box around a group of them.
+
+Rate how well each instance can be SEEN:
+  "full"    the whole thing is in view and nothing significant covers it
+  "partial" a substantial part is visible, but some of it is cut off or hidden
+  "sliver"  only a small fragment is visible, or it is mostly behind something
+
+List the instances of each thing MOST VISIBLE FIRST, and at most ${MAX_INSTANCES}
+of them. Do not invent instances: if a thing really appears once, return one box.
+If a thing in the list is not actually in the photograph, return an empty list for
+it rather than guessing.
+
+The things (${langName}):
+${labels.map((l) => `- ${l}`).join("\n")}
+
+Return JSON only:
+{ "items": [ { "label": "<exactly as given>", "instances": [ { "box": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 }, "visibility": "full" } ] } ] }`;
+
+  try {
+    const resp = await openai.chat.completions.create({
+      model,
+      temperature: 0,
+      max_tokens: 2000,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+          ],
+        },
+      ],
+    });
+    const parsed = JSON.parse(resp?.choices?.[0]?.message?.content || "{}");
+    for (const item of Array.isArray(parsed?.items) ? parsed.items : []) {
+      const label = String(item?.label || "").trim();
+      if (!label) continue;
+      const list = (Array.isArray(item?.instances) ? item.instances : [])
+        .map((ins) => {
+          const box = unitBox(ins?.box);
+          if (!box) return null;
+          const vis = String(ins?.visibility || "").toLowerCase();
+          return { box, visibility: VISIBILITY.has(vis) ? vis : "partial" };
+        })
+        .filter(Boolean)
+        .slice(0, MAX_INSTANCES);
+      if (list.length) out.set(fold(label), list);
+    }
+  } catch (e) {
+    // Enumeration is an improvement on the boxes we already have, never a
+    // precondition for them. A failure here leaves every target with exactly
+    // what the generating call gave it, which is v6's behaviour.
+    console.warn("[convo-image-targets] enumerate failed:", e?.message || e);
+  }
+  return out;
 }
 
 /** "Point at it again, tightly." One attempt, on the whole picture. */
@@ -1070,60 +1183,103 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
     return targets;
   }
 
-  const checked = await pooled(
-    targets.map((t) => async () => {
-      const boxes = Array.isArray(t.boxes) && t.boxes.length ? t.boxes : t.box ? [t.box] : [];
-      // Nothing to check. The field is omitted rather than nulled, so a row
-      // that predates boxes comes back the exact shape it went in as.
-      if (!boxes.length) return t;
+  // 1) Go looking. Every label, every instance, one call.
+  const found = await enumerateInstances(openai, model, imageUrl, targets, lang);
 
-      const kept = [];
-      const notes = [];
-      for (const box of boxes) {
-        const crop = await cropRegion(imageUrl, box, size);
-        if (!crop) {
-          // Could not be cut: not the target's fault, so it stays unjudged.
-          kept.push(box);
-          continue;
-        }
-        const first = await askCrop(openai, model, crop, t.label, langName);
-        if (first.shows) {
-          kept.push(box);
-          continue;
-        }
-        notes.push(first.why);
+  // 2) What each target will have checked. Enumeration wins when it found
+  //    anything, because it looked ON PURPOSE; otherwise the target keeps the
+  //    boxes it arrived with, which is v6's behaviour and the right answer for
+  //    a row cached before any of this existed.
+  const plan = targets.map((t) => {
+    const enumerated = found.get(fold(t.label)) || [];
+    const original = Array.isArray(t.boxes) && t.boxes.length ? t.boxes : t.box ? [t.box] : [];
+    const cands = enumerated.length
+      ? enumerated
+      : original.map((box) => ({ box, visibility: "partial" }));
+    return { t, cands: cands.slice(0, MAX_INSTANCES) };
+  });
 
-        // ONE more chance, and only for the instance that failed.
-        const again = await relocalize(openai, model, imageUrl, t.label, langName);
-        if (!again) continue;
-        const crop2 = await cropRegion(imageUrl, again, size);
-        const second = crop2 ? await askCrop(openai, model, crop2, t.label, langName) : { shows: false };
-        if (second.shows) kept.push(again);
-      }
+  // 3) Every candidate of every target, checked in ONE pool rather than one
+  //    pool per target. A label with six instances no longer serializes six
+  //    calls behind itself while three other labels wait for a slot.
+  const jobs = [];
+  plan.forEach((p, ti) =>
+    p.cands.forEach((c, ci) =>
+      jobs.push(async () => {
+        const crop = await cropRegion(imageUrl, c.box, size);
+        // Could not be cut: not the target's fault, so it stays unjudged.
+        if (!crop) return { ti, ci, shows: true, prominence: c.visibility };
+        const a = await askCrop(openai, model, crop, p.t.label, langName);
+        return { ti, ci, shows: a.shows, why: a.why, prominence: a.prominence || c.visibility };
+      }),
+    ),
+  );
+  const verdicts = await pooled(jobs, VERIFY_CONCURRENCY);
 
-      if (!kept.length) {
-        return { ...t, boxOk: false, boxWhy: notes[0] || "not in crop" };
-      }
-      const first = kept[0];
-      // `boxes` is stripped off before the spread, not overwritten after it.
-      // Spreading the original first and then conditionally re-adding meant a
-      // target whose second instance was rejected kept the rejected instance
-      // anyway, because the conditional adds nothing when there is one left and
-      // the old array was already through the door. A tap on the wing mirror
-      // would still have scored.
-      const { boxes: _dropped, ...rest } = t;
-      return {
-        ...rest,
-        box: first,
-        ...(kept.length > 1 ? { boxes: kept } : null),
-        // The point follows the box it belongs to, or the marker keeps pointing
-        // at where the box used to be.
-        point: { x: clampPoint(first.x + first.w / 2), y: clampPoint(first.y + first.h / 2) },
-        boxOk: true,
-      };
+  const byTarget = plan.map(() => []);
+  const notes = plan.map(() => []);
+  for (const v of verdicts) {
+    if (!v) continue;
+    const cand = plan[v.ti].cands[v.ci];
+    if (v.shows) byTarget[v.ti].push({ ...cand, visibility: v.prominence || cand.visibility });
+    else notes[v.ti].push(v.why);
+  }
+
+  // 4) A target nothing survived on gets the one last chance v6 gave it. Only
+  //    reached when enumeration found nothing either, so it is rare now.
+  const rescues = await pooled(
+    plan.map((p, ti) => async () => {
+      // Only for a target that HAD somewhere to look and lost it. A target with
+      // no box at all is the row-cached-before-boxes-existed case, and it comes
+      // back the exact shape it went in as: rescuing it would invent a location
+      // for a target whose whole point is that it has none, which is how the
+      // rim-point target came back pointing at the middle of the picture.
+      if (byTarget[ti].length || !p.cands.length) return null;
+      const again = await relocalize(openai, model, imageUrl, p.t.label, langName);
+      if (!again) return null;
+      const crop = await cropRegion(imageUrl, again, size);
+      if (!crop) return null;
+      const a = await askCrop(openai, model, crop, p.t.label, langName);
+      return a.shows ? { ti, box: again, visibility: a.prominence || "partial" } : null;
     }),
     VERIFY_CONCURRENCY,
   );
+  for (const r of rescues) if (r) byTarget[r.ti].push({ box: r.box, visibility: r.visibility });
+
+  const checked = plan.map((p, ti) => {
+    const t = p.t;
+    // A target that arrived with nothing to look at keeps its shape exactly, so
+    // a row cached before boxes existed comes back as it went in.
+    if (!p.cands.length && !byTarget[ti].length) return t;
+    const kept = byTarget[ti];
+    if (!kept.length) {
+      return { ...t, boxOk: false, boxWhy: notes[ti][0] || "not in crop" };
+    }
+    // Most visible first, so box[0] is the one the marker and the crops use.
+    kept.sort(
+      (a, b) => VISIBILITY_ORDER.indexOf(a.visibility) - VISIBILITY_ORDER.indexOf(b.visibility),
+    );
+    const boxes = kept.map((k) => k.box);
+    const first = boxes[0];
+    // `boxes` is stripped off before the spread, not overwritten after it.
+    // Spreading the original first and then conditionally re-adding meant a
+    // target whose second instance was rejected kept the rejected instance
+    // anyway, because the conditional adds nothing when there is one left and
+    // the old array was already through the door. A tap on the wing mirror
+    // would still have scored.
+    const { boxes: _dropped, ...rest } = t;
+    return {
+      ...rest,
+      box: first,
+      ...(boxes.length > 1 ? { boxes } : null),
+      // How well each kept instance can be seen, in the same order as `boxes`.
+      vis: kept.map((k) => k.visibility),
+      // The point follows the box it belongs to, or the marker keeps pointing
+      // at where the box used to be.
+      point: { x: clampPoint(first.x + first.w / 2), y: clampPoint(first.y + first.h / 2) },
+      boxOk: true,
+    };
+  });
 
   const dropped = checked.filter((t) => t.boxOk === false);
   if (dropped.length) {
@@ -1232,6 +1388,79 @@ function buildTopUpText(description, lang, have) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/**
+ * Bring a thin set back up to the floor, once, with one extra ask.
+ *
+ * Called from BOTH paths on purpose. A fresh scan and a cached row being
+ * re-examined lose targets the same way (the crop check drops what it cannot
+ * see), so a row that heals from five targets down to four has exactly the
+ * problem this exists to fix, and the first cut of this only guarded the fresh
+ * path: the healed row was written thin and stayed thin.
+ */
+async function topUpIfThin(openai, model, imageUrl, { description, lang, level, imageKey, targets }) {
+  if (!targets.length || targets.length >= MIN_TARGETS || !imageUrl) return targets;
+
+  const before = targets.length;
+  let out = targets;
+  try {
+    const { jsonrepair } = await import("jsonrepair");
+    const more = await openai.chat.completions.create({
+      model,
+      temperature: 0,
+      max_tokens: 1400,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: buildSystemPrompt(lang, level) },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label)) },
+            { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+          ],
+        },
+      ],
+    });
+    let extraRaw = [];
+    try {
+      const txt = more?.choices?.[0]?.message?.content || "{}";
+      let obj;
+      try {
+        obj = JSON.parse(txt);
+      } catch {
+        obj = JSON.parse(jsonrepair(txt));
+      }
+      extraRaw = Array.isArray(obj?.targets) ? obj.targets : [];
+    } catch (e) {
+      console.warn("[convo-image-targets] top-up JSON unparseable:", e?.message || e);
+    }
+    if (extraRaw.length) {
+      // Deduped against what we are KEEPING, by head word, so a top-up that
+      // answers "a chair" beside a kept "a classroom chair" cannot put two
+      // markers on one word. The kept targets are not re-sanitized: they have
+      // already passed, and running them through again only risks losing one.
+      const key = (l) => headWord(l, lang) || headNoun(l, lang) || fold(l);
+      const taken = new Set(out.map((t) => key(t.label)));
+      const fresh = sanitizeTargets(extraRaw, lang, imageKey, level).filter((m) => {
+        const head = key(m.label);
+        if (taken.has(head)) return false;
+        taken.add(head);
+        return true;
+      });
+      if (fresh.length) {
+        const okFresh = await verifyTargets(openai, model, imageUrl, fresh, lang);
+        out = [...out, ...okFresh].slice(0, MAX_TARGETS);
+      }
+    }
+  } catch (e) {
+    // A top-up that fails leaves the round exactly as good as it was.
+    console.warn("[convo-image-targets] top-up failed:", e?.message || e);
+  }
+  console.log(
+    `[convo-image-targets] top-up ${before} -> ${out.length} (floor ${MIN_TARGETS}, key=${imageKey} level=${level || "-"})`,
+  );
+  return out;
 }
 
 function buildUserText(description, lang, misses) {
@@ -1381,7 +1610,14 @@ export default async function handler(req, res) {
           const openaiForCheck = await tryOpenAI();
           if (openaiForCheck) {
             const model = pickModel();
-            const checked = await verifyTargets(openaiForCheck, model, imageUrl, kept, lang);
+            let checked = await verifyTargets(openaiForCheck, model, imageUrl, kept, lang);
+            // Held to the same floor as a fresh scan. Re-examination drops
+            // targets exactly the way generation does, so a row that heals from
+            // five down to four is thin for the same reason and gets the same
+            // one extra ask.
+            checked = await topUpIfThin(openaiForCheck, model, imageUrl, {
+              description, lang, level, imageKey, targets: checked,
+            });
             if (checked.length >= MIN_SERVED_TARGETS || checked.length === kept.length) {
               await writeRow(sb, { imageKey, lang, level, targets: checked, model });
               return res
@@ -1483,67 +1719,9 @@ export default async function handler(req, res) {
   //     cannot talk its way past.
   let targets = await verifyTargets(openai, MODEL, imageUrl, sane, lang);
 
-  // 7c) The floor. Verification is where the pool actually collapses, so the
-  //     top-up happens here, once, only when the survivors will not make a
-  //     round worth varying, and only when there is a picture to look at again.
-  if (targets.length && targets.length < MIN_TARGETS) {
-    const before = targets.length;
-    try {
-      const more = await openai.chat.completions.create({
-        model: MODEL,
-        temperature: 0,
-        max_tokens: 1400,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: buildSystemPrompt(lang, level) },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: buildTopUpText(description, lang, targets.map((t) => t.label)) },
-              { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
-            ],
-          },
-        ],
-      });
-      let extraRaw = [];
-      try {
-        const txt = more?.choices?.[0]?.message?.content || "{}";
-        let obj;
-        try {
-          obj = JSON.parse(txt);
-        } catch {
-          obj = JSON.parse(jsonrepair(txt));
-        }
-        extraRaw = Array.isArray(obj?.targets) ? obj.targets : [];
-      } catch (e) {
-        console.warn("[convo-image-targets] top-up JSON unparseable:", e?.message || e);
-      }
-      if (extraRaw.length) {
-        // Deduped against what we are KEEPING, by head noun, so a top-up that
-        // answers "a chair" beside a kept "a classroom chair" cannot put two
-        // markers on one word. The kept targets are not re-sanitized: they have
-        // already passed, and running them through again only risks losing one.
-        const key = (l) => headWord(l, lang) || headNoun(l, lang) || fold(l);
-        const taken = new Set(targets.map((t) => key(t.label)));
-        const fresh = sanitizeTargets(extraRaw, lang, imageKey, level).filter((m) => {
-          const head = key(m.label);
-          if (taken.has(head)) return false;
-          taken.add(head);
-          return true;
-        });
-        if (fresh.length) {
-          const okFresh = await verifyTargets(openai, MODEL, imageUrl, fresh, lang);
-          targets = [...targets, ...okFresh].slice(0, MAX_TARGETS);
-        }
-      }
-    } catch (e) {
-      // A top-up that fails leaves the round exactly as good as it was.
-      console.warn("[convo-image-targets] top-up failed:", e?.message || e);
-    }
-    console.log(
-      `[convo-image-targets] top-up ${before} -> ${targets.length} (floor ${MIN_TARGETS}, key=${imageKey} level=${level || "-"})`,
-    );
-  }
+  // 7c) The floor, shared with the heal path so a re-examined row is held to
+  //     the same standard as a fresh one.
+  targets = await topUpIfThin(openai, MODEL, imageUrl, { description, lang, level, imageKey, targets });
 
   if (!targets.length) {
     // These two look identical to a caller but mean opposite things, and
