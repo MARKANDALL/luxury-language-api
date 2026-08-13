@@ -110,6 +110,8 @@
 // on a replay should send `imageKey` alone (see above) — a cache hit needs no
 // image bytes at all.
 
+import { cropRegion, imageSize } from "../lib/image-crop.js";
+
 import crypto from "node:crypto";
 
 export const config = {
@@ -123,6 +125,10 @@ export const config = {
 // treated as a MISS and overwritten in place — the same no-migration
 // invalidation trick word-info.js plays with card.v.
 const TARGETS_V = 1;
+
+// Bumped when a row must be re-checked rather than merely re-read. v2 is the
+// first generation whose boxes were shown to the model on their own.
+const VERIFIED_V = 2;
 
 const MIN_TARGETS = 5;
 const MAX_TARGETS = 8;
@@ -157,6 +163,10 @@ const MAX_NOTE_CHARS = 140;
 
 // The riddle clue, which is only ever a handful of adjectives.
 const MAX_RIDDLE_CHARS = 60;
+
+// How many instances of one label are worth carrying. Past a few, the label is
+// describing a crowd rather than a thing, and the target should not exist.
+const MAX_INSTANCES = 4;
 
 // A box smaller than this is a mis-drawn sliver rather than an object; a box
 // bigger than this in BOTH directions is the whole scene, which points at
@@ -552,7 +562,21 @@ function sanitizeTarget(raw, lang, seed, level) {
   //    little low reads as the desk behind the calculator, and the box says
   //    which of the two was meant. A missing or broken box falls back to the
   //    point, which is also what every row cached before boxes existed does.
-  const box = unitBox(raw.box);
+  //
+  //    A label can name more than one thing in frame. The fifth playtest asked
+  //    "where is the parking ticket" in a scene holding two of them, one on
+  //    each car, and scored only the one the model happened to pick: the
+  //    learner tapped a ticket, was told no, and was then shown a ticket. So
+  //    every instance the model found is kept, and the first is the one the
+  //    marker and the crops use.
+  const boxes = (Array.isArray(raw.boxes) ? raw.boxes : [])
+    .map(unitBox)
+    .filter(Boolean)
+    .slice(0, MAX_INSTANCES);
+  const box = unitBox(raw.box) || boxes[0] || null;
+  if (box && !boxes.some((b) => b.x === box.x && b.y === box.y && b.w === box.w && b.h === box.h)) {
+    boxes.unshift(box);
+  }
   const px = box ? unitCoord(box.x + box.w / 2) : unitCoord(raw.point?.x);
   const py = box ? unitCoord(box.y + box.h / 2) : unitCoord(raw.point?.y);
   if (px === null || py === null) return null;
@@ -652,6 +676,7 @@ function sanitizeTarget(raw, lang, seed, level) {
     // Omitted rather than null when there is no usable box, so a target from a
     // fresh call and a target from the pre-box cache are the same shape.
     ...(box ? { box } : null),
+    ...(boxes.length > 1 ? { boxes } : null),
     cloze,
     choices: shuffled,
     answerIndex,
@@ -817,6 +842,18 @@ For each target return:
   * NO VAST SURFACES. Do not target a desk, a wall, a floor, a ceiling or a
     counter top. Their boxes swallow half the picture and every tap lands in
     them, which makes the question meaningless.
+- "boxes": when the picture contains MORE THAN ONE of the thing you named, list
+  a box for EVERY one of them here, up to ${MAX_INSTANCES}, and still give the clearest one as
+  "box". This matters more than it sounds. A learner asked to find "the ticket"
+  in a street with a ticket on two different windscreens will point at whichever
+  they see first, and being told they are wrong for finding the thing they were
+  asked for is the worst answer this game can give.
+  Your two options, and you must take one of them:
+    either list every instance here, so any of them counts;
+    or write a label and a sentence that can only mean ONE of them ("the ticket
+    on the red car's windscreen"), and give that one box.
+  Never pick one of several lookalikes silently and hope.
+  Omit this field entirely when there is only one of the thing.
 - "point": { "x": 0.00-1.00, "y": 0.00-1.00 } — the centre of that same thing, as
   a fallback if the box is unusable. 0.5/0.5 is the middle of the picture.
 - "cloze": ONE natural sentence about this picture, in ${p.langName}, with the
@@ -868,11 +905,23 @@ fails any of these: a sentence that is not literally true of this image, a
 target another nearby object could just as well answer, a box that does not
 contain the thing it names, a box drawn over a person's body when the target is
 not their clothing or something they hold, and any target that is really a
-surface rather than an object.${bandCheck}
+surface rather than an object.
+
+COUNT CHECK, and do it target by target, out loud to yourself. For each label
+you wrote, count how many of that thing are actually in this picture. If the
+answer is more than one, you have written a question with several right answers
+and picked one of them in secret. Fix it, one of the two ways:
+  - list every one of them in "boxes", so any of them counts; or
+  - rewrite the label AND the sentence so they can only mean one of them.
+This is not a rare case. A street has several cars, a table has several chairs,
+a face has two eyes, a shirt has several buttons. If you wrote "a car" and there
+are four cars, that target is broken as it stands.${bandCheck}
 
 Output MUST be valid JSON only, exactly:
 { "targets": [ { "label": "...",
                  "box": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 },
+                 "boxes": [ { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 },
+                            { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 } ],
                  "point": { "x": 0.0, "y": 0.0 },
                  "cloze": "...", "choices": ["...","...","...","..."],
                  "aliases": ["...","..."],
@@ -880,6 +929,258 @@ Output MUST be valid JSON only, exactly:
                  "riddle": "...",
                  "difficulty": "easy" } ] }
 `.trim();
+}
+
+// ── Model truth ─────────────────────────────────────────────────────────────
+//
+// A box is a claim, and until v6 nothing ever checked it. The fifth playtest
+// filmed the cost: a zoom on "the parking sign" showed trees and street, and
+// "where is the parking ticket" rejected taps on a ticket that was plainly
+// there. The generating call cannot audit itself, because it can see the whole
+// picture and the thing it named IS somewhere in that picture, so it agrees.
+//
+// So each box is cut out and shown to the model ON ITS OWN. With nothing else
+// in frame there is nothing to be reminded of: either the crop shows the thing
+// or it does not.
+
+/** How many crops to have in the air at once. */
+const VERIFY_CONCURRENCY = 4;
+
+function verifyPrompt(label, langName) {
+  return `You are shown a small crop taken from a larger photograph.
+Answer one question about the crop ALONE. You cannot see the rest of the photo
+and must not guess what is outside the crop.
+
+Question: is "${label}" (${langName}) clearly visible in this crop?
+
+Say yes ONLY if the thing itself is in the crop and a learner shown this crop
+could point at it. Say no if it is absent, if it is cut off past recognition, if
+you can only infer it from context, or if what is here is a different object
+that merely sits near it.
+
+Return JSON only: { "shows": true } or { "shows": false, "why": "<six words>" }`;
+}
+
+async function askCrop(openai, model, crop, label, langName) {
+  try {
+    const resp = await openai.chat.completions.create({
+      model,
+      temperature: 0,
+      max_tokens: 60,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: verifyPrompt(label, langName) },
+            { type: "image_url", image_url: { url: crop, detail: "low" } },
+          ],
+        },
+      ],
+    });
+    const parsed = JSON.parse(resp?.choices?.[0]?.message?.content || "{}");
+    return { shows: parsed?.shows === true, why: String(parsed?.why || "").slice(0, 60) };
+  } catch (e) {
+    // A verification that could not be run is NOT a failure of the target. The
+    // alternative, dropping targets when the checker itself breaks, empties
+    // rounds for a reason that has nothing to do with the picture.
+    console.warn("[convo-image-targets] verify call failed:", e?.message || e);
+    return { shows: true, why: "verifier unavailable" };
+  }
+}
+
+/** "Point at it again, tightly." One attempt, on the whole picture. */
+async function relocalize(openai, model, imageUrl, label, langName) {
+  try {
+    const resp = await openai.chat.completions.create({
+      model,
+      temperature: 0,
+      max_tokens: 120,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Find "${label}" (${langName}) in this photograph and give its bounding box.
+A previous attempt pointed at the wrong place, so look again and be exact.
+The box must HUG the thing: x and y are its top-left corner as fractions of the
+image from the left and top edges, w and h its width and height as fractions.
+If "${label}" is genuinely not in this photograph, say so instead of guessing.
+Return JSON only: { "box": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 } }
+or { "absent": true }`,
+            },
+            { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+          ],
+        },
+      ],
+    });
+    const parsed = JSON.parse(resp?.choices?.[0]?.message?.content || "{}");
+    if (parsed?.absent === true) return null;
+    return unitBox(parsed?.box);
+  } catch (e) {
+    console.warn("[convo-image-targets] relocalize failed:", e?.message || e);
+    return null;
+  }
+}
+
+/** Run `jobs` with a cap on how many are in flight at once. */
+async function pooled(jobs, limit) {
+  const out = new Array(jobs.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, jobs.length) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= jobs.length) return;
+      out[i] = await jobs[i]();
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+/**
+ * Crop-check every target, re-localize the failures once, drop what is still
+ * wrong. Returns the surviving targets, each stamped with what was decided.
+ *
+ * Every box a target carries is checked, not just the first: with two parking
+ * tickets in frame, a second box that points at a wing mirror would score a tap
+ * on the wing mirror.
+ */
+async function verifyTargets(openai, model, imageUrl, targets, lang) {
+  const langName = PACK[lang].langName;
+  let size = null;
+  try {
+    size = await imageSize(imageUrl);
+  } catch (e) {
+    console.warn("[convo-image-targets] could not size image, skipping verification:", e?.message || e);
+    return targets;
+  }
+
+  const checked = await pooled(
+    targets.map((t) => async () => {
+      const boxes = Array.isArray(t.boxes) && t.boxes.length ? t.boxes : t.box ? [t.box] : [];
+      // Nothing to check. The field is omitted rather than nulled, so a row
+      // that predates boxes comes back the exact shape it went in as.
+      if (!boxes.length) return t;
+
+      const kept = [];
+      const notes = [];
+      for (const box of boxes) {
+        const crop = await cropRegion(imageUrl, box, size);
+        if (!crop) {
+          // Could not be cut: not the target's fault, so it stays unjudged.
+          kept.push(box);
+          continue;
+        }
+        const first = await askCrop(openai, model, crop, t.label, langName);
+        if (first.shows) {
+          kept.push(box);
+          continue;
+        }
+        notes.push(first.why);
+
+        // ONE more chance, and only for the instance that failed.
+        const again = await relocalize(openai, model, imageUrl, t.label, langName);
+        if (!again) continue;
+        const crop2 = await cropRegion(imageUrl, again, size);
+        const second = crop2 ? await askCrop(openai, model, crop2, t.label, langName) : { shows: false };
+        if (second.shows) kept.push(again);
+      }
+
+      if (!kept.length) {
+        return { ...t, boxOk: false, boxWhy: notes[0] || "not in crop" };
+      }
+      const first = kept[0];
+      // `boxes` is stripped off before the spread, not overwritten after it.
+      // Spreading the original first and then conditionally re-adding meant a
+      // target whose second instance was rejected kept the rejected instance
+      // anyway, because the conditional adds nothing when there is one left and
+      // the old array was already through the door. A tap on the wing mirror
+      // would still have scored.
+      const { boxes: _dropped, ...rest } = t;
+      return {
+        ...rest,
+        box: first,
+        ...(kept.length > 1 ? { boxes: kept } : null),
+        // The point follows the box it belongs to, or the marker keeps pointing
+        // at where the box used to be.
+        point: { x: clampPoint(first.x + first.w / 2), y: clampPoint(first.y + first.h / 2) },
+        boxOk: true,
+      };
+    }),
+    VERIFY_CONCURRENCY,
+  );
+
+  const dropped = checked.filter((t) => t.boxOk === false);
+  if (dropped.length) {
+    console.log(
+      `[convo-image-targets] crop check dropped ${dropped.length}/${targets.length}: ` +
+        dropped.map((t) => `${t.label} (${t.boxWhy})`).join("; "),
+    );
+  }
+  return checked.filter((t) => t.boxOk !== false);
+}
+
+function clampPoint(v) {
+  return Math.min(1 - POINT_INSET, Math.max(POINT_INSET, v));
+}
+
+/**
+ * The model client, or null.
+ *
+ * A function rather than an inline construction because the cache-read path now
+ * needs one too: a row written before boxes were ever checked gets checked as
+ * it is read, and that read happens well before the generation path builds its
+ * client. The openai v4 constructor throws synchronously on a missing key, so
+ * this degrades rather than 500s, exactly as the inline version did.
+ */
+async function tryOpenAI() {
+  try {
+    const modAI = await import("openai");
+    return new modAI.OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  } catch (e) {
+    console.error("[convo-image-targets] openai init failed:", e?.message || e);
+    return null;
+  }
+}
+
+function pickModel() {
+  return (
+    (process.env.LUX_AI_VISION_MODEL || "").toString().trim() ||
+    (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
+    (process.env.LUX_AI_MODEL || "").toString().trim() ||
+    "gpt-4.1-mini"
+  );
+}
+
+/**
+ * Write the row. AWAITED by every caller, for the reason the generation path
+ * documents at length: a promise scheduled and abandoned as the handler
+ * responds is a cache that never fills, and the failure is invisible because
+ * the game still works.
+ */
+async function writeRow(sb, { imageKey, lang, level, targets, model }) {
+  if (!sb) return;
+  try {
+    const { error } = await sb.from("image_targets").upsert(
+      {
+        image_key: imageKey,
+        lang,
+        level,
+        v: TARGETS_V,
+        verified: VERIFIED_V,
+        targets,
+        model,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "image_key,lang,level" },
+    );
+    if (error) console.warn("[convo-image-targets] cache write failed:", error.message);
+  } catch (e) {
+    console.warn("[convo-image-targets] cache write failed", e?.message || e);
+  }
 }
 
 function buildUserText(description, lang) {
@@ -956,7 +1257,7 @@ export default async function handler(req, res) {
     try {
       const { data, error } = await sb
         .from("image_targets")
-        .select("targets, v")
+        .select("targets, v, verified")
         .eq("image_key", imageKey)
         .eq("lang", lang)
         .eq("level", level)
@@ -988,7 +1289,41 @@ export default async function handler(req, res) {
         // it was already written under these rules, and asking the model again
         // would return the same short set at the same price, every single play.
         const dropped = data.targets.length - kept.length;
-        if (kept.length && (dropped === 0 || kept.length >= MIN_SERVED_TARGETS)) {
+        const servable = kept.length && (dropped === 0 || kept.length >= MIN_SERVED_TARGETS);
+
+        // Every row written before v6 has boxes nobody ever looked at. They get
+        // crop-checked ONCE, here, on the next read, and the result is written
+        // back so the next play is free. This is the half that matters: the
+        // rules and the checks were always applied to fresh generations, and
+        // the pictures a learner has already played are precisely the ones
+        // nobody re-examined.
+        const hasBoxes = kept.some((t) => t.box || (Array.isArray(t.boxes) && t.boxes.length));
+        if (servable && data.verified !== VERIFIED_V && !hasBoxes) {
+          // Nothing to look at. Stamp it so this row is never re-examined, and
+          // serve it: a set cached before boxes existed cannot be crop-checked
+          // and is not wrong for that.
+          await writeRow(sb, { imageKey, lang, level, targets: kept, model: pickModel() });
+          return res.status(200).json({ ok: true, cached: true, imageKey, lang, targets: kept });
+        }
+        if (servable && data.verified !== VERIFIED_V && imageUrl) {
+          const openaiForCheck = await tryOpenAI();
+          if (openaiForCheck) {
+            const model = pickModel();
+            const checked = await verifyTargets(openaiForCheck, model, imageUrl, kept, lang);
+            if (checked.length >= MIN_SERVED_TARGETS || checked.length === kept.length) {
+              await writeRow(sb, { imageKey, lang, level, targets: checked, model });
+              return res
+                .status(200)
+                .json({ ok: true, cached: true, imageKey, lang, targets: checked });
+            }
+            // Verification gutted the row. Fall through and regenerate: the
+            // boxes were wrong, so re-serving them would be re-serving the bug.
+            console.log(
+              `[convo-image-targets] crop check left ${checked.length}/${kept.length}, regenerating ` +
+                `(key=${imageKey} level=${level || "-"})`,
+            );
+          }
+        } else if (servable) {
           return res.status(200).json({ ok: true, cached: true, imageKey, lang, targets: kept });
         }
         if (imageUrl) {
@@ -1015,22 +1350,18 @@ export default async function handler(req, res) {
 
   // 5) Imports & init. The openai v4 constructor throws synchronously on a
   //    missing key, so it is built inside this guard and degrades, never 500s.
-  let jsonrepair, openai;
+  let jsonrepair;
+  const openai = await tryOpenAI();
   try {
-    const modAI = await import("openai");
     const modRepair = await import("jsonrepair");
     jsonrepair = modRepair.jsonrepair;
-    openai = new modAI.OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   } catch (e) {
     console.error("[convo-image-targets] init error", e);
     return res.status(200).json(empty(imageKey, lang, "init_error"));
   }
+  if (!openai) return res.status(200).json(empty(imageKey, lang, "init_error"));
 
-  const MODEL =
-    (process.env.LUX_AI_VISION_MODEL || "").toString().trim() ||
-    (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
-    (process.env.LUX_AI_MODEL || "").toString().trim() ||
-    "gpt-4.1-mini";
+  const MODEL = pickModel();
 
   // 6) ONE vision call. temperature 0 for determinism, same as word-image.
   let resp;
@@ -1072,7 +1403,13 @@ export default async function handler(req, res) {
   // 7) Validate. The seed is the image key, so the choice order is stable for
   //    this image forever — cache hit or fresh call, the round is the same.
   const rawTargets = Array.isArray(parsed?.targets) ? parsed.targets : [];
-  const targets = sanitizeTargets(rawTargets, lang, imageKey, level);
+  const sane = sanitizeTargets(rawTargets, lang, imageKey, level);
+
+  // 7b) Model truth. Every surviving box is cut out and shown to the model on
+  //     its own; what the crop does not show is re-localized once and then
+  //     dropped. This is the only check in the pipeline the generating call
+  //     cannot talk its way past.
+  const targets = await verifyTargets(openai, MODEL, imageUrl, sane, lang);
 
   if (!targets.length) {
     // These two look identical to a caller but mean opposite things, and
@@ -1082,7 +1419,7 @@ export default async function handler(req, res) {
     // is a prompt or a model regression — the classic shape being coordinates
     // returned as percentages, where every point fails the [0,1] range check and
     // the whole set silently evaporates.
-    if (rawTargets.length) {
+    if (rawTargets.length || sane.length) {
       console.warn(
         `[convo-image-targets] all ${rawTargets.length} targets failed validation ` +
           `(lang=${lang} model=${MODEL} key=${imageKey})`
@@ -1112,25 +1449,7 @@ export default async function handler(req, res) {
   // and left zero rows behind. word-info.js already learned the same lesson for
   // its logOnly insert, which it awaits "so the row lands before the serverless
   // function can freeze after the response".
-  if (sb) {
-    try {
-      const { error } = await sb.from("image_targets").upsert(
-        {
-          image_key: imageKey,
-          lang,
-          level,
-          v: TARGETS_V,
-          targets,
-          model: MODEL,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "image_key,lang,level" }
-      );
-      if (error) console.warn("[convo-image-targets] cache write failed:", error.message);
-    } catch (e) {
-      console.warn("[convo-image-targets] cache write failed", e?.message || e);
-    }
-  }
+  await writeRow(sb, { imageKey, lang, level, targets, model: MODEL });
 
   return res.status(200).json({ ok: true, cached: false, imageKey, lang, targets });
 }

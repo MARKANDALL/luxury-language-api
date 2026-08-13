@@ -30,6 +30,19 @@ vi.mock("openai", () => ({
   },
 }));
 
+// ── Crop mock ───────────────────────────────────────────────────────────────
+//
+// The verifier shells out to ffmpeg. These tests are hermetic, so the cut is
+// mocked and the interesting thing becomes WHICH boxes were asked about.
+const { cropSpy, sizeSpy } = vi.hoisted(() => ({
+  cropSpy: vi.fn(),
+  sizeSpy: vi.fn(),
+}));
+vi.mock("../lib/image-crop.js", () => ({
+  cropRegion: cropSpy,
+  imageSize: sizeSpy,
+}));
+
 // ── Supabase mock ───────────────────────────────────────────────────────────
 // `enabled:false` simulates missing Supabase env (getSupabaseAdmin throws).
 // `row` is what a cache read finds; `upserts` records every cache write.
@@ -87,6 +100,32 @@ function enTargets() {
   ];
 }
 
+function reply(obj) {
+  return { choices: [{ message: { content: JSON.stringify(obj) } }] };
+}
+
+/**
+ * Install the model mock for a round whose generation returns `targets`.
+ *
+ * The route makes three KINDS of call on one client now: generate the set,
+ * crop-check one box, and re-localize a box that failed. A test that answered
+ * all three with the same canned target list had its verification read
+ * {"targets":[...]}, find no "shows", and drop every boxed target it checked.
+ */
+function mockRound(targets, opts = {}) {
+  createSpy.mockImplementation((req) => {
+    const text = JSON.stringify(req?.messages || "");
+    if (text.includes("clearly visible in this crop")) {
+      const shows = typeof opts.shows === "function" ? opts.shows(text) : opts.shows !== false;
+      return Promise.resolve(reply(shows ? { shows: true } : { shows: false, why: "not in crop" }));
+    }
+    if (text.includes("give its bounding box")) {
+      return Promise.resolve(reply(opts.relocalized ?? { box: { x: 0.4, y: 0.4, w: 0.1, h: 0.1 } }));
+    }
+    return Promise.resolve(modelReply(targets));
+  });
+}
+
 function modelReply(targets) {
   return { choices: [{ message: { content: JSON.stringify({ targets }) } }] };
 }
@@ -94,7 +133,14 @@ function modelReply(targets) {
 beforeEach(() => {
   vi.resetModules();
   createSpy.mockReset();
-  createSpy.mockResolvedValue(modelReply(enTargets()));
+  mockRound(enTargets());
+  cropSpy.mockReset();
+  sizeSpy.mockReset();
+  // A crop always cuts, and every crop shows what it claims, unless a test says
+  // otherwise. Default-pass keeps the other eighty tests about what they were
+  // about instead of about verification.
+  cropSpy.mockResolvedValue("data:image/jpeg;base64,QQ==");
+  sizeSpy.mockResolvedValue({ w: 1600, h: 900 });
   sbState.enabled = true;
   sbState.row = null;
   sbState.upserts = [];
@@ -211,7 +257,12 @@ describe("convo-image-targets cache", () => {
     expect(r.body.cached).toBe(true);
     expect(r.body.targets).toEqual(stored);
     expect(createSpy).not.toHaveBeenCalled();
-    expect(sbState.upserts).toHaveLength(0);
+    // It IS written back once, to stamp that it has been examined under the
+    // current rules. A set with no boxes has nothing to crop-check, and the
+    // stamp is what stops every future read asking the same question again.
+    expect(sbState.upserts).toHaveLength(1);
+    expect(sbState.upserts[0].payload.verified).toBe(2);
+    expect(sbState.upserts[0].payload.targets).toEqual(stored);
   });
 
   it("a set cached BEFORE aliases existed is still served, not re-billed", async () => {
@@ -501,6 +552,182 @@ describe("convo-image-targets cache", () => {
   });
 });
 
+// ── Model truth ─────────────────────────────────────────────────────────────
+//
+// The box was a claim nobody checked. The fifth playtest filmed both halves of
+// the cost: a zoom that showed trees instead of the parking sign, and a ticket
+// that would not accept a tap. The generating call cannot audit itself, because
+// it can see the whole picture and the thing it named IS in there somewhere.
+
+describe("convo-image-targets crop verification", () => {
+  const boxed = (labels) =>
+    labels.map((label, i) => ({
+      label,
+      point: { x: 0.2 + i * 0.15, y: 0.5 },
+      box: { x: 0.2 + i * 0.15, y: 0.45, w: 0.08, h: 0.1 },
+      cloze: `Here is ___ number ${i}.`,
+      choices: [label, `wrong ${i}a`, `wrong ${i}b`, `wrong ${i}c`],
+      difficulty: "medium",
+    }));
+
+  it("shows each box to the model ON ITS OWN, once per box", async () => {
+    mockRound(boxed(["a kettle", "a ladle", "a colander"]));
+    const api = await client();
+    await post(api);
+
+    expect(cropSpy).toHaveBeenCalledTimes(3);
+    const asked = createSpy.mock.calls
+      .map((c) => JSON.stringify(c[0].messages))
+      .filter((t) => t.includes("clearly visible in this crop"));
+    expect(asked).toHaveLength(3);
+    // The crop is the ONLY thing sent. If the whole picture went too, the model
+    // could see the thing elsewhere in frame and agree for the wrong reason.
+    for (const call of createSpy.mock.calls) {
+      const text = JSON.stringify(call[0].messages);
+      if (!text.includes("clearly visible in this crop")) continue;
+      const images = call[0].messages[0].content.filter((c) => c.type === "image_url");
+      expect(images).toHaveLength(1);
+      expect(images[0].image_url.url).toBe("data:image/jpeg;base64,QQ==");
+    }
+  });
+
+  it("re-localizes a box the crop refuses, ONCE, and keeps it if the retry passes", async () => {
+    let seen = 0;
+    mockRound(boxed(["a kettle"]), {
+      // First crop fails, the crop of the re-localized box passes.
+      shows: () => ++seen > 1,
+    });
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.targets).toHaveLength(1);
+    expect(r.body.targets[0].box).toEqual({ x: 0.4, y: 0.4, w: 0.1, h: 0.1 });
+    // The point follows the box it belongs to, or the marker keeps pointing at
+    // where the box used to be.
+    expect(r.body.targets[0].point).toEqual({ x: 0.45, y: 0.45 });
+    expect(r.body.targets[0].boxOk).toBe(true);
+  });
+
+  it("drops a target whose box fails twice", async () => {
+    mockRound(boxed(["a kettle", "a ladle"]), { shows: false });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets).toHaveLength(0);
+    expect(r.body.reason).toBe("no_valid_targets");
+  });
+
+  it("gives up on the target, not the round, when the verifier itself breaks", async () => {
+    // A checker that cannot run is not evidence against the picture. Dropping
+    // targets when the checker breaks empties rounds for a reason that has
+    // nothing to do with what is in them.
+    sizeSpy.mockRejectedValue(new Error("ffmpeg missing"));
+    mockRound(boxed(["a kettle", "a ladle"]));
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets).toHaveLength(2);
+    expect(cropSpy).not.toHaveBeenCalled();
+  });
+
+  it("checks EVERY instance of a duplicated label, not just the first", async () => {
+    mockRound([
+      {
+        label: "the ticket",
+        point: { x: 0.3, y: 0.4 },
+        box: { x: 0.28, y: 0.38, w: 0.06, h: 0.05 },
+        boxes: [
+          { x: 0.28, y: 0.38, w: 0.06, h: 0.05 },
+          { x: 0.62, y: 0.41, w: 0.05, h: 0.05 },
+        ],
+        cloze: "There is ___ under the wiper.",
+        choices: ["the ticket", "a leaflet", "a receipt", "a map"],
+      },
+    ]);
+    const api = await client();
+    const r = await post(api);
+
+    expect(cropSpy).toHaveBeenCalledTimes(2);
+    expect(r.body.targets[0].boxes).toHaveLength(2);
+  });
+
+  it("keeps the instances that survive and drops the ones that do not", async () => {
+    // A second box that points at a wing mirror would score a tap on the wing
+    // mirror, which is worse than not having it.
+    let n = 0;
+    mockRound(
+      [
+        {
+          label: "the ticket",
+          point: { x: 0.3, y: 0.4 },
+          boxes: [
+            { x: 0.28, y: 0.38, w: 0.06, h: 0.05 },
+            { x: 0.62, y: 0.41, w: 0.05, h: 0.05 },
+          ],
+          cloze: "There is ___ under the wiper.",
+          choices: ["the ticket", "a leaflet", "a receipt", "a map"],
+        },
+      ],
+      { shows: () => ++n === 1, relocalized: { absent: true } },
+    );
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.targets).toHaveLength(1);
+    expect(r.body.targets[0].boxes).toBeUndefined();
+    expect(r.body.targets[0].box).toEqual({ x: 0.28, y: 0.38, w: 0.06, h: 0.05 });
+  });
+
+  it("asks the prompt for every instance, and forbids a silent pick", async () => {
+    const api = await client();
+    await post(api);
+    const system = createSpy.mock.calls[0][0].messages[0].content;
+    expect(system).toContain('"boxes"');
+    expect(system).toContain("Never pick one of several lookalikes silently");
+  });
+});
+
+describe("convo-image-targets serve-time verification", () => {
+  const storedBoxed = [
+    { label: "a mug", point: { x: 0.3, y: 0.6 }, box: { x: 0.28, y: 0.55, w: 0.08, h: 0.1 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle"], answerIndex: 0 },
+    { label: "an apron", point: { x: 0.5, y: 0.5 }, box: { x: 0.46, y: 0.45, w: 0.09, h: 0.12 }, cloze: "She wears ___.", choices: ["an apron", "a scarf", "a hat"], answerIndex: 0 },
+    { label: "a jar", point: { x: 0.7, y: 0.7 }, box: { x: 0.66, y: 0.66, w: 0.07, h: 0.09 }, cloze: "Beans in ___.", choices: ["a jar", "a tin", "a sack"], answerIndex: 0 },
+    { label: "a plant", point: { x: 0.8, y: 0.3 }, box: { x: 0.76, y: 0.26, w: 0.08, h: 0.1 }, cloze: "Beside the till, ___.", choices: ["a plant", "a basket", "a crate"], answerIndex: 0 },
+  ];
+
+  it("crop-checks a row that was never examined, then stamps it so it is never re-billed", async () => {
+    sbState.row = { targets: storedBoxed, v: 1, verified: null };
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(true);
+    expect(cropSpy).toHaveBeenCalledTimes(4);
+    expect(sbState.upserts).toHaveLength(1);
+    expect(sbState.upserts[0].payload.verified).toBe(2);
+  });
+
+  it("never re-checks a row already stamped", async () => {
+    sbState.row = { targets: storedBoxed, v: 1, verified: 2 };
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(true);
+    expect(cropSpy).not.toHaveBeenCalled();
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(sbState.upserts).toHaveLength(0);
+  });
+
+  it("regenerates when the crop check guts an old row", async () => {
+    // The boxes were wrong, so re-serving them is re-serving the bug.
+    let n = 0;
+    mockRound(enTargets(), { shows: () => ++n > 4, relocalized: { absent: true } });
+    sbState.row = { targets: storedBoxed, v: 1, verified: null };
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(false);
+    expect(r.body.targets).toHaveLength(6);
+  });
+});
+
 // ── Level teeth ─────────────────────────────────────────────────────────────
 //
 // Asking for C2 and being handed "a first-aid kit" is what these cover. The
@@ -551,14 +778,14 @@ describe("convo-image-targets level teeth", () => {
   });
 
   it("a basic noun is dropped at C2 and kept at B1", async () => {
-    createSpy.mockResolvedValue(modelReply(withLevel(["a chair", "gauze", "the lapel"])));
+    mockRound((withLevel(["a chair", "gauze", "the lapel"])));
     const api = await client();
     const hard = await post(api, { level: "C2" });
     expect(hard.body.targets.map((t) => t.label)).toEqual(["gauze", "the lapel"]);
 
     vi.resetModules();
     createSpy.mockClear();
-    createSpy.mockResolvedValue(modelReply(withLevel(["a chair", "gauze", "the lapel"])));
+    mockRound((withLevel(["a chair", "gauze", "the lapel"])));
     const api2 = await client();
     const easy = await post(api2, { level: "B1" });
     expect(easy.body.targets.map((t) => t.label)).toEqual(["a chair", "gauze", "the lapel"]);
@@ -568,7 +795,7 @@ describe("convo-image-targets level teeth", () => {
     for (const level of ["", "A1", "C2"]) {
       vi.resetModules();
       createSpy.mockClear();
-      createSpy.mockResolvedValue(modelReply(withLevel(["the sand", "a mug"])));
+      mockRound((withLevel(["the sand", "a mug"])));
       const api = await client();
       const r = await post(api, level ? { level } : {});
       expect(r.body.targets.map((t) => t.label)).toEqual(["a mug"]);
@@ -578,8 +805,7 @@ describe("convo-image-targets level teeth", () => {
   it("a modifier does not buy a basic noun its way into a high band", async () => {
     // The first live C2 run answered "a bucket hat" and "a lifeguard shirt":
     // a hat and a shirt with a word in front. Whole-phrase matching saw neither.
-    createSpy.mockResolvedValue(
-      modelReply(withLevel(["a bucket hat", "a lifeguard shirt", "the sandy beach", "a rash guard"]))
+    mockRound((withLevel(["a bucket hat", "a lifeguard shirt", "the sandy beach", "a rash guard"]))
     );
     const api = await client();
     const r = await post(api, { level: "C2" });
@@ -587,8 +813,7 @@ describe("convo-image-targets level teeth", () => {
   });
 
   it("a PART of a basic object survives the high bands, which is what they are for", async () => {
-    createSpy.mockResolvedValue(
-      modelReply(withLevel(["the brim of the hat", "the hem of the shirt", "a chair"]))
+    mockRound((withLevel(["the brim of the hat", "the hem of the shirt", "a chair"]))
     );
     const api = await client();
     const r = await post(api, { level: "C1" });
@@ -598,8 +823,7 @@ describe("convo-image-targets level teeth", () => {
   it("Spanish takes its head noun from the FRONT, not the back", async () => {
     // "la playa arenosa" is a beach; "el ala del sombrero" is a brim, not a hat.
     // Reading Spanish from the right, as English is read, gets both backwards.
-    createSpy.mockResolvedValue(
-      modelReply(withLevel(["la playa arenosa", "el ala del sombrero", "la silla plegable", "la gasa"]))
+    mockRound((withLevel(["la playa arenosa", "el ala del sombrero", "la silla plegable", "la gasa"]))
     );
     const api = await client();
     const r = await post(api, { level: "C1", lang: "es" });
@@ -607,8 +831,7 @@ describe("convo-image-targets level teeth", () => {
   });
 
   it("a box that is half the picture, or a full-width band, is not an object", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         // Over half the frame: the scene, not a thing in it.
         { label: "a mural", box: { x: 0.1, y: 0.1, w: 0.8, h: 0.8 }, point: { x: 0.5, y: 0.5 }, cloze: "Painted on it, ___.", choices: ["a mural", "a poster", "a flag", "a sign"] },
         // A full-width strip: a horizon, a floor, a shelf edge. Every tap lands in it.
@@ -624,7 +847,7 @@ describe("convo-image-targets level teeth", () => {
   it("what the filter rejects is never written to the cache", async () => {
     // Otherwise the two halves disagree: stored, then rejected on every read,
     // and the picture pays for a regeneration that stores the same thing again.
-    createSpy.mockResolvedValue(modelReply(withLevel(["the sky", "a mug", "a chalkboard"])));
+    mockRound((withLevel(["the sky", "a mug", "a chalkboard"])));
     const api = await client();
     await post(api);
     expect(sbState.upserts[0].payload.targets.map((t) => t.label)).toEqual(["a mug", "a chalkboard"]);
@@ -635,8 +858,7 @@ describe("convo-image-targets level teeth", () => {
 
 describe("convo-image-targets validation", () => {
   it("drops a target whose point is outside the image", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 1.4, y: 0.5 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle", "a spoon"] },
         { label: "a window", point: { x: 0.5, y: -0.2 }, cloze: "Light through ___.", choices: ["a window", "a door", "a mirror", "a lamp"] },
         { label: "a plant", point: { x: 0.7, y: 0.68 }, cloze: "There is ___ here.", choices: ["a plant", "a basket", "a stool", "a crate"] },
@@ -648,8 +870,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("drops a target whose point is missing or not a number", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle", "a spoon"] },
         { label: "a lamp", point: { x: "left", y: 0.4 }, cloze: "Under ___.", choices: ["a lamp", "a shelf", "a hook", "a fan"] },
         { label: "a plant", point: { x: 0.7, y: 0.68 }, cloze: "There is ___ here.", choices: ["a plant", "a basket", "a stool", "a crate"] },
@@ -661,8 +882,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("nudges a valid rim point inward so the marker is never half off-image", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 0, y: 1 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle", "a spoon"] },
       ])
     );
@@ -672,8 +892,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("normalizes a long underscore run into the ___ blank", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "The barista is holding ______.", choices: ["a mug", "a plate", "a kettle", "a spoon"] },
       ])
     );
@@ -683,8 +902,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("blanks the word itself when the model forgot the blank", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "The barista is holding a mug.", choices: ["a mug", "a plate", "a kettle", "a spoon"] },
       ])
     );
@@ -694,8 +912,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("drops a cloze that leaks its own answer alongside the blank", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "The mug beside ___ is empty.", choices: ["a mug", "a plate", "a kettle", "a spoon"] },
         { label: "a plant", point: { x: 0.7, y: 0.68 }, cloze: "There is ___ here.", choices: ["a plant", "a basket", "a stool", "a crate"] },
       ])
@@ -709,8 +926,7 @@ describe("convo-image-targets validation", () => {
     // A single-token comparison would miss this: the head noun is three words,
     // so "taza de cafe" has to be matched as a phrase or the answer ships in
     // plain sight next to its own blank.
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "la taza de café", point: { x: 0.3, y: 0.6 }, cloze: "La taza de café está junto a ___.", choices: ["la taza de café", "el plato", "la olla", "la cuchara"] },
         { label: "la planta", point: { x: 0.7, y: 0.68 }, cloze: "Hay ___ aquí.", choices: ["la planta", "la silla", "la cesta", "el cajón"] },
       ])
@@ -721,8 +937,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("blanks a MULTI-WORD answer when the model forgot the blank", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "the coffee cup", point: { x: 0.3, y: 0.6 }, cloze: "She is holding the coffee cup.", choices: ["the coffee cup", "the plate", "the kettle", "the spoon"] },
       ])
     );
@@ -732,8 +947,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("drops a target with no usable cloze at all", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "The barista is busy today.", choices: ["a mug", "a plate", "a kettle", "a spoon"] },
         { label: "a plant", point: { x: 0.7, y: 0.68 }, cloze: "There is ___ here.", choices: ["a plant", "a basket", "a stool", "a crate"] },
       ])
@@ -744,8 +958,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("always includes the answer in choices, even when the model omits it", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a plate", "a kettle", "a spoon"] },
       ])
     );
@@ -758,8 +971,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("de-duplicates choices by folded form and drops a target left with too few", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "la taza", point: { x: 0.3, y: 0.6 }, cloze: "Está sosteniendo ___.", choices: ["La Taza", "la taza", "LA TAZA"] },
         { label: "la planta", point: { x: 0.7, y: 0.68 }, cloze: "Hay ___ aquí.", choices: ["la planta", "la silla", "la cesta", "La Silla"] },
       ])
@@ -773,8 +985,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("drops a second target that names the same thing", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "la taza", point: { x: 0.3, y: 0.6 }, cloze: "Está sosteniendo ___.", choices: ["la taza", "el plato", "la olla", "la cuchara"] },
         { label: "una taza", point: { x: 0.6, y: 0.4 }, cloze: "Hay ___ en la mesa.", choices: ["una taza", "un plato", "una olla", "una cuchara"] },
         { label: "la planta", point: { x: 0.7, y: 0.68 }, cloze: "Hay ___ aquí.", choices: ["la planta", "la silla", "la cesta", "el cajón"] },
@@ -795,7 +1006,7 @@ describe("convo-image-targets validation", () => {
         choices: [`thing${i}`, `other${i}`, `spare${i}`, `extra${i}`],
       });
     }
-    createSpy.mockResolvedValue(modelReply(many));
+    mockRound((many));
     const api = await client();
     const r = await post(api);
     expect(r.body.targets).toHaveLength(8);
@@ -805,8 +1016,7 @@ describe("convo-image-targets validation", () => {
     // The second playtest's grounding failure: a point a little off the
     // calculator read as the desk behind it. The box says which was meant, and
     // its centre beats a separately-estimated point.
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         {
           label: "a calculator",
           box: { x: 0.4, y: 0.5, w: 0.2, h: 0.1 },
@@ -836,8 +1046,7 @@ describe("convo-image-targets validation", () => {
     for (const { tag, box } of bad) {
       vi.resetModules();
       createSpy.mockClear();
-      createSpy.mockResolvedValue(
-        modelReply([
+      mockRound(([
           {
             label: "a mug",
             box,
@@ -877,8 +1086,7 @@ describe("convo-image-targets validation", () => {
   it("always offers the bare head noun as an alias", async () => {
     // Dropping the article is the commonest near miss there is, and it must
     // never be graded wrong, whatever the model chose to return.
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a coffee mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a coffee mug", "a plate", "a kettle", "a spoon"] },
       ])
     );
@@ -888,8 +1096,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("keeps the model's own aliases, capped and de-duplicated", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         {
           label: "a computer monitor",
           point: { x: 0.3, y: 0.6 },
@@ -912,8 +1119,7 @@ describe("convo-image-targets validation", () => {
   // ── The usage note ────────────────────────────────────────────────────────
 
   it("carries a regional usage note when the variants earn one", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         {
           label: "swim trunks",
           point: { x: 0.4, y: 0.6 },
@@ -933,8 +1139,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("drops a note with no variant behind it, rather than lecturing on a plain word", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         {
           label: "a mug",
           point: { x: 0.3, y: 0.6 },
@@ -951,8 +1156,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("omits the note entirely rather than storing an empty one", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle", "a spoon"], aliases: ["a cup"] },
       ])
     );
@@ -981,8 +1185,7 @@ describe("convo-image-targets validation", () => {
   // ── The riddle clue ───────────────────────────────────────────────────────
 
   it("keeps an attributes-only riddle, without its final stop", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a toolbox", point: { x: 0.3, y: 0.6 }, cloze: "He carries ___.", choices: ["a toolbox", "a lunchbox", "a crate", "a bucket"], riddle: "small and red." },
       ])
     );
@@ -994,8 +1197,7 @@ describe("convo-image-targets validation", () => {
   it("drops a riddle that gives the answer away", async () => {
     // A clue holding the answer is not a clue. Checked on the whole noun and on
     // each word of it, so "a red toolbox" fails as surely as "a toolbox".
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a toolbox", point: { x: 0.3, y: 0.6 }, cloze: "He carries ___.", choices: ["a toolbox", "a lunchbox", "a crate", "a bucket"], riddle: "red and a toolbox" },
         { label: "a first-aid kit", point: { x: 0.5, y: 0.5 }, cloze: "She opens ___.", choices: ["a first-aid kit", "a lunchbox", "a crate", "a bucket"], riddle: "white with a red kit cross" },
         { label: "a kettle", point: { x: 0.7, y: 0.4 }, cloze: "Steam from ___.", choices: ["a kettle", "a pan", "a jug", "a pot"], riddle: "silver and round" },
@@ -1023,8 +1225,7 @@ describe("convo-image-targets validation", () => {
   it("refuses an alias that is one of the wrong choices", async () => {
     // An alias marks an answer correct. If it collided with a distractor, that
     // distractor would become a right answer and the question would be broken.
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         {
           label: "a mug",
           point: { x: 0.3, y: 0.6 },
@@ -1042,8 +1243,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("a target with no model aliases still has the head noun and never null", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle", "a spoon"] },
       ])
     );
@@ -1061,8 +1261,7 @@ describe("convo-image-targets validation", () => {
   });
 
   it("normalizes an unknown difficulty to medium", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 0.3, y: 0.6 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle", "a spoon"], difficulty: "impossible" },
       ])
     );
@@ -1141,8 +1340,7 @@ describe("convo-image-targets localization", () => {
   });
 
   it("strips the Spanish article when comparing, so el/la duplicates collapse", async () => {
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "el plato", point: { x: 0.3, y: 0.6 }, cloze: "Está sobre ___.", choices: ["el plato", "la taza", "la olla", "la cuchara"] },
         { label: "un plato", point: { x: 0.5, y: 0.6 }, cloze: "Hay ___ aquí.", choices: ["un plato", "una taza", "una olla", "una cuchara"] },
       ])
@@ -1218,8 +1416,7 @@ describe("convo-image-targets degradation", () => {
   it("a set where nothing validates is no_valid_targets, NOT no_targets", async () => {
     // The distinction is the whole point: this is a prompt/model regression, and
     // reporting it as "nothing nameable in the picture" would hide it forever.
-    createSpy.mockResolvedValue(
-      modelReply([
+    mockRound(([
         { label: "a mug", point: { x: 9, y: 9 }, cloze: "Holding ___.", choices: ["a mug", "a plate"] },
         { label: "", point: { x: 0.5, y: 0.5 }, cloze: "___ here.", choices: ["a plate", "a kettle"] },
       ])
@@ -1234,8 +1431,7 @@ describe("convo-image-targets degradation", () => {
   it("coordinates returned as percentages lose every target and say so", async () => {
     // The concrete regression the two reasons exist to tell apart: a model that
     // answers 0-100 instead of 0-1 fails every range check at once.
-    createSpy.mockResolvedValue(
-      modelReply(
+    mockRound((
         enTargets().map((t) => ({ ...t, point: { x: t.point.x * 100, y: t.point.y * 100 } }))
       )
     );
@@ -1245,7 +1441,7 @@ describe("convo-image-targets degradation", () => {
   });
 
   it("a model that finds nothing nameable is no_targets", async () => {
-    createSpy.mockResolvedValue(modelReply([]));
+    mockRound(([]));
     const api = await client();
     const r = await post(api);
     expect(r.status).toBe(200);
