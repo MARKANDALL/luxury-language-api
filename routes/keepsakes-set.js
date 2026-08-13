@@ -50,7 +50,7 @@ export default async function handler(req, res) {
 
     const { data: images, error: imgErr } = await sb
       .from("keepsake_images")
-      .select("idx, storage_path, thumb_path, width, height, caption, description")
+      .select("idx, storage_path, thumb_path, width, height, caption, description, scan_key, scan_lang, scan_level")
       .eq("set_id", set.id)
       .order("idx", { ascending: true });
 
@@ -82,6 +82,20 @@ export default async function handler(req, res) {
           height: i.height,
           caption: i.caption || "",
           description: i.description || "",
+          // ── SEAM: I Spy in the album (Stage C, gated on feat/image-vocab-game) ──
+          // scanKey is the picture's row in the I Spy scan cache, captured at
+          // save time from the original data URI. When the chip is wired up,
+          // the album round must probe convo-image-targets with this key and
+          // NO imageUrl: a key-only probe returns the cached row untouched,
+          // whereas sending imageUrl alongside it makes the route crop-check
+          // every box, one vision call each, even on a hit.
+          // scanLang and scanLevel are the other two thirds of that cache's
+          // primary key (image_key, lang, level); steer the round to them or
+          // the lookup legitimately misses. A null scanKey means never
+          // scanned, and the round has to supply bytes and pay once.
+          scanKey: i.scan_key || null,
+          scanLang: i.scan_lang || null,
+          scanLevel: i.scan_level || null,
         }))
         .filter((i) => i.url),
     });

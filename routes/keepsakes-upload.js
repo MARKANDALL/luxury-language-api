@@ -28,6 +28,17 @@ import { getSupabaseAdmin } from "../lib/supabase.js";
 import { sendJson, readJsonBody } from "../lib/expenses/http.js";
 
 const UNIQUE_VIOLATION = "23505";
+const CEFR = new Set(["A1", "A2", "B1", "B2", "C1", "C2"]);
+
+/**
+ * The scan key is a 32-character lowercase hex digest. Anything else is either
+ * a client bug or someone poking at the endpoint, and storing it would put a
+ * value in the column that can never match a real cache row.
+ */
+function safeScanKey(value) {
+  const s = String(value ?? "").trim().toLowerCase();
+  return /^[0-9a-f]{32}$/.test(s) ? s : null;
+}
 
 /**
  * Find or create the pending set for this conversation.
@@ -138,6 +149,15 @@ export default async function handler(req, res) {
         thumb_bytes: thumb.buffer.length,
         caption: typeof body?.caption === "string" ? body.caption.slice(0, 2000) : null,
         description: typeof body?.description === "string" ? body.description.slice(0, 4000) : null,
+        // The I Spy scan cache key, captured by the browser from the original
+        // data URI before compression. It cannot be recovered later: the album
+        // serves a signed URL that is regenerated per read, so its hash never
+        // matches. Absent is normal and means "never scanned".
+        scan_key: safeScanKey(body?.scanKey),
+        scan_lang: body?.scanLang === "es" ? "es" : body?.scanLang === "en" ? "en" : null,
+        scan_level: CEFR.has(String(body?.scanLevel || "").toUpperCase())
+          ? String(body.scanLevel).toUpperCase()
+          : null,
       },
       { onConflict: "set_id,idx" }
     );
