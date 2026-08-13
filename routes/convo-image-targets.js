@@ -712,7 +712,12 @@ function sanitizeTargets(rawList, lang, seed, level) {
     const t = sanitizeTarget(raw, lang, seed, level);
     if (!t) continue;
     // Two markers pointing at the same word is a broken round, not a bonus.
-    const head = headNoun(t.label, lang) || fold(t.label);
+    //
+    // Keyed on the HEAD WORD, not the whole noun phrase. Keying on the phrase
+    // let "a salad bowl" and "a bowl" both into one six-target round, pointing
+    // at the same box: distinct phrases, one answer word, and a learner who
+    // says "bowl" is right twice and told so once.
+    const head = headWord(t.label, lang) || headNoun(t.label, lang) || fold(t.label);
     if (heads.has(head)) continue;
     heads.add(head);
     out.push(t);
@@ -1190,6 +1195,45 @@ async function writeRow(sb, { imageKey, lang, level, targets, model }) {
   }
 }
 
+/**
+ * A second ask for the SAME picture, naming what we already have so the model
+ * does not simply return it again.
+ *
+ * The sixth playtest served three targets from a classroom holding far more
+ * than three nameable things, and the round could not vary because there was
+ * nothing to vary. The scan was not the problem: it returned seven. Crop
+ * verification then dropped four, because a box drawn by the generating call is
+ * an estimate and half of them do not survive being cut out and looked at.
+ *
+ * So the floor is enforced where the loss happens, AFTER verification, rather
+ * than by asking the first call for more (which returns the same set at the
+ * same price) or by loosening the check (which is what produced the boxes the
+ * fifth playtest filmed).
+ */
+function buildTopUpText(description, lang, have) {
+  const p = PACK[lang];
+  // Asked for the room to the CAP, not the deficit to the floor. Attrition is
+  // the reason this call exists, so requesting exactly what is missing hands
+  // the crop check one candidate and ends up exactly where it started: the
+  // first run of this asked for 1, got 1, lost it, and reported 4 -> 4.
+  const want = MAX_TARGETS - have.length;
+  return [
+    `This image has already given ${have.length} vocabulary target(s). Find up to ${want} MORE,`,
+    `different from those, in the same image. Answer in ${p.langName}.`,
+    "",
+    "Already taken, do NOT return any of these or a synonym of one:",
+    have.map((l) => `- ${l}`).join("\n"),
+    "",
+    "Look harder and further into the scene: smaller things, things at the edges,",
+    "things behind or beside the obvious subject. Follow every rule you were given.",
+    "If the picture genuinely holds nothing else worth naming, return an empty list",
+    "rather than inventing something or renaming what is already taken.",
+    description ? `\nWhat this scene is (describe only what you can actually SEE):\n${description}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function buildUserText(description, lang, misses) {
   const p = PACK[lang];
   const lines = [
@@ -1437,7 +1481,69 @@ export default async function handler(req, res) {
   //     its own; what the crop does not show is re-localized once and then
   //     dropped. This is the only check in the pipeline the generating call
   //     cannot talk its way past.
-  const targets = await verifyTargets(openai, MODEL, imageUrl, sane, lang);
+  let targets = await verifyTargets(openai, MODEL, imageUrl, sane, lang);
+
+  // 7c) The floor. Verification is where the pool actually collapses, so the
+  //     top-up happens here, once, only when the survivors will not make a
+  //     round worth varying, and only when there is a picture to look at again.
+  if (targets.length && targets.length < MIN_TARGETS) {
+    const before = targets.length;
+    try {
+      const more = await openai.chat.completions.create({
+        model: MODEL,
+        temperature: 0,
+        max_tokens: 1400,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: buildSystemPrompt(lang, level) },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: buildTopUpText(description, lang, targets.map((t) => t.label)) },
+              { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+            ],
+          },
+        ],
+      });
+      let extraRaw = [];
+      try {
+        const txt = more?.choices?.[0]?.message?.content || "{}";
+        let obj;
+        try {
+          obj = JSON.parse(txt);
+        } catch {
+          obj = JSON.parse(jsonrepair(txt));
+        }
+        extraRaw = Array.isArray(obj?.targets) ? obj.targets : [];
+      } catch (e) {
+        console.warn("[convo-image-targets] top-up JSON unparseable:", e?.message || e);
+      }
+      if (extraRaw.length) {
+        // Deduped against what we are KEEPING, by head noun, so a top-up that
+        // answers "a chair" beside a kept "a classroom chair" cannot put two
+        // markers on one word. The kept targets are not re-sanitized: they have
+        // already passed, and running them through again only risks losing one.
+        const key = (l) => headWord(l, lang) || headNoun(l, lang) || fold(l);
+        const taken = new Set(targets.map((t) => key(t.label)));
+        const fresh = sanitizeTargets(extraRaw, lang, imageKey, level).filter((m) => {
+          const head = key(m.label);
+          if (taken.has(head)) return false;
+          taken.add(head);
+          return true;
+        });
+        if (fresh.length) {
+          const okFresh = await verifyTargets(openai, MODEL, imageUrl, fresh, lang);
+          targets = [...targets, ...okFresh].slice(0, MAX_TARGETS);
+        }
+      }
+    } catch (e) {
+      // A top-up that fails leaves the round exactly as good as it was.
+      console.warn("[convo-image-targets] top-up failed:", e?.message || e);
+    }
+    console.log(
+      `[convo-image-targets] top-up ${before} -> ${targets.length} (floor ${MIN_TARGETS}, key=${imageKey} level=${level || "-"})`,
+    );
+  }
 
   if (!targets.length) {
     // These two look identical to a caller but mean opposite things, and
