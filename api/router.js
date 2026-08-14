@@ -148,6 +148,7 @@ const keepsakesPromote = lazyRoute(() => import("../routes/keepsakes-promote.js"
 const keepsakesList = lazyRoute(() => import("../routes/keepsakes-list.js"), "routes/keepsakes-list");
 const keepsakesSet = lazyRoute(() => import("../routes/keepsakes-set.js"), "routes/keepsakes-set");
 const keepsakesDelete = lazyRoute(() => import("../routes/keepsakes-delete.js"), "routes/keepsakes-delete");
+const keepsakesImagesDelete = lazyRoute(() => import("../routes/keepsakes-images-delete.js"), "routes/keepsakes-images-delete");
 const keepsakesCleanup = lazyRoute(() => import("../routes/keepsakes-cleanup.js"), "routes/keepsakes-cleanup");
 
 // Dev/proxy sanity check endpoint:
@@ -219,6 +220,7 @@ const ROUTES = {
   "keepsakes/list": keepsakesList,
   "keepsakes/set": keepsakesSet,
   "keepsakes/delete": keepsakesDelete,
+  "keepsakes/images-delete": keepsakesImagesDelete,
   "keepsakes/cleanup": keepsakesCleanup,
 };
 
@@ -335,6 +337,7 @@ const ADMIN_ONLY = new Set([
   "keepsakes/list",
   "keepsakes/set",
   "keepsakes/delete",
+  "keepsakes/images-delete",
 ]);
 
     if (ADMIN_ONLY.has(route) && !isAdminRequest(req, u)) {
