@@ -161,6 +161,24 @@ const MIN_TARGETS = 5;
 // measured below — and buys back the entire second round trip.
 const MAX_TARGETS = 12;
 
+// Sixteen at the two high bands, twelve everywhere else.
+//
+// Attrition is not uniform: a C2 round is told to name PARTS and MATERIALS, so
+// it returns a stud earring, a sleeve button and a lapel rather than a blazer,
+// and boxes that small fail the crop check far more often than a chunky B1
+// target does. Measured on the same scene at C2, twelve located targets came
+// back as four survivors, under the floor, which paid for the whole ten-second
+// top-up the twelve-target pool exists to avoid.
+//
+// This is only affordable because A8 made locating cheap. Under the old single
+// call, four more targets meant four more clozes, riddles and choice sets
+// written up front for targets that were about to be deleted. Now the extra ask
+// costs a few hundred locate tokens and some crop checks that run in parallel,
+// and it buys back a serial round trip.
+function maxTargetsFor(level) {
+  return HIGH_BANDS.has(level) ? 16 : MAX_TARGETS;
+}
+
 // A target needs the answer plus at least two distractors for the final hint to
 // still be a real choice. Four is what we ask for; three is the graceful floor,
 // because dropping an otherwise-perfect target (good point, good cloze) over one
@@ -598,7 +616,16 @@ function unitBox(raw) {
  * full hint ladder (point -> cloze -> choices) is dropped rather than shipped
  * half-working.
  */
-function sanitizeTarget(raw, lang, seed, level) {
+/**
+ * LOCATE-time validation: the label, where the thing is, and nothing else.
+ *
+ * Split from the old one-shot sanitizer when generation was split. This half
+ * runs on the lite call's output, BEFORE any crop is cut, so a target that
+ * breaks a rule is dropped before the route pays a penny to write teaching
+ * material for it. ruleFailure lives here rather than at enrich time for the
+ * same reason: it only ever needed the label, the box and the band.
+ */
+function sanitizeLocated(raw, lang, level) {
   if (!raw || typeof raw !== "object") return null;
 
   const label = String(raw.label == null ? "" : raw.label)
@@ -607,18 +634,17 @@ function sanitizeTarget(raw, lang, seed, level) {
     .slice(0, 60);
   if (!label) return null;
 
-  // 1) Where the thing is. A valid box wins, because its CENTRE is a better
-  //    marker spot than a point the model estimated separately: a point drawn a
-  //    little low reads as the desk behind the calculator, and the box says
-  //    which of the two was meant. A missing or broken box falls back to the
-  //    point, which is also what every row cached before boxes existed does.
+  // Where the thing is. A valid box wins, because its CENTRE is a better marker
+  // spot than a point the model estimated separately: a point drawn a little low
+  // reads as the desk behind the calculator, and the box says which of the two
+  // was meant. A missing or broken box falls back to the point, which is also
+  // what every row cached before boxes existed does.
   //
-  //    A label can name more than one thing in frame. The fifth playtest asked
-  //    "where is the parking ticket" in a scene holding two of them, one on
-  //    each car, and scored only the one the model happened to pick: the
-  //    learner tapped a ticket, was told no, and was then shown a ticket. So
-  //    every instance the model found is kept, and the first is the one the
-  //    marker and the crops use.
+  // A label can name more than one thing in frame. The fifth playtest asked
+  // "where is the parking ticket" in a scene holding two of them, one on each
+  // car, and scored only the one the model happened to pick: the learner tapped
+  // a ticket, was told no, and was then shown a ticket. So every instance the
+  // model found is kept, and the first is the one the marker and the crops use.
   const boxes = (Array.isArray(raw.boxes) ? raw.boxes : [])
     .map(unitBox)
     .filter(Boolean)
@@ -630,12 +656,45 @@ function sanitizeTarget(raw, lang, seed, level) {
   const px = box ? unitCoord(box.x + box.w / 2) : unitCoord(raw.point?.x);
   const py = box ? unitCoord(box.y + box.h / 2) : unitCoord(raw.point?.y);
   if (px === null || py === null) return null;
-  const x = px;
-  const y = py;
 
-  // 2) The cloze must actually have a blank, and must not give the answer away.
+  const difficultyRaw = String(raw.difficulty == null ? "" : raw.difficulty).trim().toLowerCase();
+
+  const target = {
+    label,
+    point: { x: px, y: py },
+    // Omitted rather than null when there is no usable box, so a target from a
+    // fresh call and a target from the pre-box cache are the same shape.
+    ...(box ? { box } : null),
+    ...(boxes.length > 1 ? { boxes } : null),
+    ...(raw.revisit === true ? { revisit: true } : null),
+    difficulty: DIFFICULTY_VALUES.has(difficultyRaw) ? difficultyRaw : "medium",
+  };
+
+  // The same gate the cache read applies, so nothing a served row would be
+  // filtered for can be written in the first place. Without this the two halves
+  // disagree: a row is stored, then permanently rejected on read, and every play
+  // of that picture pays for a regeneration that stores the same thing.
+  if (ruleFailure(target, lang, level)) return null;
+  return target;
+}
+
+/**
+ * ENRICH-time validation: the teaching material, checked onto a target that has
+ * already survived the crop.
+ *
+ * Everything here can still reject the target, and that is deliberate: a cloze
+ * that leaks its own answer is worse than no round at all. What has changed is
+ * WHEN the rejection costs something. It used to throw away a target the model
+ * had also drawn a box for; now the box work is already done and paid for, and
+ * only the writing is lost.
+ */
+function applyEnrichment(base, raw, lang, seed) {
+  if (!base) return null;
+  const label = base.label;
   const head = headNoun(label, lang);
-  let cloze = String(raw.cloze == null ? "" : raw.cloze)
+
+  // The cloze must actually have a blank, and must not give the answer away.
+  let cloze = String(raw?.cloze == null ? "" : raw.cloze)
     .trim()
     .replace(/\s+/g, " ")
     .slice(0, 200);
@@ -654,60 +713,57 @@ function sanitizeTarget(raw, lang, seed, level) {
   // Leak check: the answer must not still be sitting in the sentence.
   if (head && findPhrase(cloze.split(" "), head) >= 0) return null;
 
-  // 3) Choices: the answer plus plausible distractors, de-duplicated by folded
-  //    form so "La taza" and "la taza" cannot both appear.
+  // Choices: the answer plus plausible distractors, de-duplicated by folded form
+  // so "La taza" and "la taza" cannot both appear.
   const seen = new Set();
   const choices = [];
   const push = (v) => {
-    const s = String(v == null ? "" : v).trim().replace(/\s+/g, " ").slice(0, 60);
-    if (!s) return;
-    const key = fold(s);
+    const str = String(v == null ? "" : v).trim().replace(/\s+/g, " ").slice(0, 60);
+    if (!str) return;
+    const key = fold(str);
     if (!key || seen.has(key)) return;
     seen.add(key);
-    choices.push(s);
+    choices.push(str);
   };
   push(label); // the answer always makes it in, whatever the model returned
-  (Array.isArray(raw.choices) ? raw.choices : []).forEach(push);
+  (Array.isArray(raw?.choices) ? raw.choices : []).forEach(push);
   if (choices.length < MIN_CHOICES) return null;
   const shuffled = seededShuffle(choices.slice(0, MAX_CHOICES), `${seed}|${fold(label)}`);
   const answerIndex = shuffled.findIndex((c) => fold(c) === fold(label));
   if (answerIndex < 0) return null; // unreachable in practice; never ship a round with no answer
 
-  const difficultyRaw = String(raw.difficulty == null ? "" : raw.difficulty).trim().toLowerCase();
-
-  // 4) Aliases: other correct ways to name this thing. The head noun is always
-  //    one of them, since dropping the article is the commonest near miss and
-  //    it should never be graded as wrong. Distractors are excluded by
-  //    construction: an alias that matches one of the wrong choices would make
-  //    that choice correct too.
+  // Aliases: other correct ways to name this thing. The head noun is always one
+  // of them, since dropping the article is the commonest near miss and it should
+  // never be graded wrong. Distractors are excluded by construction: an alias
+  // matching a wrong choice would make that choice correct too.
   const aliasSeen = new Set([fold(label)]);
   const wrongChoices = new Set(shuffled.map(fold).filter((f) => f !== fold(label)));
   const aliases = [];
   const pushAlias = (v) => {
-    const s = String(v == null ? "" : v).trim().replace(/\s+/g, " ").slice(0, 60);
-    if (!s || aliases.length >= MAX_ALIASES) return;
-    const key = fold(s);
+    const str = String(v == null ? "" : v).trim().replace(/\s+/g, " ").slice(0, 60);
+    if (!str || aliases.length >= MAX_ALIASES) return;
+    const key = fold(str);
     if (!key || aliasSeen.has(key) || wrongChoices.has(key)) return;
     aliasSeen.add(key);
-    aliases.push(s);
+    aliases.push(str);
   };
   if (head) pushAlias(head);
-  (Array.isArray(raw.aliases) ? raw.aliases : []).forEach(pushAlias);
+  (Array.isArray(raw?.aliases) ? raw.aliases : []).forEach(pushAlias);
 
-  // 5) The usage note. Kept only when there is something for it to be about: a
-  //    note with no variant behind it is a lecture attached to the plain word,
-  //    and the frontend only ever says it after an alias was matched anyway.
-  const note = String(raw.americanNote == null ? "" : raw.americanNote)
+  // The usage note. Kept only when there is something for it to be about: a note
+  // with no variant behind it is a lecture attached to the plain word, and the
+  // frontend only says it after an alias was matched anyway.
+  const note = String(raw?.americanNote == null ? "" : raw.americanNote)
     .trim()
     .replace(/\s+/g, " ")
     .slice(0, MAX_NOTE_CHARS);
   const hasVariant = aliases.some((a) => fold(a) !== head);
 
-  // 6) The riddle clue: attributes only. A clue holding the answer, or any word
-  //    of it, is not a clue, and the same leak check the cloze gets applies
-  //    here for the same reason. Dropped rather than repaired: a riddle is
-  //    optional and a broken one gives the round away.
-  let riddle = String(raw.riddle == null ? "" : raw.riddle)
+  // The riddle clue: attributes only. A clue holding the answer, or any word of
+  // it, is not a clue, and the same leak check the cloze gets applies here for
+  // the same reason. Dropped rather than repaired: a riddle is optional and a
+  // broken one gives the round away.
+  let riddle = String(raw?.riddle == null ? "" : raw.riddle)
     .trim()
     .replace(/\s+/g, " ")
     .replace(/[.!?]+$/, "")
@@ -720,13 +776,8 @@ function sanitizeTarget(raw, lang, seed, level) {
     if (leaks) riddle = "";
   }
 
-  const target = {
-    label,
-    point: { x, y },
-    // Omitted rather than null when there is no usable box, so a target from a
-    // fresh call and a target from the pre-box cache are the same shape.
-    ...(box ? { box } : null),
-    ...(boxes.length > 1 ? { boxes } : null),
+  return {
+    ...base,
     cloze,
     choices: shuffled,
     answerIndex,
@@ -735,38 +786,30 @@ function sanitizeTarget(raw, lang, seed, level) {
     // a target that simply has no regional variation are the same shape.
     ...(note && hasVariant ? { americanNote: note } : null),
     ...(riddle ? { riddle } : null),
-    ...(raw.revisit === true ? { revisit: true } : null),
-    difficulty: DIFFICULTY_VALUES.has(difficultyRaw) ? difficultyRaw : "medium",
   };
-
-  // The same gate the cache read applies, so nothing a served row would be
-  // filtered for can be written in the first place. Without this the two halves
-  // disagree: a row is stored, then permanently rejected on read, and every
-  // play of that picture pays for a regeneration that stores the same thing.
-  const bad = ruleFailure(target, lang, level);
-  if (bad) return null;
-
-  return target;
 }
 
-/** Sanitize the whole set, drop duplicates by head noun, cap at MAX_TARGETS. */
-function sanitizeTargets(rawList, lang, seed, level) {
+/**
+ * Sanitize a whole LOCATE response: drop duplicates by head noun, cap at
+ * MAX_TARGETS.
+ */
+function sanitizeLocatedList(rawList, lang, level) {
   const out = [];
   const heads = new Set();
   for (const raw of Array.isArray(rawList) ? rawList : []) {
-    const t = sanitizeTarget(raw, lang, seed, level);
+    const t = sanitizeLocated(raw, lang, level);
     if (!t) continue;
     // Two markers pointing at the same word is a broken round, not a bonus.
     //
     // Keyed on the HEAD WORD, not the whole noun phrase. Keying on the phrase
     // let "a salad bowl" and "a bowl" both into one six-target round, pointing
-    // at the same box: distinct phrases, one answer word, and a learner who
-    // says "bowl" is right twice and told so once.
+    // at the same box: distinct phrases, one answer word, and a learner who says
+    // "bowl" is right twice and told so once.
     const head = headWord(t.label, lang) || headNoun(t.label, lang) || fold(t.label);
     if (heads.has(head)) continue;
     heads.add(head);
     out.push(t);
-    if (out.length === MAX_TARGETS) break;
+    if (out.length === maxTargetsFor(level)) break;
   }
   return out;
 }
@@ -816,7 +859,12 @@ const PACK = {
   },
 };
 
-function buildSystemPrompt(lang, level) {
+/**
+ * The band text both calls share. Extracted when generation was split: the
+ * locate call needs it to CHOOSE at the right level, and the enrich call needs
+ * it to WRITE at the right level, and two copies would drift apart.
+ */
+function bandText(lang, level) {
   const p = PACK[lang];
   const guide = level ? LEVEL_GUIDE[lang]?.[level] : "";
   const band = guide
@@ -858,13 +906,43 @@ RETURN AS FEW AS ${MIN_SERVED_TARGETS} TARGETS at this band if that is all the p
 holds. A short round of real ${level} words is the goal; a long round padded with
 easy ones is the failure.`
     : "";
+  return { band, bandCheck };
+}
+
+/**
+ * LOCATE: what is in this picture, and where.
+ *
+ * Half of v8's remaining latency was one call doing two jobs. It chose twelve
+ * targets AND wrote each one a cloze, four distractors, aliases, a regional
+ * note and a riddle, which is about two thousand output tokens, and it did all
+ * of that BEFORE crop verification threw away roughly half of them. The route
+ * was paying to write teaching material for targets that were about to be
+ * deleted.
+ *
+ * So this call returns only what verification needs in order to judge: the
+ * label, where the thing is, and how many of it there are. About a third of the
+ * tokens, and every one of them is spent on a target that might survive.
+ *
+ * It also absorbs what enumerateInstances used to do. That was a separate
+ * vision call costing four to eight seconds, asking "now find every instance of
+ * the labels you just chose" - a question this call is in a better position to
+ * answer anyway, because it is looking at the picture with those labels in
+ * mind. The COUNT CHECK below is that job, moved here.
+ */
+function buildLocatePrompt(lang, level) {
+  const p = PACK[lang];
+  const { band, bandCheck } = bandText(lang, level);
   return `
 You are looking at a photorealistic illustration from a language-learning
 conversation. Find the things in it that are worth teaching as vocabulary, and
 describe where each one is.${band}
 
-Return between ${MIN_TARGETS} and ${MAX_TARGETS} targets. Every string you write must be in
-${p.langName} — labels, sentences and options alike. Return JSON only, no markdown.
+Return between ${MIN_TARGETS} and ${maxTargetsFor(level)} targets. Every label must be in
+${p.langName}. Return JSON only, no markdown.
+
+Do NOT write sentences, questions, clues or wrong answers here. A later pass
+does that, and only for the targets that survive checking. Naming the thing and
+placing it is the whole job.
 
 Choose targets that are:
 - CONCRETE and clearly visible: objects, clothing, furniture, food, parts of the
@@ -875,15 +953,14 @@ Choose targets that are:
 - Prefer things the scene is actually about over background filler.
 - VISUALLY UNAMBIGUOUS. This is the one that matters most. Before you keep a
   target, look at what surrounds it: if a NEARBY object could plausibly be given
-  the same name, or could plausibly answer the same sentence, then the question
-  has two right answers and the learner will be told they are wrong for giving
-  one of them. A folder on a desk covered in paper is not a safe target for
-  "pamphlet". Either pick a different thing, or write a sentence that only the
-  thing you mean can complete.
+  the same name, then the question has two right answers and the learner will be
+  told they are wrong for giving one of them. A folder on a desk covered in
+  paper is not a safe target for "pamphlet". Pick a different thing, or write a
+  label that only the thing you mean can answer.
 
 For each target return:
 - "label": the noun. ${p.articleRule} ${p.pluralRule}
-- "box": { "x", "y", "w", "h" } — the thing's BOUNDING BOX as fractions of the
+- "box": { "x", "y", "w", "h" } - the thing's BOUNDING BOX as fractions of the
   image: x and y are its top-left corner from the left and top edges, w and h are
   its width and height.
   The box is not decoration: a learner will TAP inside it to answer, so it has
@@ -906,12 +983,68 @@ For each target return:
   asked for is the worst answer this game can give.
   Your two options, and you must take one of them:
     either list every instance here, so any of them counts;
-    or write a label and a sentence that can only mean ONE of them ("the ticket
-    on the red car's windscreen"), and give that one box.
+    or write a label that can only mean ONE of them ("the ticket on the red
+    car's windscreen"), and give that one box.
   Never pick one of several lookalikes silently and hope.
   Omit this field entirely when there is only one of the thing.
-- "point": { "x": 0.00-1.00, "y": 0.00-1.00 } — the centre of that same thing, as
-  a fallback if the box is unusable. 0.5/0.5 is the middle of the picture.
+- "point": { "x": 0.00-1.00, "y": 0.00-1.00 } - the centre of that same thing, as
+  a fallback if the box is unusable.
+- "difficulty": "easy", "medium" or "hard" - roughly how hard this word is for a
+  learner.
+
+COUNT CHECK, and do it target by target, out loud to yourself. For each label
+you wrote, count how many of that thing are actually in this picture. If the
+answer is more than one, you have written a question with several right answers
+and picked one of them in secret. Fix it, one of the two ways:
+  - list every one of them in "boxes", so any of them counts; or
+  - rewrite the label so it can only mean one of them.
+This is not a rare case. A street has several cars, a table has several chairs,
+a face has two eyes, a shirt has several buttons. If you wrote "a car" and there
+are four cars, that target is broken as it stands.
+
+Before you answer, re-read your own list once and drop anything that fails any
+of these: a target another nearby object could just as well answer, a box that
+does not contain the thing it names, a box drawn over a person's body when the
+target is not their clothing or something they hold, and any target that is
+really a surface rather than an object.${bandCheck}
+
+Output MUST be valid JSON only, exactly:
+{ "targets": [ { "label": "...",
+                 "box": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 },
+                 "boxes": [ { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 } ],
+                 "point": { "x": 0.0, "y": 0.0 },
+                 "difficulty": "easy" } ] }
+`.trim();
+}
+
+/**
+ * ENRICH: the teaching material, for the targets that survived.
+ *
+ * Runs AFTER crop verification, so every word written here is written for a
+ * target that is really in the picture and really where it claims to be. That
+ * is the whole saving: half of what the old single call wrote was thrown away
+ * by the crop check a few seconds later.
+ *
+ * The picture goes with it, because the cloze has to be literally true of THIS
+ * scene, and a sentence written from a label alone describes a plausible room
+ * rather than the one in frame.
+ */
+function buildEnrichPrompt(lang, level, labels) {
+  const p = PACK[lang];
+  const { band } = bandText(lang, level);
+  return `
+You are looking at a photorealistic illustration from a language-learning
+conversation. Someone has already chosen the words this round will teach and
+checked that each one is really in the picture. Your job is to write the round
+for them.${band}
+
+Write for EVERY one of these, in this order, and change none of them:
+${labels.map((l, i) => `${i + 1}. ${l}`).join("\n")}
+
+Every string must be in ${p.langName}. Return JSON only, no markdown.
+
+For each one return:
+- "label": copied back exactly as it was given, so entries can be matched up.
 - "cloze": ONE natural sentence about this picture, in ${p.langName}, with the
   target word replaced by exactly three underscores: ___
   Example: "${p.clozeExample}"
@@ -922,7 +1055,7 @@ For each target return:
   write "wearing" unless it is on their body, do not write "on the table" unless
   it is on the table. A sentence that describes a plausible scene rather than
   THIS scene will be answered correctly and marked wrong.
-- "choices": exactly 4 options — the label itself plus 3 plausible wrong answers
+- "choices": exactly 4 options - the label itself plus 3 plausible wrong answers
   in the same language and the same style (same kind of thing, same article
   form). A distractor should be temptingly wrong, not absurd.
 - "aliases": up to ${MAX_ALIASES} OTHER ways a learner could correctly name this same thing,
@@ -953,38 +1086,17 @@ For each target return:
   It MUST NOT contain the noun, or any word from the noun, or any word that
   names what the thing IS. "small and red" is a riddle; "a small red toolbox" is
   the answer. Omit the field if the thing has no attribute worth saying.
-- "difficulty": "easy", "medium" or "hard" — roughly how hard this word is for a
-  learner.
 
-Before you answer, re-read your own list once and drop or rewrite anything that
-fails any of these: a sentence that is not literally true of this image, a
-target another nearby object could just as well answer, a box that does not
-contain the thing it names, a box drawn over a person's body when the target is
-not their clothing or something they hold, and any target that is really a
-surface rather than an object.
-
-COUNT CHECK, and do it target by target, out loud to yourself. For each label
-you wrote, count how many of that thing are actually in this picture. If the
-answer is more than one, you have written a question with several right answers
-and picked one of them in secret. Fix it, one of the two ways:
-  - list every one of them in "boxes", so any of them counts; or
-  - rewrite the label AND the sentence so they can only mean one of them.
-This is not a rare case. A street has several cars, a table has several chairs,
-a face has two eyes, a shirt has several buttons. If you wrote "a car" and there
-are four cars, that target is broken as it stands.${bandCheck}
+Before you answer, re-read every sentence you wrote and drop or rewrite any that
+is not literally true of this image, and any cloze or riddle that still contains
+its own answer.
 
 Output MUST be valid JSON only, exactly:
 { "targets": [ { "label": "...",
-                 "box": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 },
-                 "boxes": [ { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 },
-                            { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 } ],
-                 "point": { "x": 0.0, "y": 0.0 },
                  "cloze": "...", "choices": ["...","...","...","..."],
                  "aliases": ["...","..."],
                  "americanNote": "...",
-                 "riddle": "...",
-                 "revisit": false,
-                 "difficulty": "easy" } ] }
+                 "riddle": "..." } ] }
 `.trim();
 }
 
@@ -1071,96 +1183,6 @@ async function askCrop(openai, model, crop, label, langName) {
   }
 }
 
-/**
- * Every instance of every label, in ONE call.
- *
- * v6 could carry several boxes per label, and the fifth playtest's two parking
- * tickets are why. But nothing ever WENT LOOKING for the second one: the
- * generating call volunteered instances or it did not, and verifyTargets only
- * ever audited the boxes it was handed. So the sixth playtest's classroom, with
- * four empty chairs and three occupied ones, stored exactly one chair box (the
- * mostly hidden one behind the table), passed its crop check, and was stamped
- * fully audited. Every visible chair was a rejected tap.
- *
- * One call for all labels rather than one per label: the picture is the
- * expensive half of a vision request, and sending it once with a list is the
- * difference between two high-detail calls per scan and eight.
- *
- * The visibility rating is asked for here, where the model is already looking at
- * the whole scene and can compare the instances against each other. A crop shown
- * on its own cannot say whether it is the best view of the thing available.
- */
-async function enumerateInstances(openai, model, imageUrl, targets, lang) {
-  const langName = PACK[lang].langName;
-  const out = new Map();
-  const labels = targets.map((t) => t.label).filter(Boolean);
-  if (!labels.length) return out;
-
-  const prompt = `You are shown one photograph and a list of things that are in it.
-
-For EACH thing in the list, find EVERY separate instance of it that is visible in
-the photograph, and give one box per instance.
-
-A box HUGS a single instance: x and y are its top-left corner as fractions of the
-image from the left and top edges, w and h are its width and height as fractions.
-One box holds ONE instance. Never draw a box around a group of them.
-
-Rate how well each instance can be SEEN:
-  "full"    the whole thing is in view and nothing significant covers it
-  "partial" a substantial part is visible, but some of it is cut off or hidden
-  "sliver"  only a small fragment is visible, or it is mostly behind something
-
-List the instances of each thing MOST VISIBLE FIRST, and at most ${MAX_INSTANCES}
-of them. Do not invent instances: if a thing really appears once, return one box.
-If a thing in the list is not actually in the photograph, return an empty list for
-it rather than guessing.
-
-The things (${langName}):
-${labels.map((l) => `- ${l}`).join("\n")}
-
-Return JSON only:
-{ "items": [ { "label": "<exactly as given>", "instances": [ { "box": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 }, "visibility": "full" } ] } ] }`;
-
-  try {
-    const resp = await openai.chat.completions.create({
-      model,
-      temperature: 0,
-      max_tokens: 2000,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
-          ],
-        },
-      ],
-    });
-    const parsed = JSON.parse(resp?.choices?.[0]?.message?.content || "{}");
-    for (const item of Array.isArray(parsed?.items) ? parsed.items : []) {
-      const label = String(item?.label || "").trim();
-      if (!label) continue;
-      const list = (Array.isArray(item?.instances) ? item.instances : [])
-        .map((ins) => {
-          const box = unitBox(ins?.box);
-          if (!box) return null;
-          const vis = String(ins?.visibility || "").toLowerCase();
-          return { box, visibility: VISIBILITY.has(vis) ? vis : "partial" };
-        })
-        .filter(Boolean)
-        .slice(0, MAX_INSTANCES);
-      if (list.length) out.set(fold(label), list);
-    }
-  } catch (e) {
-    // Enumeration is an improvement on the boxes we already have, never a
-    // precondition for them. A failure here leaves every target with exactly
-    // what the generating call gave it, which is v6's behaviour.
-    console.warn("[convo-image-targets] enumerate failed:", e?.message || e);
-  }
-  return out;
-}
-
 /** "Point at it again, tightly." One attempt, on the whole picture. */
 async function relocalize(openai, model, imageUrl, label, langName) {
   try {
@@ -1233,22 +1255,23 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
     return targets;
   }
 
-  // 1) Go looking. Every label, every instance, one call.
-  const found = await timed("enumerate", () =>
-    enumerateInstances(openai, check, imageUrl, targets, lang),
-  );
-
-  // 2) What each target will have checked. Enumeration wins when it found
-  //    anything, because it looked ON PURPOSE; otherwise the target keeps the
-  //    boxes it arrived with, which is v6's behaviour and the right answer for
-  //    a row cached before any of this existed.
+  // 1) What each target will have checked: the boxes it arrived with.
+  //
+  //    There used to be a separate enumeration call here, a second vision
+  //    request costing four to eight seconds, asking the model to go and find
+  //    every instance of the labels it had just chosen. In v8 the LOCATE call
+  //    does that itself — the COUNT CHECK is in its prompt — so the instances
+  //    are already in `boxes` by the time this runs, and asking again was
+  //    paying twice for one answer.
+  //
+  //    This is also the right shape for a row cached before any of this existed:
+  //    it comes in with whatever boxes it has, and is judged on those.
   const plan = targets.map((t) => {
-    const enumerated = found.get(fold(t.label)) || [];
     const original = Array.isArray(t.boxes) && t.boxes.length ? t.boxes : t.box ? [t.box] : [];
-    const cands = enumerated.length
-      ? enumerated
-      : original.map((box) => ({ box, visibility: "partial" }));
-    return { t, cands: cands.slice(0, MAX_INSTANCES) };
+    return {
+      t,
+      cands: original.slice(0, MAX_INSTANCES).map((box) => ({ box, visibility: "partial" })),
+    };
   });
 
   // 3) Every candidate of every target, checked in ONE pool rather than one
@@ -1468,13 +1491,13 @@ async function writeRow(sb, { imageKey, lang, level, targets, model }) {
  * same price) or by loosening the check (which is what produced the boxes the
  * fifth playtest filmed).
  */
-function buildTopUpText(description, lang, have) {
+function buildTopUpText(description, lang, have, level) {
   const p = PACK[lang];
   // Asked for the room to the CAP, not the deficit to the floor. Attrition is
   // the reason this call exists, so requesting exactly what is missing hands
   // the crop check one candidate and ends up exactly where it started: the
   // first run of this asked for 1, got 1, lost it, and reported 4 -> 4.
-  const want = MAX_TARGETS - have.length;
+  const want = maxTargetsFor(level) - have.length;
   return [
     `This image has already given ${have.length} vocabulary target(s). Find up to ${want} MORE,`,
     `different from those, in the same image. Answer in ${p.langName}.`,
@@ -1501,6 +1524,76 @@ function buildTopUpText(description, lang, have) {
  * problem this exists to fix, and the first cut of this only guarded the fresh
  * path: the healed row was written thin and stayed thin.
  */
+/**
+ * Write the round, for the targets that survived the crop check.
+ *
+ * ONE call for the whole set rather than one per target. The picture is the
+ * expensive part of a vision request and sending it six times to write six
+ * clozes would cost six times the input tokens to save nothing: these are
+ * output-bound, and six short answers in one response take about as long as one.
+ *
+ * A target the model declines to write for, or writes badly enough to fail
+ * validation, is DROPPED rather than shipped bare. Every mode in the game reads
+ * these fields — naming needs the choices, the riddle mode needs the clue, the
+ * hint ladder needs the cloze — so a target without them is not a smaller
+ * target, it is a broken one.
+ */
+async function enrichTargets(openai, model, imageUrl, targets, { lang, level, seed }) {
+  if (!targets.length) return targets;
+
+  let byLabel = new Map();
+  try {
+    const { jsonrepair } = await import("jsonrepair");
+    const resp = await timed("enrich", () =>
+      openai.chat.completions.create({
+        model,
+        temperature: 0,
+        max_tokens: 2800,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: buildEnrichPrompt(lang, level, targets.map((t) => t.label)) },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: buildEnrichUserText(lang) },
+              // "low" detail: this call is writing ABOUT things whose location is
+              // already settled, so it needs the gist of the scene rather than
+              // the pixels. The locate call is the one that had to see clearly.
+              { type: "image_url", image_url: { url: imageUrl, detail: "low" } },
+            ],
+          },
+        ],
+      }),
+    );
+    const txt = resp?.choices?.[0]?.message?.content || "{}";
+    let obj;
+    try {
+      obj = JSON.parse(txt);
+    } catch {
+      obj = JSON.parse(jsonrepair(txt));
+    }
+    for (const raw of Array.isArray(obj?.targets) ? obj.targets : []) {
+      const key = fold(String(raw?.label || ""));
+      if (key && !byLabel.has(key)) byLabel.set(key, raw);
+    }
+  } catch (e) {
+    console.warn("[convo-image-targets] enrich failed:", e?.message || e);
+    return [];
+  }
+
+  const out = [];
+  for (const base of targets) {
+    const full = applyEnrichment(base, byLabel.get(fold(base.label)), lang, seed);
+    if (full) out.push(base.revisit ? { ...full, revisit: true } : full);
+  }
+  if (out.length < targets.length) {
+    console.log(
+      `[convo-image-targets] enrich kept ${out.length}/${targets.length} (lang=${lang} level=${level || "-"})`,
+    );
+  }
+  return out;
+}
+
 async function topUpIfThin(openai, model, imageUrl, { description, lang, level, imageKey, targets }) {
   if (!targets.length || targets.length >= MIN_TARGETS || !imageUrl) return targets;
   return withPhase("topup", () =>
@@ -1525,11 +1618,11 @@ async function runTopUp(openai, model, imageUrl, { description, lang, level, ima
         max_tokens: 2800,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: buildSystemPrompt(lang, level) },
+          { role: "system", content: buildLocatePrompt(lang, level) },
           {
             role: "user",
             content: [
-              { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label)) },
+              { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label), level) },
               { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
             ],
           },
@@ -1556,7 +1649,7 @@ async function runTopUp(openai, model, imageUrl, { description, lang, level, ima
       // already passed, and running them through again only risks losing one.
       const key = (l) => headWord(l, lang) || headNoun(l, lang) || fold(l);
       const taken = new Set(out.map((t) => key(t.label)));
-      const fresh = sanitizeTargets(extraRaw, lang, imageKey, level).filter((m) => {
+      const fresh = sanitizeLocatedList(extraRaw, lang, level).filter((m) => {
         const head = key(m.label);
         if (taken.has(head)) return false;
         taken.add(head);
@@ -1564,7 +1657,7 @@ async function runTopUp(openai, model, imageUrl, { description, lang, level, ima
       });
       if (fresh.length) {
         const okFresh = await verifyTargets(openai, model, imageUrl, fresh, lang);
-        out = [...out, ...okFresh].slice(0, MAX_TARGETS);
+        out = [...out, ...okFresh].slice(0, maxTargetsFor(level));
       }
     }
   } catch (e) {
@@ -1577,10 +1670,21 @@ async function runTopUp(openai, model, imageUrl, { description, lang, level, ima
   return out;
 }
 
-function buildUserText(description, lang, misses) {
+/**
+ * The enrich call's user turn. Deliberately thin: the labels and every rule are
+ * in the system prompt, and the description is NOT repeated here. The writing
+ * has to be true of the picture in front of it, and a scene description would
+ * give it a second, wordier account of the room to write from when the actual
+ * room is attached.
+ */
+function buildEnrichUserText(lang) {
+  return `Write the round for the listed words. Answer in ${PACK[lang].langName}.`;
+}
+
+function buildUserText(description, lang, misses, level) {
   const p = PACK[lang];
   const lines = [
-    `Find ${MIN_TARGETS}-${MAX_TARGETS} vocabulary targets in this image. Answer in ${p.langName}.`,
+    `Find ${MIN_TARGETS}-${maxTargetsFor(level)} vocabulary targets in this image. Answer in ${p.langName}.`,
   ];
   // Words this learner has already been beaten by. Offered, never demanded:
   // a word planted in a picture that does not contain it is a question with no
@@ -1819,11 +1923,11 @@ async function scan(req, res) {
         max_tokens: 2800,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: buildSystemPrompt(lang, level) },
+          { role: "system", content: buildLocatePrompt(lang, level) },
           {
             role: "user",
             content: [
-              { type: "text", text: buildUserText(description, lang, misses) },
+              { type: "text", text: buildUserText(description, lang, misses, level) },
               { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
             ],
           },
@@ -1851,17 +1955,23 @@ async function scan(req, res) {
   // 7) Validate. The seed is the image key, so the choice order is stable for
   //    this image forever — cache hit or fresh call, the round is the same.
   const rawTargets = Array.isArray(parsed?.targets) ? parsed.targets : [];
-  const sane = sanitizeTargets(rawTargets, lang, imageKey, level);
+  const sane = sanitizeLocatedList(rawTargets, lang, level);
 
-  // 7b) Model truth. Every surviving box is cut out and shown to the model on
-  //     its own; what the crop does not show is re-localized once and then
-  //     dropped. This is the only check in the pipeline the generating call
-  //     cannot talk its way past.
+  // 7b) Model truth. Every located box is cut out and shown to the model on its
+  //     own; what the crop does not show is re-localized once and then dropped.
+  //     This is the only check in the pipeline the locating call cannot talk its
+  //     way past.
   let targets = await verifyTargets(openai, MODEL, imageUrl, sane, lang);
 
   // 7c) The floor, shared with the heal path so a re-examined row is held to
   //     the same standard as a fresh one.
   targets = await topUpIfThin(openai, MODEL, imageUrl, { description, lang, level, imageKey, targets });
+
+  // 7d) Only now, the writing. Everything above narrowed twelve located targets
+  //     down to the ones that are really there; this is the first moment the
+  //     route spends a token on a cloze, a distractor or a riddle, and it spends
+  //     none on a target the crop check deleted.
+  targets = await enrichTargets(openai, MODEL, imageUrl, targets, { lang, level, seed: imageKey });
 
   if (!targets.length) {
     // These two look identical to a caller but mean opposite things, and

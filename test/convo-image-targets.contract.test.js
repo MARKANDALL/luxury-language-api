@@ -118,6 +118,11 @@ const KIND = {
   relocalize: "give its bounding box",
   enumerate: "find EVERY separate instance",
   topUp: "Already taken, do NOT return any of these",
+  // v8 split generation in two. LOCATE chooses the words and places them;
+  // ENRICH writes the round for the ones that survived the crop check. Order
+  // matters in this table: the enrich prompt also carries the band text, so it
+  // is matched on a phrase only it has.
+  enrich: "Someone has already chosen the words this round will teach",
 };
 
 function kindOf(req) {
@@ -162,6 +167,26 @@ function mockRound(targets, opts = {}) {
         return Promise.resolve(reply({ items: opts.instances ?? [] }));
       case "topUp":
         return Promise.resolve(modelReply(opts.topUp ?? []));
+      case "enrich": {
+        // Answered from the SAME fixture the locate call is answered from, so
+        // one target list still drives a whole round the way it did when there
+        // was one call. applyEnrichment matches on the label, so returning more
+        // labels than were asked for is harmless; returning fewer is what a
+        // test means when it wants a target dropped for unwritable copy.
+        const pool = opts.enrich ?? [...targets, ...(opts.topUp ?? [])];
+        return Promise.resolve(
+          modelReply(
+            pool.map((t) => ({
+              label: t.label,
+              cloze: t.cloze,
+              choices: t.choices,
+              aliases: t.aliases,
+              americanNote: t.americanNote,
+              riddle: t.riddle,
+            })),
+          ),
+        );
+      }
       default:
         return Promise.resolve(modelReply(targets));
     }
@@ -756,59 +781,66 @@ describe("convo-image-targets serve-time verification", () => {
     const r = await post(api);
 
     expect(r.body.cached).toBe(true);
-    expect(callsOf("enumerate")).toHaveLength(1);
+    // The CROP CHECK is the evidence that the row was re-examined. It used to
+    // be the enumeration call, which v8 removed: the crop is the check that
+    // actually looks at the picture, and enumeration was only ever the step
+    // that decided what to cut.
+    expect(callsOf("crop").length).toBeGreaterThan(0);
+    expect(callsOf("enumerate")).toHaveLength(0);
     expect(sbState.upserts).toHaveLength(1);
     expect(sbState.upserts[0].payload.verified).toBe(3);
   });
 
-  it("finds instances the generating call never mentioned, and keeps each one that checks out", async () => {
-    // The sixth playtest's classroom in miniature: one box stored for a label
-    // the picture holds several of. v6 audited that one box, found it fine, and
-    // stamped the row fully examined. Every other chair stayed a rejected tap.
-    mockRound(
-      [{ label: "a chair", point: { x: 0.7, y: 0.8 }, box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, cloze: "Each pupil has ___.", choices: ["a chair", "a stool", "a bench", "a desk"] }],
+  it("checks EVERY instance the locate call listed, not just the clearest", async () => {
+    // The sixth playtest's classroom: a label the picture holds several of. Only
+    // one box was ever audited, so every other chair stayed a rejected tap.
+    //
+    // v8 gets the instances from the locate call's own "boxes" rather than from
+    // a second enumeration request. The guarantee is the same and it costs one
+    // call instead of two.
+    mockRound([
       {
-        instances: [
-          {
-            label: "a chair",
-            instances: [
-              { box: { x: 0.1, y: 0.6, w: 0.12, h: 0.25 }, visibility: "full" },
-              { box: { x: 0.3, y: 0.62, w: 0.12, h: 0.25 }, visibility: "full" },
-              { box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, visibility: "sliver" },
-            ],
-          },
+        label: "a chair",
+        point: { x: 0.1, y: 0.7 },
+        box: { x: 0.1, y: 0.6, w: 0.12, h: 0.25 },
+        boxes: [
+          { x: 0.1, y: 0.6, w: 0.12, h: 0.25 },
+          { x: 0.3, y: 0.62, w: 0.12, h: 0.25 },
+          { x: 0.7, y: 0.7, w: 0.1, h: 0.2 },
         ],
+        cloze: "Each pupil has ___.",
+        choices: ["a chair", "a stool", "a bench", "a desk"],
       },
-    );
+    ]);
     const api = await client();
     const r = await post(api);
 
     const chair = r.body.targets.find((t) => t.label === "a chair");
     expect(chair.boxes).toHaveLength(3);
-    // Most visible first, so the marker and the crops take the chair a learner
-    // can actually see rather than the one behind the table.
     expect(chair.box).toEqual({ x: 0.1, y: 0.6, w: 0.12, h: 0.25 });
-    expect(chair.vis).toEqual(["full", "full", "sliver"]);
-    expect(callsOf("enumerate")).toHaveLength(1);
+    // One vision call did the locating. The separate enumeration pass is gone.
+    expect(callsOf("enumerate")).toHaveLength(0);
+    expect(callsOf("generate")).toHaveLength(1);
   });
 
-  it("keeps only the enumerated instances that survive their own crop check", async () => {
+  it("keeps only the located instances that survive their own crop check", async () => {
     let seen = 0;
     mockRound(
-      [{ label: "a chair", point: { x: 0.7, y: 0.8 }, box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, cloze: "Each pupil has ___.", choices: ["a chair", "a stool", "a bench", "a desk"] }],
-      {
-        instances: [
-          {
-            label: "a chair",
-            instances: [
-              { box: { x: 0.1, y: 0.6, w: 0.12, h: 0.25 }, visibility: "full" },
-              { box: { x: 0.3, y: 0.62, w: 0.12, h: 0.25 }, visibility: "full" },
-            ],
-          },
-        ],
-        // Only the first crop shows a chair.
-        shows: () => ++seen <= 1,
-      },
+      [
+        {
+          label: "a chair",
+          point: { x: 0.1, y: 0.7 },
+          box: { x: 0.1, y: 0.6, w: 0.12, h: 0.25 },
+          boxes: [
+            { x: 0.1, y: 0.6, w: 0.12, h: 0.25 },
+            { x: 0.3, y: 0.62, w: 0.12, h: 0.25 },
+          ],
+          cloze: "Each pupil has ___.",
+          choices: ["a chair", "a stool", "a bench", "a desk"],
+        },
+      ],
+      // Only the first crop shows a chair.
+      { shows: () => ++seen <= 1 },
     );
     const api = await client();
     const r = await post(api);
@@ -835,20 +867,21 @@ describe("convo-image-targets serve-time verification", () => {
 
   it("ranks the instance that makes the best crop first, not merely the first one found", async () => {
     mockRound(
-      [{ label: "a chair", point: { x: 0.7, y: 0.8 }, box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, cloze: "Each pupil has ___.", choices: ["a chair", "a stool", "a bench", "a desk"] }],
-      {
-        instances: [
-          {
-            label: "a chair",
-            instances: [
-              { box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 }, visibility: "full" },
-              { box: { x: 0.1, y: 0.6, w: 0.12, h: 0.25 }, visibility: "full" },
-            ],
-          },
-        ],
-        // The first crop is a sliver, the second is the whole chair.
-        prominence: (text) => (text.includes("SECOND") ? "main" : "edge"),
-      },
+      [
+        {
+          label: "a chair",
+          point: { x: 0.7, y: 0.8 },
+          box: { x: 0.7, y: 0.7, w: 0.1, h: 0.2 },
+          boxes: [
+            { x: 0.7, y: 0.7, w: 0.1, h: 0.2 },
+            { x: 0.1, y: 0.6, w: 0.12, h: 0.25 },
+          ],
+          cloze: "Each pupil has ___.",
+          choices: ["a chair", "a stool", "a bench", "a desk"],
+        },
+      ],
+      // The first crop is a sliver, the second is the whole chair.
+      { prominence: (text) => (text.includes("SECOND") ? "main" : "edge") },
     );
     // Each box cuts a distinguishable crop, so the checker can rate them apart.
     cropSpy.mockImplementation((_url, box) =>
@@ -1223,22 +1256,31 @@ describe("convo-image-targets validation", () => {
     }
   });
 
-  it("asks for a box and for a literal, unambiguous cloze, in the same one call", async () => {
+  it("asks LOCATE for the box and ENRICH for the literal cloze, one job each", async () => {
     const api = await client();
     await post(api);
     expect(callsOf("generate")).toHaveLength(1);
-    const system = callsOf("generate")[0][0].messages[0].content;
-    expect(system).toContain('"box"');
-    expect(system).toContain("BOUNDING BOX");
-    expect(system).toContain("LITERALLY TRUE OF THIS IMAGE");
-    expect(system).toContain("VISUALLY UNAMBIGUOUS");
-    expect(system).toContain("re-read your own list once");
-    // Box quality: a tap lands inside it, so it has to hug the right thing and
-    // must not be a person or a surface.
-    expect(system).toContain("TIGHT");
-    expect(system).toContain("IT MUST CONTAIN THE THING YOU NAMED");
-    expect(system).toContain("NEVER A PERSON'S BODY");
-    expect(system).toContain("NO VAST SURFACES");
+    expect(callsOf("enrich")).toHaveLength(1);
+
+    // Locate: what and where, and the quality rules for a box a learner taps.
+    const locate = callsOf("generate")[0][0].messages[0].content;
+    expect(locate).toContain('"box"');
+    expect(locate).toContain("BOUNDING BOX");
+    expect(locate).toContain("VISUALLY UNAMBIGUOUS");
+    expect(locate).toContain("re-read your own list once");
+    expect(locate).toContain("TIGHT");
+    expect(locate).toContain("IT MUST CONTAIN THE THING YOU NAMED");
+    expect(locate).toContain("NEVER A PERSON'S BODY");
+    expect(locate).toContain("NO VAST SURFACES");
+    // And it is told, in as many words, not to do the writing. This is the
+    // saving: none of those tokens are spent on targets about to be dropped.
+    expect(locate).toContain("Do NOT write sentences");
+    expect(locate).not.toContain("LITERALLY TRUE OF THIS IMAGE");
+
+    // Enrich: the sentence, and the rule that keeps it about THIS picture.
+    const enrich = callsOf("enrich")[0][0].messages[0].content;
+    expect(enrich).toContain("LITERALLY TRUE OF THIS IMAGE");
+    expect(enrich).toContain('"cloze"');
   });
 
   it("always offers the bare head noun as an alias", async () => {
@@ -1326,7 +1368,7 @@ describe("convo-image-targets validation", () => {
   it("asks for regional variants, and asks the Spanish pack about Mexico", async () => {
     const api = await client();
     await post(api);
-    const en = callsOf("generate")[0][0].messages[0].content;
+    const en = callsOf("enrich")[0][0].messages[0].content;
     expect(en).toContain("REGIONAL VARIANT");
     expect(en).toContain("swim trunks");
     expect(en).toContain("American English");
@@ -1335,7 +1377,7 @@ describe("convo-image-targets validation", () => {
     createSpy.mockClear();
     const api2 = await client();
     await post(api2, { lang: "es" });
-    const es = callsOf("generate")[0][0].messages[0].content;
+    const es = callsOf("enrich")[0][0].messages[0].content;
     expect(es).toContain("Mexican Spanish");
     expect(es).toContain("el traje de baño");
   });
@@ -1366,16 +1408,16 @@ describe("convo-image-targets validation", () => {
     expect(r.body.targets.map((t) => t.riddle)).toEqual([undefined, undefined, "silver and round"]);
   });
 
-  it("asks each pack for its own riddle, and Spanish for agreement with algo", async () => {
+  it("asks each pack for its own riddle when enriching, Spanish agreeing with algo", async () => {
     const api = await client();
     await post(api);
-    expect(callsOf("generate")[0][0].messages[0].content).toContain("I spy something");
+    expect(callsOf("enrich")[0][0].messages[0].content).toContain("I spy something");
 
     vi.resetModules();
     createSpy.mockClear();
     const api2 = await client();
     await post(api2, { lang: "es" });
-    const es = callsOf("generate")[0][0].messages[0].content;
+    const es = callsOf("enrich")[0][0].messages[0].content;
     expect(es).toContain("Veo veo");
     expect(es).toContain("algo rojo");
   });
@@ -1411,11 +1453,14 @@ describe("convo-image-targets validation", () => {
     expect(r.body.targets[0].aliases).toEqual(["mug"]);
   });
 
-  it("asks the model for aliases in the same single call", async () => {
+  it("asks for aliases in the ENRICH call, and never in the locate call", async () => {
     const api = await client();
     await post(api);
-    expect(callsOf("generate")).toHaveLength(1);
-    expect(callsOf("generate")[0][0].messages[0].content).toContain('"aliases"');
+    expect(callsOf("enrich")).toHaveLength(1);
+    expect(callsOf("enrich")[0][0].messages[0].content).toContain('"aliases"');
+    // The v8 guarantee, and the reason the split exists: nothing is spent
+    // writing alternative names for targets the crop check has not passed yet.
+    expect(callsOf("generate")[0][0].messages[0].content).not.toContain('"aliases"');
   });
 
   it("normalizes an unknown difficulty to medium", async () => {
