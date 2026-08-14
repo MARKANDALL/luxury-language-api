@@ -1222,6 +1222,9 @@ async function pooled(jobs, limit) {
  */
 async function verifyTargets(openai, model, imageUrl, targets, lang) {
   const langName = PACK[lang].langName;
+  // Every call below this line is a judgment, not a generation. See
+  // pickCheckModel for why they run somewhere cheaper than `model`.
+  const check = pickCheckModel();
   let size = null;
   try {
     size = await timed("imageSize", () => imageSize(imageUrl));
@@ -1232,7 +1235,7 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
 
   // 1) Go looking. Every label, every instance, one call.
   const found = await timed("enumerate", () =>
-    enumerateInstances(openai, model, imageUrl, targets, lang),
+    enumerateInstances(openai, check, imageUrl, targets, lang),
   );
 
   // 2) What each target will have checked. Enumeration wins when it found
@@ -1259,7 +1262,7 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
         // Could not be cut: not the target's fault, so it stays unjudged, and
         // unjudged is not evidence that it would make a good crop.
         if (!crop) return { ti, ci, shows: true, prominence: "part" };
-        const a = await timed("crop.ask", () => askCrop(openai, model, crop, p.t.label, langName));
+        const a = await timed("crop.ask", () => askCrop(openai, check, crop, p.t.label, langName));
         return { ti, ci, shows: a.shows, why: a.why, prominence: a.prominence };
       }),
     ),
@@ -1288,12 +1291,12 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
       // rim-point target came back pointing at the middle of the picture.
       if (byTarget[ti].length || !p.cands.length) return null;
       const again = await timed("relocalize", () =>
-        relocalize(openai, model, imageUrl, p.t.label, langName),
+        relocalize(openai, check, imageUrl, p.t.label, langName),
       );
       if (!again) return null;
       const crop = await timed("crop.cut", () => cropRegion(imageUrl, again, size));
       if (!crop) return null;
-      const a = await timed("crop.ask", () => askCrop(openai, model, crop, p.t.label, langName));
+      const a = await timed("crop.ask", () => askCrop(openai, check, crop, p.t.label, langName));
       return a.shows ? { ti, box: again, visibility: a.prominence || "partial" } : null;
     }),
     VERIFY_CONCURRENCY,
@@ -1377,6 +1380,38 @@ async function tryOpenAI() {
     console.error("[convo-image-targets] openai init failed:", e?.message || e);
     return null;
   }
+}
+
+/**
+ * The model for the JUDGMENTS, as opposed to the generation.
+ *
+ * Three of the four model calls in a scan are not creative work: "does this
+ * crop show a lanyard", "where are the instances of these labels", "draw that
+ * box again". They are binary or near-binary, they look at one small crop or
+ * one picture with a closed list, and Stage 0 measured them at 8.1s
+ * (enumeration) and 8.9s (thirteen crop checks) on the same model the
+ * generation uses.
+ *
+ * gpt-4.1-nano was measured here in v8 and REJECTED. It is genuinely faster —
+ * enumeration 8.1s -> 6.2s, thirteen crop checks 3.5s -> 1.4s of wall clock,
+ * about 3s off a 25.7s scan — but it is also stricter, and it rejected one more
+ * target per scan than gpt-4.1-mini did on both scenes tested (5 kept where
+ * mini kept 6, twice each).
+ *
+ * One target is not a rounding error here, because the floor is five. Dropping
+ * one more lands the pool ON the floor, and the scan that lands on the floor is
+ * one bad crop away from firing the 13s top-up. That is exactly what happened:
+ * networking-1 went from 16.4s on mini to 35.6s on nano, because nano's extra
+ * attrition re-triggered the round trip the twelve-target pool had just
+ * eliminated. Three seconds saved, thirteen risked.
+ *
+ * So the default is the generation model, and this is a seam rather than a
+ * decision: set LUX_AI_CHECK_MODEL to try another judge without a code change.
+ * A cheaper model becomes worth re-testing if the floor ever stops being the
+ * thing that turns one lost target into a second round trip.
+ */
+function pickCheckModel() {
+  return (process.env.LUX_AI_CHECK_MODEL || "").toString().trim() || pickModel();
 }
 
 function pickModel() {
