@@ -1,10 +1,10 @@
-# I SPY v8 — handover after A6, A7, A8 (split half)
+# I SPY v8 — handover after A6, A7, A8 (complete)
 
 Everything below is measured on cold scans with a fresh image key, not
 estimated. Both branches pushed and green.
 
-- frontend `feat/image-vocab-game` → `595e6596`
-- backend `feat/image-vocab-game` → `067b7b3`
+- frontend `feat/image-vocab-game` → `18b7153b`
+- backend `feat/image-vocab-game` → `30edb04`
 
 ## Lane
 
@@ -48,51 +48,40 @@ Scratch scripts to delete: `.scratch/v8/split-prompt.py`,
 
 ## Latency, cold, fresh key
 
-| scene | Stage 0 | now | top-up |
-|---|---|---|---|
-| calling-1 B1 | 30.3 s | **15.0 s** | no |
-| networking-1 C2 | 22.2 s | **17.3 s** | no |
-| networking-2 C2 | 30.0 s | 33.4 s | **fired** |
+| scene | Stage 0 | A8a total | **to playable** | full pool |
+|---|---|---|---|---|
+| calling-1 B1 | 30.3 s | 15.0 s | **13.2 s** | 17.6 s |
+| networking-1 C2 | 22.2 s | 17.3 s | **15.2 s** | 31.4 s |
+| networking-2 C2 | 30.0 s | 33.4 s | **13.8 s** | 33.3 s |
 
 Cached: sub-second, one DB read, no model call. Unchanged.
 
-Phase shape of a clean 15 s scan (calling-1 B1): locate 5.3 s, crop checks
-4.1 s wall, relocalize 1.7 s, enrich 5.2 s, DB 0.3 s.
+First-playable's floor is locate (5-8 s) + the wave's crop checks (2-3 s) + the
+wave's enrich (3-5 s). Nothing gets under that without making locate cheaper.
 
-## The one thing still in the way
+## The top-up, and why it stopped mattering
 
-**The top-up.** It costs 10–13 s, it is serial, and it fires whenever crop
-verification leaves fewer than `MIN_TARGETS` (5) survivors. Every scan that hits
-the bar avoids it; every scan that misses the bar is one that fired it.
+It still costs 10-13 s and still fires whenever crop verification leaves fewer
+than `MIN_TARGETS` (5) survivors. Two caps were aimed at it: 12 located targets
+instead of 8, then 16 at C1/C2 (a high band names parts and materials, and a
+stud earring's box fails a crop check far more often than a blazer's). The
+second took networking-1 from 29.8 s to 17.3 s. Neither saved networking-2,
+where the picture holds fewer nameable things and the model returns a short list
+however large a cap it is offered.
 
-Two things already tried against it, both real but neither sufficient:
-
-- 12 located targets instead of 8 (`132e340`).
-- 16 at C1/C2 (`067b7b3`), because a high band names parts and materials, and a
-  stud earring's box fails a crop check far more often than a blazer's. Took
-  networking-1 from 29.8 s to 17.3 s. Did **not** save networking-2, where the
-  picture genuinely holds fewer nameable things and the model returns a short
-  list however large a cap it is offered.
-
-**First-playable serving is the answer to it and is NOT built.** It is the
-remaining half of A8. The learner does not need the whole pool to start: three
-verified targets is a round. Serve at three, let the rest arrive by follow-up,
-and a top-up firing behind the scenes stops being 10 s of dead time and becomes
-pool growth the learner never waits for.
-
-Sketch, both repos:
-1. Backend: once 3 targets pass their crop check, respond `{ targets, partial:
-   true, scanId }` and let the rest finish. Cache the full row when it lands.
-2. Backend: `GET`/`POST` follow-up on `scanId` (or the image key) returning the
-   completed set.
-3. Frontend: `ispy-scan.js` already owns the record and the subscribe seam.
-   `startScan` would keep its promise open and announce a second time; `deals`
-   grow mid-round. New pips enter with a small animation, motion law applies.
+A8b is what settles it. That scan is still 33 s end to end, but the learner is
+playing at 13.8 s and the top-up happens underneath them. The remaining work on
+latency is optional; the wait is no longer the thing standing between a press
+and a round.
 
 ## Not started
 
 Stages B, C, D, E, F, G, H, I. Note `MAX_TARGETS` is already 12 (16 at high
 bands), so Stage B's pool-cap item is done.
+
+Stage B note: `growDeals` in ispy-deal.js is the seam Stage B's disjoint-mode
+work will want, and `ispy-scan.js` already keys records by (src, lang, band),
+which is where a played-word history would hang.
 
 ## Test state
 
@@ -118,3 +107,6 @@ suites run by `npm run test:ear`. All pre-existing.
    along with the band it probes under.
 5. **rAF does not run in a hidden document**, and A7 actively invites the
    learner to switch tabs. The notify line's entrance is a forced reflow.
+6. **The crop mock was missing `releaseSource`**, so the route threw on every
+   contract-test request AFTER the response had gone out. The suite passed while
+   the router logged a 500 nobody was reading.
