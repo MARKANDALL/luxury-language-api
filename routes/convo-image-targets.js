@@ -110,7 +110,7 @@
 // on a replay should send `imageKey` alone (see above) — a cache hit needs no
 // image bytes at all.
 
-import { cropRegion, imageSize } from "../lib/image-crop.js";
+import { cropRegion, imageSize, releaseSource } from "../lib/image-crop.js";
 import { withTiming, withPhase, timed, report } from "../lib/scan-timing.js";
 
 import crypto from "node:crypto";
@@ -145,7 +145,21 @@ const TARGETS_V = 1;
 const VERIFIED_V = 3;
 
 const MIN_TARGETS = 5;
-const MAX_TARGETS = 8;
+// Asked for twelve, not eight, and the reason is latency rather than variety —
+// though v8 wants both.
+//
+// Stage 0 measured the top-up at 13 s, 43% of a 30 s cold scan, and it fired on
+// two scans out of three. It fires because generation returns eight, crop
+// verification drops half of them, and four is under the floor of five. So the
+// route paid for a SECOND generation, a second enumeration and a second round
+// of crop checks to climb back over a line the first call could have cleared on
+// its own.
+//
+// Over-generating pays for the same attrition inside a call that is already in
+// flight. Twelve asked for, roughly half surviving, still lands above the floor,
+// and the top-up stops firing. It costs output tokens on the generate call —
+// measured below — and buys back the entire second round trip.
+const MAX_TARGETS = 12;
 
 // A target needs the answer plus at least two distractors for the final hint to
 // still be a real choice. Four is what we ask for; three is the graceful floor,
@@ -991,7 +1005,10 @@ Output MUST be valid JSON only, exactly:
 // across the whole set, not one per target, so there is more of it and it is
 // finer grained. These are low-detail calls on a small crop, which is the
 // cheapest request this route makes.
-const VERIFY_CONCURRENCY = 6;
+// Raised again with the twelve-target pool: the work is one check per INSTANCE,
+// so a set half again as long with several instances apiece is comfortably more
+// than six jobs, and six slots turned the tail of it back into a queue.
+const VERIFY_CONCURRENCY = 12;
 
 function verifyPrompt(label, langName) {
   return `You are shown a small crop taken from a larger photograph.
@@ -1465,7 +1482,12 @@ async function runTopUp(openai, model, imageUrl, { description, lang, level, ima
       openai.chat.completions.create({
         model,
         temperature: 0,
-        max_tokens: 1400,
+        // Twelve targets, each carrying a cloze, four choices, aliases, a
+        // riddle and sometimes a regional note. At 1400 the twelfth target was
+        // cut off mid-JSON, and a truncated set does not fail loudly — jsonrepair
+        // salvages the whole targets it can see and the round quietly comes back
+        // short, which is the exact thing the bigger cap exists to prevent.
+        max_tokens: 2800,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: buildSystemPrompt(lang, level) },
@@ -1560,6 +1582,9 @@ export default async function handler(req, res) {
       return await scan(req, res);
     } finally {
       report();
+      // The picture this scan cut its crops from. A warm container that kept it
+      // would hold the last photo of every scan it ever served.
+      await releaseSource().catch(() => {});
     }
   });
 }
@@ -1751,7 +1776,12 @@ async function scan(req, res) {
       openai.chat.completions.create({
         model: MODEL,
         temperature: 0,
-        max_tokens: 1400,
+        // Twelve targets, each carrying a cloze, four choices, aliases, a
+        // riddle and sometimes a regional note. At 1400 the twelfth target was
+        // cut off mid-JSON, and a truncated set does not fail loudly — jsonrepair
+        // salvages the whole targets it can see and the round quietly comes back
+        // short, which is the exact thing the bigger cap exists to prevent.
+        max_tokens: 2800,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: buildSystemPrompt(lang, level) },

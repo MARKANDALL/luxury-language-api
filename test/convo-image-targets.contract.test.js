@@ -1154,9 +1154,9 @@ describe("convo-image-targets validation", () => {
     expect(r.body.targets.map((t) => t.label)).toEqual(["la taza", "la planta"]);
   });
 
-  it("caps the set at 8 targets", async () => {
+  it("caps the set at 12 targets", async () => {
     const many = [];
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 16; i++) {
       many.push({
         label: `thing${i}`,
         point: { x: 0.1 + i * 0.05, y: 0.5 },
@@ -1167,7 +1167,7 @@ describe("convo-image-targets validation", () => {
     mockRound((many));
     const api = await client();
     const r = await post(api);
-    expect(r.body.targets).toHaveLength(8);
+    expect(r.body.targets).toHaveLength(12);
   });
 
   it("puts the marker at the BOX CENTRE when there is a usable box", async () => {
