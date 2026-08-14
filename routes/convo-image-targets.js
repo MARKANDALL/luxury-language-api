@@ -179,6 +179,43 @@ function maxTargetsFor(level) {
   return HIGH_BANDS.has(level) ? 16 : MAX_TARGETS;
 }
 
+// ── First playable ──────────────────────────────────────────────────────────
+//
+// A learner does not need the whole pool to start. Three verified words is a
+// round, and the difference between waiting for three and waiting for twelve is
+// most of the wait: the tail of the scan is crop checks on targets nobody has
+// been asked about yet, plus a top-up that only exists to keep the pool deep.
+//
+// So the first few located targets are verified and written FIRST, the response
+// goes out the moment three of them are ready, and everything after that
+// happens while the round is already being played. A top-up firing in that tail
+// costs the learner nothing, because they are not waiting for it.
+
+/** How many located targets to push through verification before answering. */
+// Four rather than three, because verification drops roughly half and a wave of
+// exactly three would usually come out under the bar and serve nothing early.
+const FIRST_WAVE = 4;
+
+/** How many must survive that wave for a round to be worth starting. */
+const FIRST_PLAYABLE = 3;
+
+/**
+ * The handle the client sends back to collect the rest.
+ *
+ * It is the row's identity rather than a new one: the tail's whole job is to
+ * write the full row, and the follow-up is that row being read. Inventing a
+ * separate id would mean storing a second thing that has to be kept in step
+ * with the first.
+ */
+function makeScanId(imageKey, lang, level) {
+  return `${imageKey}|${lang}|${level}`;
+}
+
+function parseScanId(raw) {
+  const [imageKey = "", lang = "", level = ""] = String(raw || "").split("|");
+  return { imageKey: imageKey.slice(0, 128), lang, level };
+}
+
 // A target needs the answer plus at least two distractors for the final hint to
 // still be a real choice. Four is what we ask for; three is the graceful floor,
 // because dropping an otherwise-perfect target (good point, good cloze) over one
@@ -500,6 +537,21 @@ function empty(imageKey, lang, reason) {
   const out = { ok: true, cached: false, imageKey, lang, targets: [] };
   if (reason) out.reason = reason;
   return out;
+}
+
+/**
+ * Answer, but only the first time.
+ *
+ * First-playable means this handler keeps working after it has replied: it
+ * verifies the tail, tops up and writes the row while the round is already
+ * being played. Every later exit therefore has to be able to run without
+ * speaking, and a guard on each of them separately is a guard somebody will
+ * forget to add.
+ */
+function sendOnce(res, body) {
+  if (res._luxSent || res.headersSent) return res;
+  res._luxSent = true;
+  return res.status(200).json(body);
 }
 
 function sha256(s) {
@@ -1746,7 +1798,17 @@ async function scan(req, res) {
   }
 
   // 3) Validate input
-  const body = req.body || {};
+  const rawBody = req.body || {};
+  // A follow-up: "the round I started is playing, send me the rest of it".
+  //
+  // It decodes to exactly the three fields that identify the row, and then this
+  // is an ordinary key-only probe. The tail of the first request writes that
+  // row, so there is nothing else to look up and nothing to keep in step: if
+  // the tail has landed the full set comes back as a cache hit, and if it has
+  // not, the probe misses and the round plays on with what it already has.
+  const body = rawBody.scanId
+    ? { ...rawBody, ...parseScanId(rawBody.scanId) }
+    : rawBody;
   // Region-tolerant: "es", "ES" and "es-MX" are all the Spanish pack. Anything
   // else is English, the same closed two-value space every other route uses.
   const langRaw = (body.lang || body.pack || "en").toString().trim().toLowerCase();
@@ -1957,21 +2019,89 @@ async function scan(req, res) {
   const rawTargets = Array.isArray(parsed?.targets) ? parsed.targets : [];
   const sane = sanitizeLocatedList(rawTargets, lang, level);
 
-  // 7b) Model truth. Every located box is cut out and shown to the model on its
-  //     own; what the crop does not show is re-localized once and then dropped.
-  //     This is the only check in the pipeline the locating call cannot talk its
-  //     way past.
-  let targets = await verifyTargets(openai, MODEL, imageUrl, sane, lang);
+  // 7b) The first wave. A handful of located targets are verified and written
+  //     ahead of the rest so a round can start on them.
+  //
+  // Opt-in, and deliberately so. A partial response is only safe for a caller
+  // that knows to come back for the rest; anything else would take four targets
+  // as the whole scan and never ask again. The frontend asks for it because it
+  // implements the follow-up. A script, a probe, or any future consumer gets
+  // the complete set by default.
+  //
+  // Splitting is also only worth it when there IS a tail: with five located
+  // targets, serving four and chasing one costs an extra enrich call to save
+  // nothing.
+  const split = body.firstPlayable === true && sane.length > FIRST_WAVE + 1;
+  const wave = split ? sane.slice(0, FIRST_WAVE) : sane;
+  const rest = split ? sane.slice(FIRST_WAVE) : [];
 
-  // 7c) The floor, shared with the heal path so a re-examined row is held to
-  //     the same standard as a fresh one.
+  const checkedWave = await withPhase("wave1", () =>
+    verifyTargets(openai, MODEL, imageUrl, wave, lang),
+  );
+
+  // The tail's crop checks start HERE, not after the response, so they run
+  // underneath the wave's enrich call rather than queueing behind it. Nothing
+  // awaits this until the round is already playing; it is started early purely
+  // so the pool finishes growing sooner.
+  const restChecked = rest.length
+    ? verifyTargets(openai, MODEL, imageUrl, rest, lang)
+    : Promise.resolve([]);
+  // Nobody is listening yet, and an unhandled rejection here would take down the
+  // process rather than the round.
+  restChecked.catch(() => {});
+
+  let early = await withPhase("wave1", () =>
+    enrichTargets(openai, MODEL, imageUrl, checkedWave, { lang, level, seed: imageKey }),
+  );
+
+  // The round starts HERE, and everything below this line happens while it is
+  // being played. The row is deliberately not written yet: a partial set cached
+  // as if it were the whole scan would serve four targets to every future visit
+  // and never be recomputed.
+  let servedEarly = false;
+  if (split && early.length >= FIRST_PLAYABLE) {
+    sendOnce(res, {
+      ok: true,
+      cached: false,
+      imageKey,
+      lang,
+      targets: early,
+      partial: true,
+      scanId: makeScanId(imageKey, lang, level),
+    });
+    servedEarly = true;
+    console.log(
+      `[convo-image-targets] first playable: ${early.length} targets, ` +
+        `${rest.length} still to check (key=${imageKey} level=${level || "-"})`,
+    );
+  }
+
+  // 7c) The tail. Nobody is waiting on any of this once the round has started.
+  let targets = early;
+  if (rest.length) {
+    const checkedRest = await restChecked.catch(() => []);
+    const enrichedRest = checkedRest.length
+      ? await enrichTargets(openai, MODEL, imageUrl, checkedRest, { lang, level, seed: imageKey })
+      : [];
+    targets = [...early, ...enrichedRest];
+  }
+
+  // 7d) The floor, shared with the heal path so a re-examined row is held to the
+  //     same standard as a fresh one. Held AFTER the tail, and after the early
+  //     response, which is the point: a top-up used to be ten seconds the
+  //     learner stood through, and is now ten seconds they play through.
+  const beforeTopUp = targets.length;
   targets = await topUpIfThin(openai, MODEL, imageUrl, { description, lang, level, imageKey, targets });
-
-  // 7d) Only now, the writing. Everything above narrowed twelve located targets
-  //     down to the ones that are really there; this is the first moment the
-  //     route spends a token on a cloze, a distractor or a riddle, and it spends
-  //     none on a target the crop check deleted.
-  targets = await enrichTargets(openai, MODEL, imageUrl, targets, { lang, level, seed: imageKey });
+  if (targets.length > beforeTopUp) {
+    // Top-up returns located targets; only the new ones need writing.
+    const fresh = targets.slice(beforeTopUp);
+    const written = await enrichTargets(openai, MODEL, imageUrl, fresh, {
+      lang,
+      level,
+      seed: imageKey,
+    });
+    targets = [...targets.slice(0, beforeTopUp), ...written];
+  }
 
   if (!targets.length) {
     // These two look identical to a caller but mean opposite things, and
@@ -1986,9 +2116,9 @@ async function scan(req, res) {
         `[convo-image-targets] all ${rawTargets.length} targets failed validation ` +
           `(lang=${lang} model=${MODEL} key=${imageKey})`
       );
-      return res.status(200).json(empty(imageKey, lang, "no_valid_targets"));
+      return sendOnce(res, empty(imageKey, lang, "no_valid_targets"));
     }
-    return res.status(200).json(empty(imageKey, lang, "no_targets"));
+    return sendOnce(res, empty(imageKey, lang, "no_targets"));
   }
 
   if (targets.length < rawTargets.length) {
@@ -2013,5 +2143,8 @@ async function scan(req, res) {
   // function can freeze after the response".
   await writeRow(sb, { imageKey, lang, level, targets, model: MODEL });
 
-  return res.status(200).json({ ok: true, cached: false, imageKey, lang, targets });
+  // The tail's real product. A learner who started on the early four collects
+  // the rest by reading this row back; a learner who arrives later reads it as
+  // an ordinary cache hit and waits for nothing at all.
+  return sendOnce(res, { ok: true, cached: false, imageKey, lang, targets });
 }

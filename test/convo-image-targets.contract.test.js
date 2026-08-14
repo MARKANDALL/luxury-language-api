@@ -41,6 +41,10 @@ const { cropSpy, sizeSpy } = vi.hoisted(() => ({
 vi.mock("../lib/image-crop.js", () => ({
   cropRegion: cropSpy,
   imageSize: sizeSpy,
+  // The scan drops its cached source file when it exits. Absent from this mock
+  // the handler threw on every request, after the response had already gone out,
+  // so the tests passed and the router logged a 500 nobody was reading.
+  releaseSource: async () => {},
 }));
 
 // ── Supabase mock ───────────────────────────────────────────────────────────
@@ -232,6 +236,119 @@ function post(api, bodyOverrides = {}, withToken = true) {
   if (withToken) req.set("x-admin-token", "test_admin_token");
   return req.send({ imageUrl: IMG, description: "A cafe counter.", lang: "en", ...bodyOverrides });
 }
+
+// ── First playable ──────────────────────────────────────────────────────────
+
+describe("convo-image-targets first playable", () => {
+  /** Eight targets, enough for a first wave of four and a tail of four. */
+  function bigRound() {
+    return Array.from({ length: 8 }, (_, i) => ({
+      label: `thing${i}`,
+      point: { x: 0.1 + i * 0.1, y: 0.5 },
+      box: { x: 0.1 + i * 0.1, y: 0.4, w: 0.05, h: 0.1 },
+      cloze: `Here is ___ number ${i}.`,
+      choices: [`thing${i}`, `other${i}`, `spare${i}`, `extra${i}`],
+    }));
+  }
+
+  /** The tail keeps running after the response, so the row lands later. */
+  async function settled(pred, ms = 2000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) {
+      if (pred()) return true;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return false;
+  }
+
+  beforeEach(() => mockRound(bigRound()));
+
+  it("answers as soon as the first wave is ready, and says it is not the whole set", async () => {
+    const api = await client();
+    const r = await post(api, { firstPlayable: true });
+
+    expect(r.status).toBe(200);
+    expect(r.body.partial).toBe(true);
+    expect(r.body.targets.length).toBeGreaterThanOrEqual(3);
+    // The wave, not the pool. The rest is still being checked.
+    expect(r.body.targets.length).toBeLessThan(8);
+    expect(r.body.scanId).toBe(`${r.body.imageKey}|en|`);
+    // Playable means playable: every target it DID serve is a whole one.
+    for (const t of r.body.targets) {
+      expect(t.cloze).toContain("___");
+      expect(t.choices.length).toBeGreaterThanOrEqual(3);
+      expect(t.choices[t.answerIndex]).toBe(t.label);
+    }
+  });
+
+  it("never caches the partial set as if it were the whole scan", async () => {
+    const api = await client();
+    const r = await post(api, { firstPlayable: true });
+    const served = r.body.targets.length;
+
+    // A row written at this moment would serve four targets to every future
+    // visit and never be recomputed.
+    const wrote = sbState.upserts.length ? sbState.upserts[0].payload.targets.length : 0;
+    expect(wrote === 0 || wrote > served).toBe(true);
+
+    // And the tail does land, with more than was served.
+    expect(await settled(() => sbState.upserts.length > 0)).toBe(true);
+    expect(sbState.upserts.at(-1).payload.targets.length).toBeGreaterThan(served);
+  });
+
+  it("the follow-up collects the rest under the scanId it was given", async () => {
+    const api = await client();
+    const first = await post(api, { firstPlayable: true });
+    expect(await settled(() => sbState.upserts.length > 0)).toBe(true);
+
+    // What the tail wrote is what a follow-up reads.
+    // Exactly what the tail wrote, stamps included, which is what the next read
+    // of that row will find.
+    const wrote = sbState.upserts.at(-1).payload;
+    sbState.row = { targets: wrote.targets, v: wrote.v, verified: wrote.verified };
+    createSpy.mockClear();
+
+    const api2 = await client();
+    const again = await api2
+      .post("/api/router?route=convo-image-targets")
+      .set("x-admin-token", "test_admin_token")
+      .send({ scanId: first.body.scanId });
+
+    expect(again.body.targets.length).toBeGreaterThan(first.body.targets.length);
+    // A follow-up is a read. It must never start another scan.
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("is OPT-IN: a caller that does not ask for it gets the whole set", async () => {
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.partial).toBeUndefined();
+    expect(r.body.scanId).toBeUndefined();
+    expect(r.body.targets.length).toBeGreaterThan(4);
+  });
+
+  it("does not split a set too small to be worth splitting", async () => {
+    mockRound(bigRound().slice(0, 4));
+    const api = await client();
+    const r = await post(api, { firstPlayable: true });
+    // Serving three and chasing one costs an extra enrich call to save nothing.
+    expect(r.body.partial).toBeUndefined();
+    expect(r.body.targets).toHaveLength(4);
+  });
+
+  it("a tail that finds nothing leaves the round exactly as playable as it was", async () => {
+    // Everything past the first wave fails its crop check.
+    let seen = 0;
+    mockRound(bigRound(), { shows: () => ++seen <= 4 });
+    const api = await client();
+    const r = await post(api, { firstPlayable: true });
+
+    expect(r.body.partial).toBe(true);
+    expect(r.body.targets.length).toBeGreaterThanOrEqual(3);
+    // No second answer, no error: the learner is already playing.
+    expect(r.status).toBe(200);
+  });
+});
 
 // ── Happy path ──────────────────────────────────────────────────────────────
 
