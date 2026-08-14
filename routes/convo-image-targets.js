@@ -278,6 +278,18 @@ const MAX_MISSES_OFFERED = 8;
 // played a picture many times would otherwise send a paragraph of exclusions.
 const MAX_EXCLUDED = 24;
 
+// Words this learner is already working on: what they have kept in My Words, and
+// what has beaten them before. Offered as a PREFERENCE and nothing stronger, so
+// a picture that contains one teaches it and a picture that does not is left
+// alone.
+//
+// Capped harder than the exclusions, and the cap is the whole safety of this
+// feature rather than a size limit. A preference list long enough to cover most
+// of a learner's vocabulary would stop being a preference and start being the
+// round: the model would reach for a listed word on every picture, and a round
+// where nothing new ever appears is the opposite of what a picture is for.
+const MAX_PREFERRED = 12;
+
 // A box smaller than this is a mis-drawn sliver rather than an object; a box
 // bigger than this in BOTH directions is the whole scene, which points at
 // nothing. Either way the point is the better answer.
@@ -1548,7 +1560,7 @@ async function writeRow(sb, { imageKey, lang, level, targets, model }) {
  * same price) or by loosening the check (which is what produced the boxes the
  * fifth playtest filmed).
  */
-function buildTopUpText(description, lang, have, level, exclude) {
+function buildTopUpText(description, lang, have, level, exclude, prefer) {
   const p = PACK[lang];
   // Asked for the room to the CAP, not the deficit to the floor. Attrition is
   // the reason this call exists, so requesting exactly what is missing hands
@@ -1558,6 +1570,7 @@ function buildTopUpText(description, lang, have, level, exclude) {
   return [
     `This image has already given ${have.length} vocabulary target(s). Find up to ${want} MORE,`,
     `different from those, in the same image. Answer in ${p.langName}.`,
+    ...preferBlock(prefer),
     "",
     "Already taken, do NOT return any of these or a synonym of one:",
     // The words this round already holds AND the words this picture taught on
@@ -1655,14 +1668,14 @@ async function enrichTargets(openai, model, imageUrl, targets, { lang, level, se
   return out;
 }
 
-async function topUpIfThin(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude }) {
+async function topUpIfThin(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer }) {
   if (!targets.length || targets.length >= MIN_TARGETS || !imageUrl) return targets;
   return withPhase("topup", () =>
-    runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude }),
+    runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer }),
   );
 }
 
-async function runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude }) {
+async function runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer }) {
   const before = targets.length;
   let out = targets;
   try {
@@ -1683,7 +1696,7 @@ async function runTopUp(openai, model, imageUrl, { description, lang, level, ima
           {
             role: "user",
             content: [
-              { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label), level, exclude) },
+              { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label), level, exclude, prefer) },
               { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
             ],
           },
@@ -1742,7 +1755,34 @@ function buildEnrichUserText(lang) {
   return `Write the round for the listed words. Answer in ${PACK[lang].langName}.`;
 }
 
-function buildUserText(description, lang, misses, level, exclude) {
+/**
+ * The preference block, shared by generation and the top-up.
+ *
+ * One function because the two calls must say the SAME thing about it. The
+ * top-up is where this matters most and where it was missing: a top-up is
+ * already asking "what else is in here", which is exactly the moment to reach
+ * for a word the learner is working on rather than for whatever is left.
+ *
+ * Deliberately weaker language than the exclude list, which is a hard rule. This
+ * one can only ever be a preference: a word planted in a picture that does not
+ * contain it is a question with no answer, which is worse than never revisiting
+ * it. The last line is the one that does the work.
+ */
+function preferBlock(prefer) {
+  if (!prefer?.length) return [];
+  return [
+    "",
+    "This learner is already working on the words below: some they have kept, some",
+    "have beaten them before. If any of them is genuinely present in this image and",
+    "would make a fair target under every rule above, PREFER it over an equally good",
+    "alternative. This is a preference and nothing more. Do not stretch a label to",
+    "match one, do not name something that is not clearly there, and return none of",
+    "them if none is really in the picture:",
+    prefer.map((w) => `- ${w}`).join("\n"),
+  ];
+}
+
+function buildUserText(description, lang, misses, level, exclude, prefer) {
   const p = PACK[lang];
   const lines = [
     `Find ${MIN_TARGETS}-${maxTargetsFor(level)} vocabulary targets in this image. Answer in ${p.langName}.`,
@@ -1778,6 +1818,7 @@ function buildUserText(description, lang, misses, level, exclude) {
       exclude.map((w) => `- ${w}`).join("\n"),
     );
   }
+  lines.push(...preferBlock(prefer));
   if (description) {
     lines.push(
       "",
@@ -1862,6 +1903,23 @@ async function scan(req, res) {
     .map((w) => String(w || "").trim().slice(0, 60))
     .filter(Boolean)
     .slice(0, MAX_EXCLUDED);
+  // What this learner is already working on. Deduped against `misses` and against
+  // `exclude`: a missed word already has its own, stronger instruction and its
+  // own revisit marking, and a word this picture has already taught is on the
+  // do-not-return list, so naming it here as well would be the same prompt
+  // asking for a word and forbidding it in two places.
+  const preferSeen = new Set([...misses, ...exclude].map((w) => w.toLowerCase()));
+  const prefer = (Array.isArray(body?.prefer) ? body.prefer : [])
+    .map((w) => String(w || "").trim().slice(0, 60))
+    .filter((w) => {
+      // One pass, which also self-dedupes: the caller merges two of its own
+      // lists and they overlap on any word that was both saved and missed.
+      const k = w.toLowerCase();
+      if (!w || preferSeen.has(k)) return false;
+      preferSeen.add(k);
+      return true;
+    })
+    .slice(0, MAX_PREFERRED);
   const imageUrl = (body.imageUrl || "").toString().trim();
   const description = (body.description || "").toString().trim().slice(0, MAX_DESCRIPTION_CHARS);
 
@@ -1950,7 +2008,7 @@ async function scan(req, res) {
             // five down to four is thin for the same reason and gets the same
             // one extra ask.
             checked = await topUpIfThin(openaiForCheck, model, imageUrl, {
-              description, lang, level, imageKey, targets: checked, exclude,
+              description, lang, level, imageKey, targets: checked, exclude, prefer,
             });
             if (checked.length >= MIN_SERVED_TARGETS || checked.length === kept.length) {
               await writeRow(sb, { imageKey, lang, level, targets: checked, model });
@@ -2024,7 +2082,7 @@ async function scan(req, res) {
           {
             role: "user",
             content: [
-              { type: "text", text: buildUserText(description, lang, misses, level, exclude) },
+              { type: "text", text: buildUserText(description, lang, misses, level, exclude, prefer) },
               { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
             ],
           },
@@ -2126,7 +2184,7 @@ async function scan(req, res) {
   //     response, which is the point: a top-up used to be ten seconds the
   //     learner stood through, and is now ten seconds they play through.
   const beforeTopUp = targets.length;
-  targets = await topUpIfThin(openai, MODEL, imageUrl, { description, lang, level, imageKey, targets, exclude });
+  targets = await topUpIfThin(openai, MODEL, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer });
   if (targets.length > beforeTopUp) {
     // Top-up returns located targets; only the new ones need writing.
     const fresh = targets.slice(beforeTopUp);

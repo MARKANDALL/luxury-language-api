@@ -297,6 +297,108 @@ describe("convo-image-targets exclusions", () => {
   });
 });
 
+// ── The preference list ─────────────────────────────────────────────────────
+//
+// What the learner is already working on: words they have KEPT and words that
+// have BEATEN them. It can only ever narrow toward things that are really in the
+// picture, so the tests that matter are the ones that pin how WEAK it is.
+
+describe("convo-image-targets preferences", () => {
+  it("offers the learner's words to the scan, as a preference", async () => {
+    const api = await client();
+    await post(api, { prefer: ["mug", "windowsill"] });
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text).toContain("already working on");
+    expect(text).toContain("- mug");
+    expect(text).toContain("- windowsill");
+    // The line that keeps this safe. A word planted in a picture that does not
+    // contain it is a question with no answer, which is worse than not
+    // revisiting it at all.
+    expect(text).toContain("return none of");
+  });
+
+  it("says nothing at all when the learner has no words yet", async () => {
+    const api = await client();
+    await post(api);
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text).not.toContain("already working on");
+  });
+
+  it("carries them into the TOP-UP, which is where they matter most", async () => {
+    // A top-up is already asking "what else is in here", which is exactly the
+    // moment to reach for a word the learner is working on rather than for
+    // whatever happens to be left.
+    mockRound(
+      [
+        { label: "a mug", point: { x: 0.2, y: 0.5 }, cloze: "Holding ___.", choices: ["a mug", "a", "b", "c"] },
+        { label: "a plate", point: { x: 0.4, y: 0.5 }, cloze: "Beside ___.", choices: ["a plate", "a", "b", "c"] },
+      ],
+      { topUp: [] },
+    );
+    const api = await client();
+    await post(api, { prefer: ["windowsill"] });
+
+    expect(callsOf("topUp")).toHaveLength(1);
+    const text = JSON.stringify(callsOf("topUp")[0][0].messages[1].content);
+    expect(text).toContain("already working on");
+    expect(text).toContain("- windowsill");
+  });
+
+  it("does not repeat a word that is already in the misses list", async () => {
+    // A missed word has its own, stronger instruction and its own revisit
+    // marking. Naming it twice in one prompt is the same request asking for a
+    // word in two voices.
+    const api = await client();
+    await post(api, { misses: ["a ticket"], prefer: ["a ticket", "mug"] });
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text).toContain("previously failed to name");
+    expect(text).toContain("- mug");
+    // Once, in the misses block, and not again in the preference block.
+    expect(text.split("- a ticket").length - 1).toBe(1);
+  });
+
+  it("does not ask for a word it is simultaneously forbidding", async () => {
+    // exclude is a hard rule for this picture. A word on both lists would be
+    // demanded and forbidden in the same prompt.
+    const api = await client();
+    await post(api, { exclude: ["chair"], prefer: ["chair", "mug"] });
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text).toContain("- mug");
+    expect(text.split("- chair").length - 1).toBe(1);
+  });
+
+  it("self-dedupes, because the caller merges two of its own lists", async () => {
+    const api = await client();
+    await post(api, { prefer: ["mug", "mug", "MUG"] });
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text.toLowerCase().split("- mug").length - 1).toBe(1);
+  });
+
+  it("caps the list, because a long enough preference stops being one", async () => {
+    // This cap is the safety of the whole feature rather than a size limit. A
+    // list covering most of a learner's vocabulary would have the model reaching
+    // for a listed word on every picture, and a round where nothing new ever
+    // appears is the opposite of what a picture is for.
+    const many = Array.from({ length: 40 }, (_, i) => `pref${i}`);
+    const api = await client();
+    await post(api, { prefer: many });
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text).toContain("- pref11");
+    expect(text).not.toContain("- pref12");
+  });
+
+  it("is never part of the cache key, so one learner cannot fork a picture", async () => {
+    const api = await client();
+    await post(api, { prefer: ["mug"] });
+    const key = sbState.upserts.at(-1).payload.image_key;
+
+    sbState.upserts.length = 0;
+    const api2 = await client();
+    await post(api2, { prefer: ["windowsill", "lapel"] });
+    expect(sbState.upserts.at(-1).payload.image_key).toBe(key);
+  });
+});
+
 // ── First playable ──────────────────────────────────────────────────────────
 
 describe("convo-image-targets first playable", () => {
