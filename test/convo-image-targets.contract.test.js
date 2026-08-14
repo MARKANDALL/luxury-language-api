@@ -237,6 +237,66 @@ function post(api, bodyOverrides = {}, withToken = true) {
   return req.send({ imageUrl: IMG, description: "A cafe counter.", lang: "en", ...bodyOverrides });
 }
 
+// ── Variety on a re-visit ───────────────────────────────────────────────────
+
+describe("convo-image-targets exclusions", () => {
+  it("tells the scan which words this picture has already taught", async () => {
+    const api = await client();
+    await post(api, { exclude: ["chair", "lamp"] });
+    const user = callsOf("generate")[0][0].messages[1].content;
+    const text = JSON.stringify(user);
+    expect(text).toContain("ALREADY been taught");
+    expect(text).toContain("- chair");
+    expect(text).toContain("- lamp");
+  });
+
+  it("says nothing about exclusions when there are none", async () => {
+    const api = await client();
+    await post(api);
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text).not.toContain("ALREADY been taught");
+  });
+
+  it("carries them into the TOP-UP too, where a re-visit reaches for the familiar", async () => {
+    // Two targets survive, under the floor, so the top-up runs.
+    mockRound(
+      [
+        { label: "a mug", point: { x: 0.2, y: 0.5 }, cloze: "Holding ___.", choices: ["a mug", "a", "b", "c"] },
+        { label: "a plate", point: { x: 0.4, y: 0.5 }, cloze: "Beside ___.", choices: ["a plate", "a", "b", "c"] },
+      ],
+      { topUp: [] },
+    );
+    const api = await client();
+    await post(api, { exclude: ["chair"] });
+
+    expect(callsOf("topUp")).toHaveLength(1);
+    const text = JSON.stringify(callsOf("topUp")[0][0].messages[1].content);
+    expect(text).toContain("- chair");
+    // And the words this round already holds, in the same list.
+    expect(text).toContain("- a mug");
+  });
+
+  it("is never part of the cache key, so one learner cannot fork a picture", async () => {
+    const api = await client();
+    await post(api, { exclude: ["chair"] });
+    const key = sbState.upserts.at(-1).payload.image_key;
+
+    sbState.upserts.length = 0;
+    const api2 = await client();
+    await post(api2, { exclude: ["lamp", "door"] });
+    expect(sbState.upserts.at(-1).payload.image_key).toBe(key);
+  });
+
+  it("caps a long history rather than sending a paragraph on every request", async () => {
+    const many = Array.from({ length: 60 }, (_, i) => `word${i}`);
+    const api = await client();
+    await post(api, { exclude: many });
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text).toContain("- word0");
+    expect(text).not.toContain("- word30");
+  });
+});
+
 // ── First playable ──────────────────────────────────────────────────────────
 
 describe("convo-image-targets first playable", () => {

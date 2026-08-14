@@ -273,6 +273,11 @@ const CROP_GATE = new Set(["main", "part"]);
 // start steering the whole round.
 const MAX_MISSES_OFFERED = 8;
 
+// Head words the caller already played on this picture, which the scan is told
+// to avoid. Capped because it rides on every request and a learner who has
+// played a picture many times would otherwise send a paragraph of exclusions.
+const MAX_EXCLUDED = 24;
+
 // A box smaller than this is a mis-drawn sliver rather than an object; a box
 // bigger than this in BOTH directions is the whole scene, which points at
 // nothing. Either way the point is the better answer.
@@ -1543,7 +1548,7 @@ async function writeRow(sb, { imageKey, lang, level, targets, model }) {
  * same price) or by loosening the check (which is what produced the boxes the
  * fifth playtest filmed).
  */
-function buildTopUpText(description, lang, have, level) {
+function buildTopUpText(description, lang, have, level, exclude) {
   const p = PACK[lang];
   // Asked for the room to the CAP, not the deficit to the floor. Attrition is
   // the reason this call exists, so requesting exactly what is missing hands
@@ -1555,7 +1560,11 @@ function buildTopUpText(description, lang, have, level) {
     `different from those, in the same image. Answer in ${p.langName}.`,
     "",
     "Already taken, do NOT return any of these or a synonym of one:",
-    have.map((l) => `- ${l}`).join("\n"),
+    // The words this round already holds AND the words this picture taught on
+    // an earlier visit, in one list. The top-up is exactly where a re-visit is
+    // most likely to reach for something familiar, because it is already being
+    // asked for whatever is left.
+    [...have, ...(exclude || [])].map((l) => `- ${l}`).join("\n"),
     "",
     "Look harder and further into the scene: smaller things, things at the edges,",
     "things behind or beside the obvious subject. Follow every rule you were given.",
@@ -1646,14 +1655,14 @@ async function enrichTargets(openai, model, imageUrl, targets, { lang, level, se
   return out;
 }
 
-async function topUpIfThin(openai, model, imageUrl, { description, lang, level, imageKey, targets }) {
+async function topUpIfThin(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude }) {
   if (!targets.length || targets.length >= MIN_TARGETS || !imageUrl) return targets;
   return withPhase("topup", () =>
-    runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets }),
+    runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude }),
   );
 }
 
-async function runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets }) {
+async function runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude }) {
   const before = targets.length;
   let out = targets;
   try {
@@ -1674,7 +1683,7 @@ async function runTopUp(openai, model, imageUrl, { description, lang, level, ima
           {
             role: "user",
             content: [
-              { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label), level) },
+              { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label), level, exclude) },
               { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
             ],
           },
@@ -1733,7 +1742,7 @@ function buildEnrichUserText(lang) {
   return `Write the round for the listed words. Answer in ${PACK[lang].langName}.`;
 }
 
-function buildUserText(description, lang, misses, level) {
+function buildUserText(description, lang, misses, level, exclude) {
   const p = PACK[lang];
   const lines = [
     `Find ${MIN_TARGETS}-${maxTargetsFor(level)} vocabulary targets in this image. Answer in ${p.langName}.`,
@@ -1749,6 +1758,24 @@ function buildUserText(description, lang, misses, level) {
       "mark it with \"revisit\": true, and follow every other rule for it as normal.",
       "Include NONE of them if none is really there. Do not stretch:",
       misses.map((m) => `- ${m}`).join("\n"),
+    );
+  }
+  // Words this picture has already taught this learner. The point is variety on
+  // a RE-VISIT: a level change that served essentially the same answers, and an
+  // exit and re-entry that replayed the same cycle, are both this list being
+  // empty when it should not have been.
+  //
+  // A hard instruction rather than a preference, and safe to make hard because
+  // it can only ever narrow: the picture still holds everything else in it, and
+  // if it genuinely holds nothing else the floor and the top-up handle a short
+  // round the way they always have.
+  if (exclude?.length) {
+    lines.push(
+      "",
+      "This learner has ALREADY been taught these words from this picture. Find",
+      "OTHER things. Do not return any of these, or a longer phrase built around",
+      "one of them:",
+      exclude.map((w) => `- ${w}`).join("\n"),
     );
   }
   if (description) {
@@ -1827,6 +1854,14 @@ async function scan(req, res) {
     .map((m) => String(m || "").trim().slice(0, 60))
     .filter(Boolean)
     .slice(0, MAX_MISSES_OFFERED);
+  // Head words this learner has already been taught from this picture. Like
+  // misses, offered to the scan and never part of the cache key: a cached row
+  // is a property of the picture, and keying it by who is asking would give
+  // every learner a private copy of every scan.
+  const exclude = (Array.isArray(body?.exclude) ? body.exclude : [])
+    .map((w) => String(w || "").trim().slice(0, 60))
+    .filter(Boolean)
+    .slice(0, MAX_EXCLUDED);
   const imageUrl = (body.imageUrl || "").toString().trim();
   const description = (body.description || "").toString().trim().slice(0, MAX_DESCRIPTION_CHARS);
 
@@ -1915,7 +1950,7 @@ async function scan(req, res) {
             // five down to four is thin for the same reason and gets the same
             // one extra ask.
             checked = await topUpIfThin(openaiForCheck, model, imageUrl, {
-              description, lang, level, imageKey, targets: checked,
+              description, lang, level, imageKey, targets: checked, exclude,
             });
             if (checked.length >= MIN_SERVED_TARGETS || checked.length === kept.length) {
               await writeRow(sb, { imageKey, lang, level, targets: checked, model });
@@ -1989,7 +2024,7 @@ async function scan(req, res) {
           {
             role: "user",
             content: [
-              { type: "text", text: buildUserText(description, lang, misses, level) },
+              { type: "text", text: buildUserText(description, lang, misses, level, exclude) },
               { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
             ],
           },
@@ -2091,7 +2126,7 @@ async function scan(req, res) {
   //     response, which is the point: a top-up used to be ten seconds the
   //     learner stood through, and is now ten seconds they play through.
   const beforeTopUp = targets.length;
-  targets = await topUpIfThin(openai, MODEL, imageUrl, { description, lang, level, imageKey, targets });
+  targets = await topUpIfThin(openai, MODEL, imageUrl, { description, lang, level, imageKey, targets, exclude });
   if (targets.length > beforeTopUp) {
     // Top-up returns located targets; only the new ones need writing.
     const fresh = targets.slice(beforeTopUp);
