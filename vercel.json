@@ -5,6 +5,7 @@
     { "source": "/api/:route/:rest*", "destination": "/api/router?route=:route/:rest*" }
   ],
   "crons": [
-    { "path": "/api/admin/expenses/refresh", "schedule": "0 8 * * *" }
+    { "path": "/api/admin/expenses/refresh", "schedule": "0 8 * * *" },
+    { "path": "/api/keepsakes/cleanup", "schedule": "0 4 * * *" }
   ]
 }
