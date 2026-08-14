@@ -1,10 +1,10 @@
-# I SPY v8 — handover after A6, A7, A8 (complete)
+# I SPY v8 — handover after A, B, C, D
 
 Everything below is measured on cold scans with a fresh image key, not
 estimated. Both branches pushed and green.
 
-- frontend `feat/image-vocab-game` → `18b7153b`
-- backend `feat/image-vocab-game` → `30edb04`
+- frontend `feat/image-vocab-game` → `229f3586`
+- backend `feat/image-vocab-game` → `451ea87`
 
 ## Lane
 
@@ -45,6 +45,12 @@ Scratch scripts to delete: `.scratch/v8/split-prompt.py`,
 | `06af95f9` | A7, the notify pattern | frontend |
 | `595e6596` | cameo probe fix | frontend |
 | `067b7b3` | A8, locate → check → enrich | backend |
+| `30edb04` | A8b, first playable | backend |
+| `18b7153b` | A8b, pool grows mid-round | frontend |
+| `451ea87` | B, exclude list | backend |
+| `cd60d504` | B, history + disjoint deals | frontend |
+| `ba306b01` | C, mic pre-warm + level meter | frontend |
+| `229f3586` | D, the arrow marker | frontend |
 
 ## Latency, cold, fresh key
 
@@ -74,14 +80,31 @@ playing at 13.8 s and the top-up happens underneath them. The remaining work on
 latency is optional; the wait is no longer the thing standing between a press
 and a round.
 
+## Flags added
+
+| key | unset means | other value |
+|---|---|---|
+| `K_ISPY_PREFETCH` | scan on lightbox open | `false` to stop |
+| `K_ISPY_MARKER` | the arrow | `"dot"` restores the pre-v8 marker |
+
+`K_ISPY_PLAYED` holds the played-word history, per image, by head word.
+
 ## Not started
 
-Stages B, C, D, E, F, G, H, I. Note `MAX_TARGETS` is already 12 (16 at high
-bands), so Stage B's pool-cap item is done.
+Stages E, F, G, H, I.
 
-Stage B note: `growDeals` in ispy-deal.js is the seam Stage B's disjoint-mode
-work will want, and `ispy-scan.js` already keys records by (src, lang, band),
-which is where a played-word history would hang.
+## Not verified by eye
+
+Nothing visual in A7, C or D has been watched rendering: the browser pane
+reports `document.hidden` and does not composite. That covers the notify line
+and toast motion, the pip entrance, the microphone level meter, and the whole
+appearance of the arrow marker. Each has its geometry or its DOM state checked
+mechanically instead, and each commit says so.
+
+Press-to-recording (Stage C's under-150ms target) is NOT measured: the pane
+blocks microphone access, and a synthetic stream measures the harness rather
+than the device. What is proven is that a press after warming makes no
+getUserMedia call at all.
 
 ## Test state
 
