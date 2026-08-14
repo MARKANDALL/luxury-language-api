@@ -111,6 +111,7 @@
 // image bytes at all.
 
 import { cropRegion, imageSize } from "../lib/image-crop.js";
+import { withTiming, withPhase, timed, report } from "../lib/scan-timing.js";
 
 import crypto from "node:crypto";
 
@@ -1206,14 +1207,16 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
   const langName = PACK[lang].langName;
   let size = null;
   try {
-    size = await imageSize(imageUrl);
+    size = await timed("imageSize", () => imageSize(imageUrl));
   } catch (e) {
     console.warn("[convo-image-targets] could not size image, skipping verification:", e?.message || e);
     return targets;
   }
 
   // 1) Go looking. Every label, every instance, one call.
-  const found = await enumerateInstances(openai, model, imageUrl, targets, lang);
+  const found = await timed("enumerate", () =>
+    enumerateInstances(openai, model, imageUrl, targets, lang),
+  );
 
   // 2) What each target will have checked. Enumeration wins when it found
   //    anything, because it looked ON PURPOSE; otherwise the target keeps the
@@ -1235,11 +1238,11 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
   plan.forEach((p, ti) =>
     p.cands.forEach((c, ci) =>
       jobs.push(async () => {
-        const crop = await cropRegion(imageUrl, c.box, size);
+        const crop = await timed("crop.cut", () => cropRegion(imageUrl, c.box, size));
         // Could not be cut: not the target's fault, so it stays unjudged, and
         // unjudged is not evidence that it would make a good crop.
         if (!crop) return { ti, ci, shows: true, prominence: "part" };
-        const a = await askCrop(openai, model, crop, p.t.label, langName);
+        const a = await timed("crop.ask", () => askCrop(openai, model, crop, p.t.label, langName));
         return { ti, ci, shows: a.shows, why: a.why, prominence: a.prominence };
       }),
     ),
@@ -1267,11 +1270,13 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
       // for a target whose whole point is that it has none, which is how the
       // rim-point target came back pointing at the middle of the picture.
       if (byTarget[ti].length || !p.cands.length) return null;
-      const again = await relocalize(openai, model, imageUrl, p.t.label, langName);
+      const again = await timed("relocalize", () =>
+        relocalize(openai, model, imageUrl, p.t.label, langName),
+      );
       if (!again) return null;
-      const crop = await cropRegion(imageUrl, again, size);
+      const crop = await timed("crop.cut", () => cropRegion(imageUrl, again, size));
       if (!crop) return null;
-      const a = await askCrop(openai, model, crop, p.t.label, langName);
+      const a = await timed("crop.ask", () => askCrop(openai, model, crop, p.t.label, langName));
       return a.shows ? { ti, box: again, visibility: a.prominence || "partial" } : null;
     }),
     VERIFY_CONCURRENCY,
@@ -1375,18 +1380,20 @@ function pickModel() {
 async function writeRow(sb, { imageKey, lang, level, targets, model }) {
   if (!sb) return;
   try {
-    const { error } = await sb.from("image_targets").upsert(
-      {
-        image_key: imageKey,
-        lang,
-        level,
-        v: TARGETS_V,
-        verified: VERIFIED_V,
-        targets,
-        model,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "image_key,lang,level" },
+    const { error } = await timed("db.write", () =>
+      sb.from("image_targets").upsert(
+        {
+          image_key: imageKey,
+          lang,
+          level,
+          v: TARGETS_V,
+          verified: VERIFIED_V,
+          targets,
+          model,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "image_key,lang,level" },
+      ),
     );
     if (error) console.warn("[convo-image-targets] cache write failed:", error.message);
   } catch (e) {
@@ -1444,27 +1451,34 @@ function buildTopUpText(description, lang, have) {
  */
 async function topUpIfThin(openai, model, imageUrl, { description, lang, level, imageKey, targets }) {
   if (!targets.length || targets.length >= MIN_TARGETS || !imageUrl) return targets;
+  return withPhase("topup", () =>
+    runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets }),
+  );
+}
 
+async function runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets }) {
   const before = targets.length;
   let out = targets;
   try {
     const { jsonrepair } = await import("jsonrepair");
-    const more = await openai.chat.completions.create({
-      model,
-      temperature: 0,
-      max_tokens: 1400,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: buildSystemPrompt(lang, level) },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label)) },
-            { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
-          ],
-        },
-      ],
-    });
+    const more = await timed("gen", () =>
+      openai.chat.completions.create({
+        model,
+        temperature: 0,
+        max_tokens: 1400,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: buildSystemPrompt(lang, level) },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label)) },
+              { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+            ],
+          },
+        ],
+      }),
+    );
     let extraRaw = [];
     try {
       const txt = more?.choices?.[0]?.message?.content || "{}";
@@ -1537,6 +1551,20 @@ function buildUserText(description, lang, misses) {
 // ── Handler ─────────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
+  // One stopwatch per request, closed however the scan exits. The report is a
+  // `finally` because the exits that matter most for latency are the early
+  // ones — a cache hit, a heal, a regeneration — and a report wired only to
+  // the happy path would measure the one route nobody is waiting on.
+  return withTiming("scan", async () => {
+    try {
+      return await scan(req, res);
+    } finally {
+      report();
+    }
+  });
+}
+
+async function scan(req, res) {
   // 1) CORS / method (mirrors word-info)
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") {
@@ -1599,13 +1627,15 @@ export default async function handler(req, res) {
   //     upsert below overwrites it in place — no migration needed to reshape.
   if (sb) {
     try {
-      const { data, error } = await sb
-        .from("image_targets")
-        .select("targets, v, verified")
-        .eq("image_key", imageKey)
-        .eq("lang", lang)
-        .eq("level", level)
-        .maybeSingle();
+      const { data, error } = await timed("db.read", () =>
+        sb
+          .from("image_targets")
+          .select("targets, v, verified")
+          .eq("image_key", imageKey)
+          .eq("lang", lang)
+          .eq("level", level)
+          .maybeSingle(),
+      );
       // PostgREST reports failure in `error` rather than by rejecting, so an
       // unchecked read makes a missing table or an anon-key RLS block look
       // exactly like a cache miss: the game keeps working and silently re-bills
@@ -1717,22 +1747,24 @@ export default async function handler(req, res) {
   // 6) ONE vision call. temperature 0 for determinism, same as word-image.
   let resp;
   try {
-    resp = await openai.chat.completions.create({
-      model: MODEL,
-      temperature: 0,
-      max_tokens: 1400,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: buildSystemPrompt(lang, level) },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: buildUserText(description, lang, misses) },
-            { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
-          ],
-        },
-      ],
-    });
+    resp = await timed("generate", () =>
+      openai.chat.completions.create({
+        model: MODEL,
+        temperature: 0,
+        max_tokens: 1400,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: buildSystemPrompt(lang, level) },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: buildUserText(description, lang, misses) },
+              { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+            ],
+          },
+        ],
+      }),
+    );
   } catch (e) {
     console.error("[convo-image-targets] model call failed", e?.message || e);
     return res.status(200).json(empty(imageKey, lang, "model_failed"));
