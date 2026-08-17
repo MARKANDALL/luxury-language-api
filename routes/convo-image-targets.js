@@ -858,9 +858,96 @@ function applyEnrichment(base, raw, lang, seed) {
   };
 }
 
+/** Intersection over union of two normalized boxes. 0 when they do not meet. */
+function iou(a, b) {
+  if (!a || !b) return 0;
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const r = Math.min(a.x + a.w, b.x + b.w);
+  const t2 = Math.min(a.y + a.h, b.y + b.h);
+  const inter = Math.max(0, r - x) * Math.max(0, t2 - y);
+  if (inter <= 0) return 0;
+  const union = a.w * a.h + b.w * b.h - inter;
+  return union > 0 ? inter / union : 0;
+}
+
 /**
- * Sanitize a whole LOCATE response: drop duplicates by head noun, cap at
- * MAX_TARGETS.
+ * How much two boxes must agree before they are called ONE OBJECT.
+ *
+ * IoU, and specifically NOT containment, and that choice is the whole design.
+ * Containment would fold "the lapel" into "the blazer", and parts of objects are
+ * exactly what C1 and C2 are FOR: the high bands are told to name a hat's brim
+ * and a shirt's cuff, and a containment rule would delete every one of them. Two
+ * labels for the SAME EXTENT score high on IoU; a small part inside a big garment
+ * scores low, because the union is the whole garment.
+ *
+ * 0.6 is deliberately high. A wrong merge silently deletes a real target, and a
+ * missed merge leaves the duplicate the head-word check already mostly catches.
+ */
+const SAME_REFERENT_IOU = 0.6;
+
+/**
+ * Which of two labels for one object to keep.
+ *
+ * Band-aware, because "better" is not a property of the label on its own. At the
+ * low bands the simpler word is the one the learner can use, so the shorter label
+ * wins; at the high bands the point is precision, so the longer, more specific
+ * one does. In the middle, and on a tie, the model's own ordering stands: it led
+ * with that label for a reason.
+ *
+ * The case that produced this: one round served "a suit jacket" and "a blazer" as
+ * two targets on one garment, so the same coat was asked about twice and the
+ * scene recap described a man wearing both.
+ */
+function betterLabel(kept, candidate, level) {
+  const a = String(kept.label || "").length;
+  const b = String(candidate.label || "").length;
+  if (a === b) return kept;
+  if (HIGH_BANDS.has(level)) return b > a ? candidate : kept;
+  if (level === "A1" || level === "A2") return b < a ? candidate : kept;
+  return kept;
+}
+
+/**
+ * Fold labels that name the same object in the picture into one target.
+ *
+ * The head-word check above cannot catch this and never could: "a blazer" and "a
+ * suit jacket" share no head word, so by every text test they are two different
+ * words. They are two names for one garment, and the only thing that knows that
+ * is WHERE THEY ARE.
+ */
+function dedupeSameReferent(list, level) {
+  const out = [];
+  for (const t of list) {
+    const boxes = Array.isArray(t.boxes) && t.boxes.length ? t.boxes : t.box ? [t.box] : [];
+    const primary = boxes[0];
+    // A target with no box cannot be compared this way, and is kept: it is the
+    // shape of a row generated before boxes existed, not a duplicate.
+    if (!primary) {
+      out.push(t);
+      continue;
+    }
+    const hitIdx = out.findIndex((kept) => {
+      const keptBoxes = Array.isArray(kept.boxes) && kept.boxes.length ? kept.boxes : kept.box ? [kept.box] : [];
+      return keptBoxes[0] && iou(keptBoxes[0], primary) >= SAME_REFERENT_IOU;
+    });
+    if (hitIdx < 0) {
+      out.push(t);
+      continue;
+    }
+    const winner = betterLabel(out[hitIdx], t, level);
+    console.log(
+      `[convo-image-targets] same referent: "${out[hitIdx].label}" and "${t.label}" ` +
+        `overlap ${iou((out[hitIdx].boxes?.[0] || out[hitIdx].box), primary).toFixed(2)}, keeping "${winner.label}"`,
+    );
+    out[hitIdx] = winner;
+  }
+  return out;
+}
+
+/**
+ * Sanitize a whole LOCATE response: drop duplicates by head noun and by
+ * referent, cap at MAX_TARGETS.
  */
 function sanitizeLocatedList(rawList, lang, level) {
   const out = [];
@@ -880,7 +967,9 @@ function sanitizeLocatedList(rawList, lang, level) {
     out.push(t);
     if (out.length === maxTargetsFor(level)) break;
   }
-  return out;
+  // Applied AFTER the head-word pass and BEFORE verification, so a duplicate
+  // never costs a crop check, and never reaches the round or the recap.
+  return dedupeSameReferent(out, level);
 }
 
 // ── Prompt (localized per pack) ─────────────────────────────────────────────
@@ -933,9 +1022,60 @@ const PACK = {
  * locate call needs it to CHOOSE at the right level, and the enrich call needs
  * it to WRITE at the right level, and two copies would drift apart.
  */
+/**
+ * How WIDE to cast the net, per band.
+ *
+ * The complaint this answers: the picks leaned almost entirely on objects the
+ * scenario was about, which made low bands nearly unplayable (a networking event
+ * has no A1 nouns in its subject matter) and wasted the thousand other nameable
+ * things in any photograph. A person is standing there with a hand, a face, hair,
+ * a sleeve and a shoe, and none of it was ever offered.
+ *
+ * The scenario's own words stay the PRIMARY lean at every band, because
+ * practising them is the point of the conversation this picture came from. This
+ * is additive: it says what to reach for once those are taken, and how far to
+ * reach.
+ *
+ * Kept separate from LEVEL_GUIDE, which answers a different question. That one
+ * says how PRECISELY to name a thing; this one says WHICH things are eligible at
+ * all. Merging them is how "name the parts" at C1 turned into "only name the
+ * parts of the scenario's objects".
+ */
+const BREADTH = {
+  A1: `BREADTH AT THIS BAND. Lead with the words this scene is about, then fill the
+round from the UNIVERSAL nameables that are in almost every photograph of people:
+parts of the body (a hand, a finger, an arm, hair, an eye, a face), clothes (a
+shirt, a shoe, a jacket), and the plainest everyday objects in frame. A beginner
+must be able to play ANY picture, and they can only do that if the round is not
+limited to what the conversation happened to be about. Prefer a universal word a
+beginner already knows over a scene-specific word they do not.`,
+  A2: `BREADTH AT THIS BAND. Lead with the words this scene is about, then fill the
+round from the UNIVERSAL nameables present in almost any photograph of people:
+body parts, clothing, bags, chairs, cups, phones, doors, windows. The scene's own
+subject matter will not yield enough words at this level in most pictures, and
+padding it with harder ones is the failure. Reach wider instead.`,
+  B1: `BREADTH AT THIS BAND. Lead with the words this scene is about, then mix in
+ordinary objects from anywhere in the frame. Both halves are fair game; neither
+should crowd the other out.`,
+  B2: `BREADTH AT THIS BAND. Lead with the words this scene is about, then mix in
+specific names for ordinary objects anywhere in the frame. Both halves are fair
+game; neither should crowd the other out.`,
+  C1: `BREADTH AT THIS BAND. Lead with the words this scene is about, then go as
+specific and as technical as the picture honestly allows, ANYWHERE in the frame.
+Fine parts, materials, fastenings, trims and fittings all count, and they count on
+background objects as much as on the subject. The whole photograph is available,
+not just what the conversation was about.`,
+  C2: `BREADTH AT THIS BAND. Lead with the words this scene is about, then go as
+specific and as technical as the picture honestly allows, ANYWHERE in the frame.
+Trade names for parts, materials, and the fine detail of any object in shot are
+all in range. The whole photograph is available, not just what the conversation
+was about.`,
+};
+
 function bandText(lang, level) {
   const p = PACK[lang];
   const guide = level ? LEVEL_GUIDE[lang]?.[level] : "";
+  const breadth = level && BREADTH[level] ? `\n\n${BREADTH[level]}` : "";
   const band = guide
     ? `
 
@@ -943,7 +1083,7 @@ VOCABULARY LEVEL: ${guide}
 
 Pick targets whose NAMES sit at that level. The things themselves are whatever is
 in the picture; the level decides which of them are worth naming and how precisely
-to name them.`
+to name them.${breadth}`
     : "";
 
   // The self-check the two high bands need. Stated as a test the model applies
@@ -1723,10 +1863,27 @@ async function runTopUp(openai, model, imageUrl, { description, lang, level, ima
       // already passed, and running them through again only risks losing one.
       const key = (l) => headWord(l, lang) || headNoun(l, lang) || fold(l);
       const taken = new Set(out.map((t) => key(t.label)));
+      const keptBoxes = out
+        .map((t) => (Array.isArray(t.boxes) && t.boxes.length ? t.boxes[0] : t.box))
+        .filter(Boolean);
       const fresh = sanitizeLocatedList(extraRaw, lang, level).filter((m) => {
         const head = key(m.label);
         if (taken.has(head)) return false;
+        // And by REFERENT against what is already kept. A top-up is asked for
+        // MORE things in a picture it has already picked over, which is exactly
+        // where a second name for a garment it already returned comes from.
+        //
+        // The fresh one is DROPPED rather than compared for quality, unlike the
+        // generation pass. Everything in `out` has already survived a crop check
+        // and this candidate has not, so trading a verified target for an
+        // unverified one would be paying for a better word with a worse box.
+        const mine = Array.isArray(m.boxes) && m.boxes.length ? m.boxes[0] : m.box;
+        if (mine && keptBoxes.some((b) => iou(b, mine) >= SAME_REFERENT_IOU)) {
+          console.log(`[convo-image-targets] top-up dropped "${m.label}": same referent as a kept target`);
+          return false;
+        }
         taken.add(head);
+        if (mine) keptBoxes.push(mine);
         return true;
       });
       if (fresh.length) {

@@ -297,6 +297,150 @@ describe("convo-image-targets exclusions", () => {
   });
 });
 
+// ── Same-referent dedup ─────────────────────────────────────────────────────
+//
+// One round served "a suit jacket" and "a blazer" as two targets on the same
+// garment. The head-word check cannot catch that and never could: they share no
+// head word, so by every TEXT test they are two different words. The only thing
+// that knows they are one coat is where they are.
+
+const boxed = (label, box, point) => ({
+  label,
+  point: point || { x: box.x + box.w / 2, y: box.y + box.h / 2 },
+  box,
+  cloze: `Here is ___.`,
+  choices: [label, "a", "b", "c"],
+});
+
+describe("convo-image-targets same-referent dedup", () => {
+  it("folds two names for one garment into a single target", async () => {
+    const coat = { x: 0.3, y: 0.2, w: 0.3, h: 0.5 };
+    mockRound([
+      boxed("a suit jacket", coat),
+      // Same coat, drawn a shade differently by the model.
+      boxed("a blazer", { x: 0.31, y: 0.21, w: 0.29, h: 0.49 }),
+      boxed("a mug", { x: 0.8, y: 0.8, w: 0.08, h: 0.08 }),
+    ]);
+    const api = await client();
+    const res = await post(api, { level: "B1" });
+
+    const labels = res.body.targets.map((t) => t.label);
+    expect(labels).toContain("a mug");
+    // One of the two coat words, never both.
+    const coats = labels.filter((l) => l === "a suit jacket" || l === "a blazer");
+    expect(coats).toHaveLength(1);
+  });
+
+  it("does NOT fold a part into the object it sits on", async () => {
+    // The rule that makes the high bands possible. A lapel inside a blazer is
+    // contained by it, and containment is exactly what this must not use: C1 and
+    // C2 are told to name a hat's brim and a shirt's cuff.
+    const blazer = { x: 0.3, y: 0.2, w: 0.3, h: 0.5 };
+    const lapel = { x: 0.33, y: 0.24, w: 0.06, h: 0.12 };
+    mockRound([boxed("the blazer", blazer), boxed("the lapel", lapel)]);
+    const api = await client();
+    const res = await post(api, { level: "C1" });
+
+    const labels = res.body.targets.map((t) => t.label);
+    expect(labels).toContain("the blazer");
+    expect(labels).toContain("the lapel");
+  });
+
+  it("keeps the MORE specific label at a high band", async () => {
+    // Deliberately NOT the blazer/suit-jacket pair here. At C1 and C2 the
+    // existing too_basic rule drops "a suit jacket" on its head word before the
+    // dedup ever sees it, which is correct and is why that pair belongs in the
+    // beginner-band test below. Two labels that both survive a high band are
+    // what this actually needs.
+    // The pair also needs DIFFERENT head words, or the head-word pass upstream
+    // folds them before this rule is reached: "a carabiner" and "a locking
+    // carabiner" are one head word and never both arrive here.
+    const fitting = { x: 0.3, y: 0.2, w: 0.2, h: 0.2 };
+    mockRound([
+      boxed("a ferrule", fitting),
+      boxed("a metal collar", { x: 0.3, y: 0.21, w: 0.2, h: 0.19 }),
+    ]);
+    const api = await client();
+    const res = await post(api, { level: "C2" });
+    const labels = res.body.targets.map((t) => t.label);
+    expect(labels).toContain("a metal collar");
+    expect(labels).not.toContain("a ferrule");
+  });
+
+  it("keeps the SIMPLER label at a beginner band", async () => {
+    const coat = { x: 0.3, y: 0.2, w: 0.3, h: 0.5 };
+    mockRound([
+      boxed("a suit jacket", coat),
+      boxed("a blazer", { x: 0.3, y: 0.21, w: 0.3, h: 0.49 }),
+    ]);
+    const api = await client();
+    const res = await post(api, { level: "A2" });
+    expect(res.body.targets.map((t) => t.label)).toContain("a blazer");
+  });
+
+  it("leaves two genuinely separate objects alone", async () => {
+    mockRound([
+      boxed("a mug", { x: 0.1, y: 0.1, w: 0.1, h: 0.1 }),
+      boxed("a plate", { x: 0.6, y: 0.6, w: 0.1, h: 0.1 }),
+    ]);
+    const api = await client();
+    const res = await post(api, { level: "B1" });
+    const labels = res.body.targets.map((t) => t.label);
+    expect(labels).toContain("a mug");
+    expect(labels).toContain("a plate");
+  });
+
+  it("keeps a boxless target rather than treating it as a duplicate", async () => {
+    mockRound([
+      { label: "the sky", point: { x: 0.5, y: 0.1 }, cloze: "Here is ___.", choices: ["the sky", "a", "b", "c"] },
+      boxed("a mug", { x: 0.1, y: 0.1, w: 0.1, h: 0.1 }),
+    ]);
+    const api = await client();
+    const res = await post(api, { level: "B1" });
+    expect(res.body.targets.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ── Band-aware breadth ──────────────────────────────────────────────────────
+
+describe("convo-image-targets breadth by band", () => {
+  it("tells a beginner band to reach for universal nameables", async () => {
+    const api = await client();
+    await post(api, { level: "A1" });
+    const sys = callsOf("generate")[0][0].messages[0].content;
+    expect(sys).toContain("BREADTH AT THIS BAND");
+    expect(sys).toContain("a hand");
+    expect(sys).toContain("play ANY picture");
+  });
+
+  it("tells a high band it may go anywhere in the frame", async () => {
+    const api = await client();
+    await post(api, { level: "C2" });
+    const sys = callsOf("generate")[0][0].messages[0].content;
+    expect(sys).toContain("BREADTH AT THIS BAND");
+    expect(sys).toContain("ANYWHERE in the frame");
+  });
+
+  it("keeps the scenario's own words the primary lean at EVERY band", async () => {
+    // The breadth is additive. Practising the conversation's words is still the
+    // point, so every band leads with them.
+    for (const level of ["A1", "A2", "B1", "B2", "C1", "C2"]) {
+      createSpy.mockClear();
+      const api = await client();
+      await post(api, { level });
+      const sys = callsOf("generate")[0][0].messages[0].content;
+      expect(sys, `band ${level}`).toContain("Lead with the words this scene is about");
+    }
+  });
+
+  it("says nothing about breadth when there is no band at all", async () => {
+    const api = await client();
+    await post(api, { level: "" });
+    const sys = callsOf("generate")[0][0].messages[0].content;
+    expect(sys).not.toContain("BREADTH AT THIS BAND");
+  });
+});
+
 // ── The preference list ─────────────────────────────────────────────────────
 //
 // What the learner is already working on: words they have KEPT and words that
