@@ -441,6 +441,87 @@ describe("convo-image-targets breadth by band", () => {
   });
 });
 
+// ── Six bands, one engine ───────────────────────────────────────────────────
+
+describe("convo-image-targets band calibration", () => {
+  it("gives the LOW bands a self-check that names the filed failure", async () => {
+    // "an espresso machine" came back in a live A2 round. The band text already
+    // forbade specialist names in general terms and that was not enough, so the
+    // check names it and gives the plain word beside it.
+    for (const level of ["A1", "A2"]) {
+      createSpy.mockClear();
+      const api = await client();
+      await post(api, { level });
+      const sys = callsOf("generate")[0][0].messages[0].content;
+      expect(sys, level).toContain(`LEVEL SELF-CHECK (${level} only`);
+      expect(sys, level).toContain("an espresso machine");
+      expect(sys, level).toContain("is a coffee maker");
+    }
+  });
+
+  it("gives the HIGH bands the opposite check, and never both", async () => {
+    const api = await client();
+    await post(api, { level: "C2" });
+    const sys = callsOf("generate")[0][0].messages[0].content;
+    expect(sys).toContain("LEVEL SELF-CHECK (C2 only");
+    expect(sys).not.toContain("is a coffee maker");
+  });
+
+  it("leaves the middle bands with neither", async () => {
+    for (const level of ["B1", "B2"]) {
+      createSpy.mockClear();
+      const api = await client();
+      await post(api, { level });
+      const sys = callsOf("generate")[0][0].messages[0].content;
+      expect(sys, level).not.toContain("LEVEL SELF-CHECK");
+    }
+  });
+
+  it("tells the LOW bands to accept the sharper word as an alias", async () => {
+    // The other half of asking plainly. A beginner asked for "a cup" who says
+    // "an espresso cup" must win, and the aliases are the credit path.
+    const api = await client();
+    await post(api, { level: "A2" });
+    const enrich = callsOf("enrich")[0][0].messages[0].content;
+    expect(enrich).toContain("THE SHARPER WORDS TOO");
+    expect(enrich).toContain("an espresso cup");
+    expect(enrich).toContain("Ask plainly, accept generously");
+  });
+
+  it("does not tell a high band to reach downward in its aliases", async () => {
+    const api = await client();
+    await post(api, { level: "C1" });
+    const enrich = callsOf("enrich")[0][0].messages[0].content;
+    expect(enrich).not.toContain("THE SHARPER WORDS TOO");
+  });
+
+  it("sets the CLUE SENTENCE level per band, shortest at A1", async () => {
+    const api = await client();
+    await post(api, { level: "A1" });
+    const enrich = callsOf("enrich")[0][0].messages[0].content;
+    expect(enrich).toContain("SENTENCE LEVEL");
+    expect(enrich).toContain("Max 8 words");
+    expect(enrich).toContain("No subordinate clauses");
+  });
+
+  it("lets C2 write at full range", async () => {
+    const api = await client();
+    await post(api, { level: "C2" });
+    const enrich = callsOf("enrich")[0][0].messages[0].content;
+    expect(enrich).toContain("SENTENCE LEVEL");
+    expect(enrich).toContain("Fully idiomatic");
+  });
+
+  it("says the sentence level governs the CLUE and not the answer word", async () => {
+    // The confusion this prevents: a band rule that reads as being about the
+    // noun would undo LEVEL_GUIDE, which has already settled the noun.
+    const api = await client();
+    await post(api, { level: "B1" });
+    const enrich = callsOf("enrich")[0][0].messages[0].content;
+    expect(enrich).toContain("not the answer word");
+  });
+});
+
 // ── The preference list ─────────────────────────────────────────────────────
 //
 // What the learner is already working on: words they have KEPT and words that

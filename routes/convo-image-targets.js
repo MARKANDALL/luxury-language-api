@@ -308,6 +308,32 @@ const CEFR_VALUES = new Set(["A1", "A2", "B1", "B2", "C1", "C2"]);
 // The bands where a basic noun is a failure rather than a gentle round.
 const HIGH_BANDS = new Set(["C1", "C2"]);
 
+// The other end, and it needs teeth of its own for the same reason the high end
+// did. "an espresso machine" came back in a live A2 round: the band description
+// says specialist names are out, and the description alone did not hold.
+const LOW_BANDS = new Set(["A1", "A2"]);
+
+/**
+ * How complex the game's own SENTENCES may be at each band.
+ *
+ * The clue sentence is the thing a learner actually reads, and it was being
+ * written at whatever register the model felt like: a C2-shaped sentence around
+ * an A1 noun is a C2 sentence, and it is the sentence, not the noun, that
+ * decides whether a beginner can read the question at all.
+ *
+ * Deliberately not LEVEL_GUIDE, which is about which NOUNS are worth naming, and
+ * deliberately the same six-step shape ispy-recap uses for the scene recap, so
+ * the two surfaces a learner reads are calibrated the same way.
+ */
+const SENTENCE_BAND = {
+  A1: "Very short and very plain. Present tense. No subordinate clauses. Max 8 words.",
+  A2: "Short and plain. Present or simple past. At most one linking word. Max 10 words.",
+  B1: "Ordinary sentences of comfortable length. Common connectors are fine. Max 12 words.",
+  B2: "Natural sentences with some subordination and varied verb forms. Max 14 words.",
+  C1: "Fluent, well-joined sentences. Precise verbs and natural modification. Max 14 words.",
+  C2: "Fully idiomatic, with the range a native writer would use. Max 14 words.",
+};
+
 // How few targets a round may be served with before it is worth paying for a
 // fresh vision call. Below four, the round is over before it starts.
 const MIN_SERVED_TARGETS = 4;
@@ -1115,7 +1141,29 @@ RETURN AS FEW AS ${MIN_SERVED_TARGETS} TARGETS at this band if that is all the p
 holds. A short round of real ${level} words is the goal; a long round padded with
 easy ones is the failure.`
     : "";
-  return { band, bandCheck };
+
+  // The mirror image, and it exists for the same reason: a live A2 round came
+  // back with "an espresso machine". The band text already forbade specialist
+  // names in general terms, and general terms were not enough, so this names the
+  // failure and gives the plain word beside each one.
+  const lowCheck = LOW_BANDS.has(level)
+    ? `
+
+LEVEL SELF-CHECK (${level} only, do this last). Read your labels back one at a time
+and ask: is this the word a beginner meets FIRST for this thing? If a plainer
+everyday word names the same object, the plainer word IS the label.
+"an espresso machine" is a coffee maker. "a mug" is a cup. "a pastry" is bread.
+"a blazer" is a jacket. "a carafe" is a jug. "a barista" is a worker.
+A brand name, a model, a technical term or a specialist compound is never an
+${level} label, however clearly you can see the thing.
+If the only honest name for something is a specialist one, DROP it and name
+something else in the picture instead. There is always something plainer in
+frame: a hand, a cup, a chair, a window, a shirt.
+The learner may still ANSWER with the sharper word and be marked right; that is
+handled by the aliases, and it is not a reason to ask with the sharper word.`
+    : "";
+
+  return { band, bandCheck: `${bandCheck}${lowCheck}` };
 }
 
 /**
@@ -1241,11 +1289,32 @@ Output MUST be valid JSON only, exactly:
 function buildEnrichPrompt(lang, level, labels) {
   const p = PACK[lang];
   const { band } = bandText(lang, level);
+  const sentence = SENTENCE_BAND[level]
+    ? `
+
+SENTENCE LEVEL: ${SENTENCE_BAND[level]}
+This governs the CLUE SENTENCE and the riddle, not the answer word. The answer
+word's level is already settled; what is open here is the language wrapped around
+it, and a beginner cannot read an A1 noun inside a C2 sentence.`
+    : "";
+
+  // Upward credit, and it only needs saying at the low bands. Higher up, the
+  // label already IS the precise word and the aliases run the other way.
+  const upward = LOW_BANDS.has(level)
+    ? `
+  * THE SHARPER WORDS TOO, and this matters most at this band. The label is the
+    PLAIN word because that is what a beginner should be asked for; a learner who
+    happens to know a better one must never be told they are wrong for it. If the
+    label is "a cup", then "an espresso cup", "a coffee cup", "a teacup" and
+    "a mug" all belong here. If it is "a coffee maker", then "an espresso
+    machine" and "a coffee machine" belong here. Ask plainly, accept generously.`
+    : "";
+
   return `
 You are looking at a photorealistic illustration from a language-learning
 conversation. Someone has already chosen the words this round will teach and
 checked that each one is really in the picture. Your job is to write the round
-for them.${band}
+for them.${band}${sentence}
 
 Write for EVERY one of these, in this order, and change none of them:
 ${labels.map((l, i) => `${i + 1}. ${l}`).join("\n")}
@@ -1258,7 +1327,7 @@ For each one return:
   target word replaced by exactly three underscores: ___
   Example: "${p.clozeExample}"
   The sentence must NOT contain the answer word anywhere else, and must read like
-  something a person would say. Max 14 words.
+  something a person would say, at the SENTENCE LEVEL given above.
   It must also be LITERALLY TRUE OF THIS IMAGE. Describe only what is actually
   depicted: do not write "holding" unless the thing is in someone's hand, do not
   write "wearing" unless it is on their body, do not write "on the table" unless
@@ -1277,7 +1346,7 @@ For each one return:
   * a shorter everyday form of a compound ("monitor" for "a computer monitor");
   * every common SYNONYM (${p.synonymExample});
   * every common REGIONAL VARIANT, including the ones from other countries
-    (${p.regionExample}).
+    (${p.regionExample}).${upward}
 - "americanNote": include this field when the names above differ BY REGION OR
   COUNTRY and one of them is the usual one in ${p.defaultRegion}.
   THE TEST IS THE LIST YOU JUST WROTE. If any two names in your own "aliases"
