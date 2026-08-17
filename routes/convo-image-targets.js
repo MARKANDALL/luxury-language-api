@@ -290,6 +290,12 @@ const MAX_EXCLUDED = 24;
 // where nothing new ever appears is the opposite of what a picture is for.
 const MAX_PREFERRED = 12;
 
+// Words the learner met lately on OTHER pictures. Capped lower than the
+// exclusions because this one is a STEER and a long steer becomes a rule by
+// weight of repetition, which is exactly what it must not be: a second cafe
+// really does contain a cup.
+const MAX_AVOIDED = 16;
+
 // A box smaller than this is a mis-drawn sliver rather than an object; a box
 // bigger than this in BOTH directions is the whole scene, which points at
 // nothing. Either way the point is the better answer.
@@ -2008,7 +2014,32 @@ function preferBlock(prefer) {
   ];
 }
 
-function buildUserText(description, lang, misses, level, exclude, prefer) {
+/**
+ * The soft steer away from what this learner met on OTHER pictures.
+ *
+ * Weaker than the exclude list on purpose, and the wording carries the whole
+ * distinction. `exclude` is a rule and can be, because it is per picture and the
+ * picture still holds everything else. This one crosses pictures, and a second
+ * cafe genuinely does contain a cup: refusing to ever teach it again would be a
+ * worse failure than teaching it twice. So it says "when the picture offers an
+ * alternative", and says outright that returning one of them is fine when it
+ * does not.
+ */
+function avoidBlock(avoid) {
+  if (!avoid?.length) return [];
+  return [
+    "",
+    "This learner has met the words below very recently, on OTHER pictures. Where",
+    "this picture offers an equally good alternative, choose the alternative, so",
+    "that two similar scenes do not teach the same handful of obvious objects.",
+    "This is a steer and not a rule. If one of them is genuinely among the best",
+    "targets here, keep it: a repeat is a much smaller failure than a bad target",
+    "or a thin round.",
+    avoid.map((w) => `- ${w}`).join("\n"),
+  ];
+}
+
+function buildUserText(description, lang, misses, level, exclude, prefer, avoid) {
   const p = PACK[lang];
   const lines = [
     `Find ${MIN_TARGETS}-${maxTargetsFor(level)} vocabulary targets in this image. Answer in ${p.langName}.`,
@@ -2045,6 +2076,7 @@ function buildUserText(description, lang, misses, level, exclude, prefer) {
     );
   }
   lines.push(...preferBlock(prefer));
+  lines.push(...avoidBlock(avoid));
   if (description) {
     lines.push(
       "",
@@ -2146,6 +2178,19 @@ async function scan(req, res) {
       return true;
     })
     .slice(0, MAX_PREFERRED);
+  // Words met lately on OTHER pictures. Deduped against everything already
+  // spoken for, and above all against `prefer`: a word the learner is working on
+  // must never be asked for and steered away from in the same prompt.
+  const avoidSeen = new Set([...misses, ...exclude, ...prefer].map((w) => w.toLowerCase()));
+  const avoid = (Array.isArray(body?.avoid) ? body.avoid : [])
+    .map((w) => String(w || "").trim().slice(0, 60))
+    .filter((w) => {
+      const k = w.toLowerCase();
+      if (!w || avoidSeen.has(k)) return false;
+      avoidSeen.add(k);
+      return true;
+    })
+    .slice(0, MAX_AVOIDED);
   const imageUrl = (body.imageUrl || "").toString().trim();
   const description = (body.description || "").toString().trim().slice(0, MAX_DESCRIPTION_CHARS);
 
@@ -2308,7 +2353,7 @@ async function scan(req, res) {
           {
             role: "user",
             content: [
-              { type: "text", text: buildUserText(description, lang, misses, level, exclude, prefer) },
+              { type: "text", text: buildUserText(description, lang, misses, level, exclude, prefer, avoid) },
               { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
             ],
           },

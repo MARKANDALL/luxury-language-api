@@ -612,6 +612,36 @@ describe("convo-image-targets preferences", () => {
     expect(text).not.toContain("- pref12");
   });
 
+  it("steers away from words met on OTHER pictures, softly", async () => {
+    const api = await client();
+    await post(api, { avoid: ["cup", "phone"] });
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text).toContain("on OTHER pictures");
+    expect(text).toContain("- cup");
+    // The sentence that keeps it a steer. A second cafe genuinely does contain a
+    // cup, and refusing to ever teach it again is worse than teaching it twice.
+    expect(text).toContain("steer and not a rule");
+  });
+
+  it("never asks for a word and steers away from it in the same prompt", async () => {
+    const api = await client();
+    await post(api, { prefer: ["cup"], avoid: ["cup", "phone"] });
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text).toContain("already working on");
+    expect(text).toContain("- phone");
+    // "cup" appears once, in the preference block, not again in the avoid list.
+    expect(text.split("- cup").length - 1).toBe(1);
+  });
+
+  it("caps the steer lower than the exclusions, because a long steer is a rule", async () => {
+    const many = Array.from({ length: 40 }, (_, i) => `av${i}`);
+    const api = await client();
+    await post(api, { avoid: many });
+    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    expect(text).toContain("- av15");
+    expect(text).not.toContain("- av16");
+  });
+
   it("is never part of the cache key, so one learner cannot fork a picture", async () => {
     const api = await client();
     await post(api, { prefer: ["mug"] });
