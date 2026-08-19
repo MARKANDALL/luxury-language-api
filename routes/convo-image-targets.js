@@ -189,6 +189,41 @@ const MAX_TARGETS = 12;
  */
 const DEEP_TARGETS = 24;
 
+// ── The inventory ───────────────────────────────────────────────────────────
+//
+// v10 rebuilds generation as INVENTORY-FIRST, BAND-SECOND, and the airport
+// diagnosis is the whole argument for it. A C1 request on a check-in scene came
+// back as five garment close-ups and not one airport word, because the band was
+// in the room while the model looked: the C1 prompt said "do not hunt for more
+// objects, name parts and materials", and its self-check said to DROP anything a
+// B1 learner would name on sight, which threw away the boarding pass, the kiosk
+// and the carousel for the crime of being visible.
+//
+// So the LOOKING is band-free now. One pass enumerates what is nameable in the
+// photograph across every granularity; a cheap text pass then decides which
+// entries serve which band and what to call them. The inventory is a property of
+// the PICTURE, cached once per image, shared by every band, every language and
+// every deepening, which is also what makes a level change cheap: the expensive
+// vision look is already done.
+
+// Storage key for the inventory row. Not a CEFR value and not "", so no client
+// request can ever collide with it: the handler gates requested levels to CEFR.
+const INVENTORY_LEVEL_KEY = "__inv1";
+const INVENTORY_LANG_KEY = "xx"; // glosses are plain English; bands translate
+const INV_V = 101; // far from TARGETS_V, so a band row can never read as inventory
+
+// How many entries the first look returns, and how many a mining pass may add.
+// 32 is far past what any band round needs; it exists so six bands and a deep
+// Lightning bank can all draw without a second look at the pixels.
+const INVENTORY_MAX = 32;
+const MINE_MAX = 16;
+
+// The granularities the inventory is asked to cover. "action" is a thing frozen
+// in the frame (pouring, boarding, waving); "state" is a condition (wet, torn,
+// crowded, delayed). Both are nameable and both are exactly what the high bands
+// starve without.
+const GRANULARITIES = ["object", "part", "material", "surface", "state", "action"];
+
 /** The floor a deep scan tops up to, rather than MIN_TARGETS. */
 const DEEP_MIN_TARGETS = 16;
 
@@ -1059,6 +1094,461 @@ function sanitizeLocatedList(rawList, lang, level, deep = false) {
   return dedupeSameReferent(out, level);
 }
 
+// ── The inventory pass ──────────────────────────────────────────────────────
+
+/**
+ * The one vision look. Band-free on purpose: see the constants block above.
+ *
+ * The box discipline lives here now, moved whole from the old locate prompt,
+ * because boxes are a property of the looking and not of the band.
+ */
+function buildInventoryPrompt() {
+  return `
+You are looking at a photorealistic illustration from a language-learning
+conversation. Build its nameable INVENTORY: everything in the picture a person
+could point at and name, across EVERY granularity, so that later passes can
+teach from it at any level from beginner to mastery.
+
+Granularities, and every one of them matters:
+- "object": whole things. A kiosk, a suitcase, a lanyard, a hat.
+- "part": parts of those things. A brim, a cuff, a strap, a screen bezel.
+- "material": what things are made of, where it is visible. Leather, chrome.
+- "surface": distinct surfaces worth naming. A tiled floor, a glass partition.
+- "state": visible conditions. A queue, a crease, a reflection, wear.
+- "action": actions frozen in the frame. Pouring, weighing, boarding.
+
+Return up to ${INVENTORY_MAX} entries. For each:
+- "gloss": a short plain-English noun phrase naming the thing precisely.
+  Prefer the SPECIFIC name: "a boarding pass" not "a paper", "a check-in kiosk"
+  not "a machine". The gloss is what a later pass teaches from, and a vague
+  gloss wastes the entry.
+- "granularity": one of ${JSON.stringify(GRANULARITIES)}.
+- "box": { "x", "y", "w", "h" } - the thing's BOUNDING BOX as fractions of the
+  image: x and y its top-left corner from the left and top edges, w and h its
+  width and height.
+  The box is not decoration: a learner will TAP inside it to answer, so it has
+  to be right.
+  * TIGHT. It must hug the object. A box with room to spare around the thing
+    accepts taps on whatever is beside it.
+  * IT MUST CONTAIN THE THING YOU NAMED. If the box you would draw does not have
+    the object inside it, the entry is wrong. Check this before you keep it.
+  * NEVER A PERSON'S BODY. A box over someone's chest, neck, face or arm is only
+    acceptable when the thing you named IS what they are wearing or holding, and
+    then the box goes around the garment or the item, not the person.
+  * NO VAST SURFACES. Do not target a whole desk, wall, floor, ceiling or
+    counter top as an entry: their boxes swallow half the picture and every tap
+    lands in them. A DISTINCT surface region (a doormat, a tiled splashback) is
+    fine when its box is honest.
+- "boxes": when the picture contains MORE THAN ONE of the thing, list a box for
+  EVERY one of them here, up to ${MAX_INSTANCES}, and still give the clearest one
+  as "box". A learner asked to find "the ticket" in a scene with two tickets
+  will point at whichever they see first, and being told they are wrong for
+  finding the thing they were asked for is the worst answer a game can give.
+  Omit the field when there is only one.
+- "point": { "x": 0.00-1.00, "y": 0.00-1.00 } - the centre of the thing.
+
+Entries must be VISUALLY UNAMBIGUOUS. Before you keep one, look at what
+surrounds it: if a NEARBY thing could plausibly be given the same gloss, the
+question has two right answers. Either make the gloss specific to one of them or
+list both in "boxes".
+
+Do NOT write sentences, questions, clues or wrong answers here. A later pass
+does that, and only for the entries that survive checking. Naming the thing and
+placing it is the whole job.
+
+COUNT CHECK, entry by entry: if there are several of a thing, either list every
+one in "boxes" or make the gloss specific to ONE of them.
+Never pick one of several lookalikes silently.
+
+Before you answer, re-read your own list once and drop anything whose box does not
+contain the thing it names, anything drawn over a person's body that is not
+their clothing or held item, and any vast bare surface.
+
+Output MUST be valid JSON only, exactly:
+{ "inventory": [ { "gloss": "...", "granularity": "object",
+                   "box": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 },
+                   "boxes": [ { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 } ],
+                   "point": { "x": 0.0, "y": 0.0 } } ] }
+`.trim();
+}
+
+/**
+ * The mining variant's user turn: a second look that must not repeat the first.
+ *
+ * The taken-gloss block keeps the exact sentence the old top-up used, because it
+ * is the right sentence and the deepen is the top-up's successor: it fires when
+ * a band or a draw cannot fill from what the inventory already holds.
+ */
+function buildMineText(description, taken, wantGrans, lang, exclude, prefer) {
+  const lines = [
+    `This image has already been inventoried. Find up to ${MINE_MAX} MORE nameable`,
+    `entries, at any granularity, that are genuinely in the picture.`,
+    "",
+    "Already taken, do NOT return any of these or a synonym of one:",
+    taken.map((g) => `- ${g}`).join("\n"),
+  ];
+  if (wantGrans.length) {
+    lines.push(
+      "",
+      `Mine especially these granularities, which the inventory is thinnest on:`,
+      wantGrans.map((g) => `- ${g}`).join("\n"),
+    );
+  }
+  lines.push(
+    "",
+    "Look harder and further into the scene: smaller things, things at the edges,",
+    "things behind or beside the obvious subject, parts of things already listed,",
+    "the materials they are made of, their visible condition. Follow every rule",
+    "you were given. If the picture genuinely holds nothing else worth naming,",
+    "return an empty list rather than inventing something.",
+  );
+  // The learner-shaped blocks ride here too: what to avoid mining, and what to
+  // mine FOR. A mine that rediscovers the excluded words wastes its whole pass.
+  lines.push(...preferBlock(prefer));
+  if (exclude?.length) {
+    lines.push(
+      "",
+      "This learner has ALREADY been taught these words from this picture. Find",
+      "OTHER things. Do not return any of these, or a longer phrase built around",
+      "one of them:",
+      exclude.map((w) => `- ${w}`).join("\n"),
+    );
+  }
+  if (description) {
+    lines.push("", "What this scene is (describe only what you can actually SEE):", description);
+  }
+  return lines.join("\n");
+}
+
+/** Sanitize one raw inventory entry, or null. Ids are assigned by the CALLER. */
+function sanitizeInventoryEntry(raw) {
+  const gloss = String(raw?.gloss || "").trim().replace(/\s+/g, " ").slice(0, 80);
+  if (!gloss) return null;
+  const granularity = GRANULARITIES.includes(raw?.granularity) ? raw.granularity : "object";
+  const box = unitBox(raw?.box);
+  const boxes = (Array.isArray(raw?.boxes) ? raw.boxes : [])
+    .map(unitBox)
+    .filter(Boolean)
+    .slice(0, MAX_INSTANCES);
+  let point = null;
+  const px = Number(raw?.point?.x);
+  const py = Number(raw?.point?.y);
+  // STRICT, not clamped. A point at x=28 is the percentages-as-fractions model
+  // regression, and clamping it into the frame would hide exactly the failure
+  // the no_valid_targets diagnostics exist to catch.
+  if (Number.isFinite(px) && Number.isFinite(py) && px >= 0 && px <= 1 && py >= 0 && py <= 1) {
+    point = { x: clampPoint(px), y: clampPoint(py) };
+  }
+  if (!point && box) point = { x: clampPoint(box.x + box.w / 2), y: clampPoint(box.y + box.h / 2) };
+  if (!point) return null;
+  return { gloss, granularity, ...(box ? { box } : null), ...(boxes.length > 1 ? { boxes } : null), point };
+}
+
+/**
+ * Run one inventory look (first or mining) and return sanitized entries.
+ * Ids are assigned here, offset past what already exists, so a mined entry can
+ * never collide with a cached one.
+ */
+async function runInventory(openai, model, imageUrl, { description, taken = [], wantGrans = [], lang = "en", exclude = [], prefer = [], startId = 0 }) {
+  const { jsonrepair } = await import("jsonrepair");
+  const mining = taken.length > 0;
+  const userText = mining
+    ? buildMineText(description, taken, wantGrans, lang, exclude, prefer)
+    : [
+        "Build the inventory for this image.",
+        description ? `\nWhat this scene is (describe only what you can actually SEE):\n${description}` : "",
+      ].join("");
+  const resp = await timed(mining ? "mine" : "inventory", () =>
+    openai.chat.completions.create({
+      model,
+      temperature: 0,
+      // 32 entries with boxes and glosses. At 2800 the tail of a full inventory
+      // risks the same silent truncation the old locate call once hit.
+      max_tokens: 3600,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: buildInventoryPrompt() },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: userText },
+            { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+          ],
+        },
+      ],
+    }),
+  );
+  const raw = resp?.choices?.[0]?.message?.content || "{}";
+  let obj;
+  try {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      obj = JSON.parse(jsonrepair(raw));
+    }
+  } catch (e) {
+    const err = new Error(e?.message || "unparseable");
+    err.code = "bad_model_json";
+    throw err;
+  }
+  const list = Array.isArray(obj?.inventory) ? obj.inventory : [];
+  const out = [];
+  const seen = new Set(taken.map((g) => fold(g)));
+  for (const r of list) {
+    const e = sanitizeInventoryEntry(r);
+    if (!e) continue;
+    const key = fold(e.gloss);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ id: startId + out.length, ...e });
+    if (out.length >= (mining ? MINE_MAX : INVENTORY_MAX)) break;
+  }
+  // rawCount is what the model OFFERED, kept beside what survived, because
+  // "found nothing" and "found things that all failed validation" are opposite
+  // failures and the handler reports them apart.
+  return { entries: out, rawCount: list.length };
+}
+
+/** The inventory row, if this picture has one. */
+async function readInventory(sb, imageKey) {
+  if (!sb) return null;
+  try {
+    const { data, error } = await timed("db.readInv", () =>
+      sb
+        .from("image_targets")
+        .select("targets, v")
+        .eq("image_key", imageKey)
+        .eq("lang", INVENTORY_LANG_KEY)
+        .eq("level", INVENTORY_LEVEL_KEY)
+        .maybeSingle(),
+    );
+    if (error) {
+      console.warn("[convo-image-targets] inventory read failed:", error.message);
+      return null;
+    }
+    if (data?.v !== INV_V || !Array.isArray(data?.targets) || !data.targets.length) return null;
+    return data.targets;
+  } catch (e) {
+    console.warn("[convo-image-targets] inventory read failed", e?.message || e);
+    return null;
+  }
+}
+
+/** Persist the inventory. Best effort: a cacheless run still plays. */
+async function writeInventory(sb, imageKey, inventory) {
+  if (!sb) return;
+  try {
+    const { error } = await timed("db.writeInv", () =>
+      sb.from("image_targets").upsert(
+        {
+          image_key: imageKey,
+          lang: INVENTORY_LANG_KEY,
+          level: INVENTORY_LEVEL_KEY,
+          targets: inventory,
+          v: INV_V,
+          verified: 0,
+          model: pickModel(),
+        },
+        { onConflict: "image_key,lang,level" },
+      ),
+    );
+    if (error) console.warn("[convo-image-targets] inventory write failed:", error.message);
+  } catch (e) {
+    console.warn("[convo-image-targets] inventory write failed", e?.message || e);
+  }
+}
+
+/** Which granularities the inventory is thinnest on, for a mining pass. */
+function thinnestGranularities(inventory) {
+  const tally = Object.fromEntries(GRANULARITIES.map((g) => [g, 0]));
+  for (const e of inventory) tally[e.granularity] = (tally[e.granularity] || 0) + 1;
+  return GRANULARITIES.filter((g) => tally[g] <= 1);
+}
+
+// ── The band pass ───────────────────────────────────────────────────────────
+
+/**
+ * Choose WORDS for one band from the inventory. Text-only and cheap: the
+ * expensive looking is already done, which is what makes a level change fast
+ * and six bands affordable on one picture.
+ */
+function buildBandPassPrompt(lang, level, deep) {
+  const p = PACK[lang];
+  const { band } = bandText(lang, level);
+  const cap = maxTargetsFor(level, deep);
+
+  // The lesson of the airport diagnosis, stated as the rule it should always
+  // have been. The old self-check asked "would a B1 learner name this THING"
+  // and so threw away the boarding pass for being visible.
+  const wordNotThing = `
+
+JUDGE THE WORD, NOT THE THING. "a carousel", "a kiosk", "a boarding pass",
+"a lanyard" are advanced WORDS for perfectly visible objects, and an advanced
+word on an ordinary object is exactly what the upper bands want. Never reject an
+entry because the OBJECT is obvious; ask only whether the WORD is at the band.`;
+
+  const swap = HIGH_BANDS.has(level)
+    ? `
+
+LEVEL SELF-CHECK (${level} only, do this last). Read your labels back one at a
+time and ask: would a B1 learner produce this WORD on sight? If yes, SWAP the
+entry for a deeper one from the inventory: a part, a material, a state, or the
+precise domain word for the same thing. The inventory is built to hold those.
+Adding a modifier does not raise the band: "a bucket hat" is still a hat. Drop a
+slot only when the inventory truly holds nothing deeper, and prefer a short
+round of real ${level} words over a padded one.`
+    : LOW_BANDS.has(level)
+      ? `
+
+LEVEL SELF-CHECK (${level} only, do this last). Read your labels back one at a
+time and ask: is this the word a beginner meets FIRST for this thing? If a
+plainer everyday word names the same entry, use the plainer word as the label.
+"an espresso machine" is a coffee maker. "a mug" is a cup. "a blazer" is a
+jacket. A brand name, a model, a technical term or a specialist compound is
+never an ${level} label. If an entry has no plain name, SWAP it for a plainer
+entry from the inventory: there is always a hand, a cup, a chair, a shirt.
+The learner may still ANSWER with the sharper word and be marked right; that is
+handled by the aliases, and it is not a reason to ask with the sharper word.`
+      : "";
+
+  return `
+You are choosing WORDS for a language learner from the nameable INVENTORY of a
+photograph. Someone has already looked at the picture and listed everything in
+it; your job is which entries to teach at this level, and what to call them.
+${band}${wordNotThing}${swap}
+
+Pick between ${MIN_TARGETS} and ${cap} entries. For each, return:
+- "id": the inventory entry's id, copied exactly.
+- "label": the word to teach, in ${p.langName}, at this level.
+  ${p.articleRule} ${p.pluralRule}
+- "difficulty": "easy", "medium" or "hard" for a learner at this level.
+
+Prefer entries SPREAD OUT across the picture over five things on one table, and
+entries a learner can point at with confidence over ambiguous ones.
+
+Also return "counts": for EVERY band A1, A2, B1, B2, C1, C2, your honest
+estimate of how many inventory entries could serve a round at that band. This is
+an estimate from the list, not a promise; it powers an honest "try B2 instead"
+when a band comes up short.
+
+Output MUST be valid JSON only, exactly:
+{ "targets": [ { "id": 0, "label": "...", "difficulty": "easy" } ],
+  "counts": { "A1": 0, "A2": 0, "B1": 0, "B2": 0, "C1": 0, "C2": 0 } }
+`.trim();
+}
+
+/** The band pass's user turn: the inventory itself, plus the learner's lists. */
+function buildBandPassUser(inventory, description, lang, misses, level, exclude, prefer, avoid) {
+  const lines = [
+    "The inventory. Each line is: id. gloss (granularity)",
+    ...inventory.map((e) => `${e.id}. ${e.gloss} (${e.granularity})`),
+  ];
+  if (misses?.length) {
+    lines.push(
+      "",
+      "This learner has previously failed to name these words. If ANY of them",
+      "matches an inventory entry and makes a fair target at this level, include",
+      'it and mark it with "revisit": true. Include NONE of them if none is',
+      "really there. Do not stretch:",
+      misses.map((m) => `- ${m}`).join("\n"),
+    );
+  }
+  if (exclude?.length) {
+    lines.push(
+      "",
+      "This learner has ALREADY been taught these words from this picture. Find",
+      "OTHER things. Do not return any of these, or a longer phrase built around",
+      "one of them:",
+      exclude.map((w) => `- ${w}`).join("\n"),
+    );
+  }
+  lines.push(...preferBlock(prefer));
+  lines.push(...avoidBlock(avoid));
+  if (description) {
+    lines.push("", "What this scene is (for grounding):", description);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Run the band pass and JOIN in code: labels from the model, geometry from the
+ * inventory, by id. The model never copies a box, so it can never mangle one.
+ */
+async function runBandPass(openai, model, inventory, { lang, level, deep, description, misses, exclude, prefer, avoid }) {
+  const { jsonrepair } = await import("jsonrepair");
+  const resp = await timed("bandpass", () =>
+    openai.chat.completions.create({
+      model,
+      temperature: 0,
+      max_tokens: 1200,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: buildBandPassPrompt(lang, level, deep) },
+        { role: "user", content: buildBandPassUser(inventory, description, lang, misses, level, exclude, prefer, avoid) },
+      ],
+    }),
+  );
+  const raw = resp?.choices?.[0]?.message?.content || "{}";
+  let obj;
+  try {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      obj = JSON.parse(jsonrepair(raw));
+    }
+  } catch (e) {
+    const err = new Error(e?.message || "unparseable");
+    err.code = "bad_model_json";
+    throw err;
+  }
+  const byId = new Map(inventory.map((e) => [e.id, e]));
+  const seen = new Set();
+  const chosen = [];
+  for (const t of Array.isArray(obj?.targets) ? obj.targets : []) {
+    const entry = byId.get(Number(t?.id));
+    const label = String(t?.label || "").trim();
+    if (!entry || !label || seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    chosen.push({
+      label,
+      difficulty: ["easy", "medium", "hard"].includes(t?.difficulty) ? t.difficulty : "medium",
+      ...(entry.box ? { box: entry.box } : null),
+      ...(entry.boxes ? { boxes: entry.boxes } : null),
+      point: entry.point,
+      ...(t?.revisit === true ? { revisit: true } : null),
+      _invId: entry.id,
+    });
+  }
+  const counts = {};
+  for (const b of ["A1", "A2", "B1", "B2", "C1", "C2"]) {
+    const n = Number(obj?.counts?.[b]);
+    counts[b] = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
+  }
+  return { chosen, counts };
+}
+
+/**
+ * The nearest band that can field a round, by the band pass's own estimate.
+ * Ties prefer the LOWER band, because "come down one" is the kinder offer.
+ */
+function nearestBand(level, counts) {
+  const order = ["A1", "A2", "B1", "B2", "C1", "C2"];
+  const at = order.indexOf(level);
+  if (at < 0) return "";
+  let best = "";
+  let bestDist = Infinity;
+  for (let i = 0; i < order.length; i++) {
+    if (i === at) continue;
+    if ((counts?.[order[i]] || 0) < MIN_TARGETS) continue;
+    const dist = Math.abs(i - at);
+    if (dist < bestDist || (dist === bestDist && i < at)) {
+      bestDist = dist;
+      best = order[i];
+    }
+  }
+  return best;
+}
+
 // ── Prompt (localized per pack) ─────────────────────────────────────────────
 
 const PACK = {
@@ -1160,7 +1650,6 @@ was about.`,
 };
 
 function bandText(lang, level) {
-  const p = PACK[lang];
   const guide = level ? LEVEL_GUIDE[lang]?.[level] : "";
   const breadth = level && BREADTH[level] ? `\n\n${BREADTH[level]}` : "";
   const band = guide
@@ -1172,167 +1661,11 @@ Pick targets whose NAMES sit at that level. The things themselves are whatever i
 in the picture; the level decides which of them are worth naming and how precisely
 to name them.${breadth}`
     : "";
-
-  // The self-check the two high bands need. Stated as a test the model applies
-  // to its own finished list, because the band description alone did not hold:
-  // a C2 round came back with "a first-aid kit", a label this route's own B1
-  // examples use. Naming that failure is the point.
-  const bandCheck = HIGH_BANDS.has(level)
-    ? `
-
-HOW TO FIND ${level} TARGETS. Most photographs hold only three or four objects a
-beginner could name, so do not hunt for more objects. Look HARDER at the objects
-already in front of you and name their PARTS and their MATERIALS. A hat has a
-brim, a crown, an eyelet and a chin cord. A shirt has a collar, a cuff, a hem and
-a seam. A rescue buoy has a tow line, a webbing strap and a moulded handle. Those
-parts are the ${level} round; the hat and the shirt are not.
-
-LEVEL SELF-CHECK (${level} only, do this last). Read your labels back one at a time
-and ask: would a B1 learner name this thing with this same word, on sight? If yes,
-the target is too easy for this round. Replace it with a part of it, the material
-it is made of, or a more precise word for it. If none of those is honestly
-visible, drop the target rather than keeping it.
-Adding a modifier does NOT raise the band. "a bucket hat", "a yellow bucket hat"
-and "a lifeguard shirt" are all a hat and a shirt, and all three fail this check.
-"a first-aid kit" is a B1 label and fails it too; "gauze", "a tourniquet" and
-"the shoulder strap" are the same object seen at ${level}.
-Never target a bare surface (sand, sky, water, waves, a wall, a floor, a desk) at
-any level, and never pad the list with them to reach a count.
-RETURN AS FEW AS ${MIN_SERVED_TARGETS} TARGETS at this band if that is all the picture honestly
-holds. A short round of real ${level} words is the goal; a long round padded with
-easy ones is the failure.`
-    : "";
-
-  // The mirror image, and it exists for the same reason: a live A2 round came
-  // back with "an espresso machine". The band text already forbade specialist
-  // names in general terms, and general terms were not enough, so this names the
-  // failure and gives the plain word beside each one.
-  const lowCheck = LOW_BANDS.has(level)
-    ? `
-
-LEVEL SELF-CHECK (${level} only, do this last). Read your labels back one at a time
-and ask: is this the word a beginner meets FIRST for this thing? If a plainer
-everyday word names the same object, the plainer word IS the label.
-"an espresso machine" is a coffee maker. "a mug" is a cup. "a pastry" is bread.
-"a blazer" is a jacket. "a carafe" is a jug. "a barista" is a worker.
-A brand name, a model, a technical term or a specialist compound is never an
-${level} label, however clearly you can see the thing.
-If the only honest name for something is a specialist one, DROP it and name
-something else in the picture instead. There is always something plainer in
-frame: a hand, a cup, a chair, a window, a shirt.
-The learner may still ANSWER with the sharper word and be marked right; that is
-handled by the aliases, and it is not a reason to ask with the sharper word.`
-    : "";
-
-  return { band, bandCheck: `${bandCheck}${lowCheck}` };
-}
-
-/**
- * LOCATE: what is in this picture, and where.
- *
- * Half of v8's remaining latency was one call doing two jobs. It chose twelve
- * targets AND wrote each one a cloze, four distractors, aliases, a regional
- * note and a riddle, which is about two thousand output tokens, and it did all
- * of that BEFORE crop verification threw away roughly half of them. The route
- * was paying to write teaching material for targets that were about to be
- * deleted.
- *
- * So this call returns only what verification needs in order to judge: the
- * label, where the thing is, and how many of it there are. About a third of the
- * tokens, and every one of them is spent on a target that might survive.
- *
- * It also absorbs what enumerateInstances used to do. That was a separate
- * vision call costing four to eight seconds, asking "now find every instance of
- * the labels you just chose" - a question this call is in a better position to
- * answer anyway, because it is looking at the picture with those labels in
- * mind. The COUNT CHECK below is that job, moved here.
- */
-function buildLocatePrompt(lang, level, deep = false) {
-  const p = PACK[lang];
-  const { band, bandCheck } = bandText(lang, level);
-  return `
-You are looking at a photorealistic illustration from a language-learning
-conversation. Find the things in it that are worth teaching as vocabulary, and
-describe where each one is.${band}
-
-Return between ${MIN_TARGETS} and ${maxTargetsFor(level, deep)} targets. Every label must be in
-${p.langName}. Return JSON only, no markdown.
-
-Do NOT write sentences, questions, clues or wrong answers here. A later pass
-does that, and only for the targets that survive checking. Naming the thing and
-placing it is the whole job.
-
-Choose targets that are:
-- CONCRETE and clearly visible: objects, clothing, furniture, food, parts of the
-  setting. A learner must be able to see the thing and say "that one".
-- SPREAD OUT across the picture, not five things on one table.
-- WORTH LEARNING: everyday nouns a learner will meet again. Skip abstractions,
-  skip anything you are guessing at, and skip anything too small to point at.
-- Prefer things the scene is actually about over background filler.
-- VISUALLY UNAMBIGUOUS. This is the one that matters most. Before you keep a
-  target, look at what surrounds it: if a NEARBY object could plausibly be given
-  the same name, then the question has two right answers and the learner will be
-  told they are wrong for giving one of them. A folder on a desk covered in
-  paper is not a safe target for "pamphlet". Pick a different thing, or write a
-  label that only the thing you mean can answer.
-
-For each target return:
-- "label": the noun. ${p.articleRule} ${p.pluralRule}
-- "box": { "x", "y", "w", "h" } - the thing's BOUNDING BOX as fractions of the
-  image: x and y are its top-left corner from the left and top edges, w and h are
-  its width and height.
-  The box is not decoration: a learner will TAP inside it to answer, so it has
-  to be right.
-  * TIGHT. It must hug the object. A box with room to spare around the thing
-    accepts taps on whatever is beside it.
-  * IT MUST CONTAIN THE THING YOU NAMED. If the box you would draw does not have
-    the object inside it, the target is wrong. Check this before you keep it.
-  * NEVER A PERSON'S BODY. A box over someone's chest, neck, face or arm is only
-    acceptable when the thing you named IS what they are wearing or holding, and
-    then the box goes around the garment or the item, not the person.
-  * NO VAST SURFACES. Do not target a desk, a wall, a floor, a ceiling or a
-    counter top. Their boxes swallow half the picture and every tap lands in
-    them, which makes the question meaningless.
-- "boxes": when the picture contains MORE THAN ONE of the thing you named, list
-  a box for EVERY one of them here, up to ${MAX_INSTANCES}, and still give the clearest one as
-  "box". This matters more than it sounds. A learner asked to find "the ticket"
-  in a street with a ticket on two different windscreens will point at whichever
-  they see first, and being told they are wrong for finding the thing they were
-  asked for is the worst answer this game can give.
-  Your two options, and you must take one of them:
-    either list every instance here, so any of them counts;
-    or write a label that can only mean ONE of them ("the ticket on the red
-    car's windscreen"), and give that one box.
-  Never pick one of several lookalikes silently and hope.
-  Omit this field entirely when there is only one of the thing.
-- "point": { "x": 0.00-1.00, "y": 0.00-1.00 } - the centre of that same thing, as
-  a fallback if the box is unusable.
-- "difficulty": "easy", "medium" or "hard" - roughly how hard this word is for a
-  learner.
-
-COUNT CHECK, and do it target by target, out loud to yourself. For each label
-you wrote, count how many of that thing are actually in this picture. If the
-answer is more than one, you have written a question with several right answers
-and picked one of them in secret. Fix it, one of the two ways:
-  - list every one of them in "boxes", so any of them counts; or
-  - rewrite the label so it can only mean one of them.
-This is not a rare case. A street has several cars, a table has several chairs,
-a face has two eyes, a shirt has several buttons. If you wrote "a car" and there
-are four cars, that target is broken as it stands.
-
-Before you answer, re-read your own list once and drop anything that fails any
-of these: a target another nearby object could just as well answer, a box that
-does not contain the thing it names, a box drawn over a person's body when the
-target is not their clothing or something they hold, and any target that is
-really a surface rather than an object.${bandCheck}
-
-Output MUST be valid JSON only, exactly:
-{ "targets": [ { "label": "...",
-                 "box": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 },
-                 "boxes": [ { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 } ],
-                 "point": { "x": 0.0, "y": 0.0 },
-                 "difficulty": "easy" } ] }
-`.trim();
+  // The band self-checks that used to be assembled here live in
+  // buildBandPassPrompt now, beside the JUDGE-THE-WORD rule the airport
+  // diagnosis forced: they are about choosing WORDS, and this function serves
+  // the enrich call too, which only ever needed the band description.
+  return { band };
 }
 
 /**
@@ -1829,50 +2162,6 @@ async function writeRow(sb, { imageKey, lang, level, targets, model }) {
 }
 
 /**
- * A second ask for the SAME picture, naming what we already have so the model
- * does not simply return it again.
- *
- * The sixth playtest served three targets from a classroom holding far more
- * than three nameable things, and the round could not vary because there was
- * nothing to vary. The scan was not the problem: it returned seven. Crop
- * verification then dropped four, because a box drawn by the generating call is
- * an estimate and half of them do not survive being cut out and looked at.
- *
- * So the floor is enforced where the loss happens, AFTER verification, rather
- * than by asking the first call for more (which returns the same set at the
- * same price) or by loosening the check (which is what produced the boxes the
- * fifth playtest filmed).
- */
-function buildTopUpText(description, lang, have, level, exclude, prefer, deep = false) {
-  const p = PACK[lang];
-  // Asked for the room to the CAP, not the deficit to the floor. Attrition is
-  // the reason this call exists, so requesting exactly what is missing hands
-  // the crop check one candidate and ends up exactly where it started: the
-  // first run of this asked for 1, got 1, lost it, and reported 4 -> 4.
-  const want = maxTargetsFor(level, deep) - have.length;
-  return [
-    `This image has already given ${have.length} vocabulary target(s). Find up to ${want} MORE,`,
-    `different from those, in the same image. Answer in ${p.langName}.`,
-    ...preferBlock(prefer),
-    "",
-    "Already taken, do NOT return any of these or a synonym of one:",
-    // The words this round already holds AND the words this picture taught on
-    // an earlier visit, in one list. The top-up is exactly where a re-visit is
-    // most likely to reach for something familiar, because it is already being
-    // asked for whatever is left.
-    [...have, ...(exclude || [])].map((l) => `- ${l}`).join("\n"),
-    "",
-    "Look harder and further into the scene: smaller things, things at the edges,",
-    "things behind or beside the obvious subject. Follow every rule you were given.",
-    "If the picture genuinely holds nothing else worth naming, return an empty list",
-    "rather than inventing something or renaming what is already taken.",
-    description ? `\nWhat this scene is (describe only what you can actually SEE):\n${description}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-/**
  * Bring a thin set back up to the floor, once, with one extra ask.
  *
  * Called from BOTH paths on purpose. A fresh scan and a cached row being
@@ -1951,112 +2240,123 @@ async function enrichTargets(openai, model, imageUrl, targets, { lang, level, se
   return out;
 }
 
-async function topUpIfThin(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer, deep }) {
+async function topUpIfThin(openai, model, imageUrl, { sb, imageKey, description, lang, level, targets, exclude, prefer, avoid, misses, deep, inventory, offeredIds = [] }) {
   const floor = deep ? DEEP_MIN_TARGETS : MIN_TARGETS;
   if (!targets.length || targets.length >= floor || !imageUrl) return targets;
-  // A deep scan may top up TWICE. One extra ask reliably clears the ordinary
-  // floor of five; getting from a thin set to sixteen is a bigger climb, and
-  // attrition on the second pass is just as real as on the first. Two is the
-  // cap: a third would be paying vision-call money to scrape a picture that has
-  // already said what it holds.
+  // A deep ask may deepen TWICE; an ordinary one once. Each pass must see what
+  // the last one added, or the second would mine for the same entries again.
   const rounds = deep ? 2 : 1;
   let out = targets;
+  let inv = inventory || null;
   for (let n = 0; n < rounds && out.length < floor; n++) {
     const before = out.length;
-    // eslint-disable-next-line no-await-in-loop -- each pass must see what the
-    // last one added, or the second would ask for the same words again.
-    out = await withPhase("topup", () =>
-      runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets: out, exclude, prefer, deep }),
+    // eslint-disable-next-line no-await-in-loop -- see above.
+    const grew = await withPhase("topup", () =>
+      runDeepen(openai, model, imageUrl, {
+        sb, imageKey, description, lang, level,
+        targets: out, exclude, prefer, avoid, misses, deep, inventory: inv,
+        offeredIds,
+      }),
     );
+    out = grew.targets;
+    inv = grew.inventory;
     if (out.length === before) break; // the picture has nothing else to give
   }
   return out;
 }
 
-async function runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer, deep }) {
+/**
+ * DEEPEN: mine the inventory for entries it does not yet hold, then band-pass
+ * the mined entries alone.
+ *
+ * This is the old top-up reborn as what Stage C asks for: a draw that cannot
+ * fill does not re-ask the same question louder, it goes back to the picture
+ * for a GRANULARITY not yet used. The mined entries join the cached inventory,
+ * so every later band and every Lightning bank inherits them for free.
+ *
+ * Band-passing ONLY the mined entries is what keeps this from re-offering the
+ * words the round already holds; the head-word and referent filters below are
+ * the same two the old top-up used, kept because attrition still needs them.
+ */
+async function runDeepen(openai, model, imageUrl, { sb, imageKey, description, lang, level, targets, exclude, prefer, avoid, misses, deep, inventory, offeredIds = [] }) {
   const before = targets.length;
+  let inv = inventory || (await readInventory(sb, imageKey)) || [];
   let out = targets;
+
+  // The two filters every appended candidate goes through: no second marker on
+  // one head word, and no second name for one referent. Both copied whole from
+  // the old top-up, because attrition is the same problem it always was.
+  const key = (l) => headWord(l, lang) || headNoun(l, lang) || fold(l);
+  const taken = new Set(out.map((t) => key(t.label)));
+  const keptBoxes = out
+    .map((t) => (Array.isArray(t.boxes) && t.boxes.length ? t.boxes[0] : t.box))
+    .filter(Boolean);
+  const appendFrom = async (slice) => {
+    const pass = await runBandPass(openai, model, slice, {
+      lang, level, deep, description, misses, exclude, prefer, avoid,
+    });
+    const fresh = sanitizeLocatedList(pass.chosen, lang, level, deep).filter((m) => {
+      const head = key(m.label);
+      if (taken.has(head)) return false;
+      const mine = Array.isArray(m.boxes) && m.boxes.length ? m.boxes[0] : m.box;
+      if (mine && keptBoxes.some((b) => iou(b, mine) >= SAME_REFERENT_IOU)) {
+        console.log(`[convo-image-targets] deepen dropped "${m.label}": same referent as a kept target`);
+        return false;
+      }
+      taken.add(head);
+      if (mine) keptBoxes.push(mine);
+      return true;
+    });
+    if (!fresh.length) return;
+    const okFresh = await verifyTargets(openai, model, imageUrl, fresh, lang);
+    out = [...out, ...okFresh].slice(0, maxTargetsFor(level, deep));
+  };
+
   try {
-    const { jsonrepair } = await import("jsonrepair");
-    const more = await timed("gen", () =>
-      openai.chat.completions.create({
-        model,
-        temperature: 0,
-        // Twelve targets, each carrying a cloze, four choices, aliases, a
-        // riddle and sometimes a regional note. At 1400 the twelfth target was
-        // cut off mid-JSON, and a truncated set does not fail loudly — jsonrepair
-        // salvages the whole targets it can see and the round quietly comes back
-        // short, which is the exact thing the bigger cap exists to prevent.
-        max_tokens: 2800,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: buildLocatePrompt(lang, level, deep) },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label), level, exclude, prefer, deep) },
-              { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
-            ],
-          },
-        ],
-      }),
-    );
-    let extraRaw = [];
-    try {
-      const txt = more?.choices?.[0]?.message?.content || "{}";
-      let obj;
-      try {
-        obj = JSON.parse(txt);
-      } catch {
-        obj = JSON.parse(jsonrepair(txt));
+    // STEP 0, and usually the whole fix: REDRAW from the entries this band was
+    // never offered. The inventory routinely holds dozens the first pass did
+    // not pick, a redraw is one cheap text call, and a mine is a vision call:
+    // paying for new pixels while unread entries sit in the row would be the
+    // old top-up's mistake wearing a new name.
+    const offered = new Set(offeredIds);
+    const unused = offered.size ? inv.filter((e) => !offered.has(e.id)) : [];
+    if (unused.length) {
+      await appendFrom(unused);
+      unused.forEach((e) => offered.add(e.id));
+      if (out.length > before) {
+        console.log(
+          `[convo-image-targets] deepen redraw ${before} -> ${out.length} (no mine needed, key=${imageKey} level=${level || "-"})`,
+        );
       }
-      extraRaw = Array.isArray(obj?.targets) ? obj.targets : [];
-    } catch (e) {
-      console.warn("[convo-image-targets] top-up JSON unparseable:", e?.message || e);
-    }
-    if (extraRaw.length) {
-      // Deduped against what we are KEEPING, by head word, so a top-up that
-      // answers "a chair" beside a kept "a classroom chair" cannot put two
-      // markers on one word. The kept targets are not re-sanitized: they have
-      // already passed, and running them through again only risks losing one.
-      const key = (l) => headWord(l, lang) || headNoun(l, lang) || fold(l);
-      const taken = new Set(out.map((t) => key(t.label)));
-      const keptBoxes = out
-        .map((t) => (Array.isArray(t.boxes) && t.boxes.length ? t.boxes[0] : t.box))
-        .filter(Boolean);
-      const fresh = sanitizeLocatedList(extraRaw, lang, level).filter((m) => {
-        const head = key(m.label);
-        if (taken.has(head)) return false;
-        // And by REFERENT against what is already kept. A top-up is asked for
-        // MORE things in a picture it has already picked over, which is exactly
-        // where a second name for a garment it already returned comes from.
-        //
-        // The fresh one is DROPPED rather than compared for quality, unlike the
-        // generation pass. Everything in `out` has already survived a crop check
-        // and this candidate has not, so trading a verified target for an
-        // unverified one would be paying for a better word with a worse box.
-        const mine = Array.isArray(m.boxes) && m.boxes.length ? m.boxes[0] : m.box;
-        if (mine && keptBoxes.some((b) => iou(b, mine) >= SAME_REFERENT_IOU)) {
-          console.log(`[convo-image-targets] top-up dropped "${m.label}": same referent as a kept target`);
-          return false;
-        }
-        taken.add(head);
-        if (mine) keptBoxes.push(mine);
-        return true;
-      });
-      if (fresh.length) {
-        const okFresh = await verifyTargets(openai, model, imageUrl, fresh, lang);
-        out = [...out, ...okFresh].slice(0, maxTargetsFor(level, deep));
+      if (out.length >= (deep ? DEEP_MIN_TARGETS : MIN_TARGETS)) {
+        return { targets: out, inventory: inv };
       }
     }
+
+    const { entries: mined } = await runInventory(openai, model, imageUrl, {
+      description,
+      lang,
+      exclude,
+      prefer,
+      taken: inv.map((e) => e.gloss),
+      wantGrans: thinnestGranularities(inv),
+      startId: inv.reduce((m, e) => Math.max(m, e.id + 1), 0),
+    });
+    if (!mined.length) {
+      console.log(`[convo-image-targets] deepen mined nothing (key=${imageKey} level=${level || "-"})`);
+      return { targets: out, inventory: inv };
+    }
+    inv = [...inv, ...mined];
+    await writeInventory(sb, imageKey, inv);
+    await appendFrom(mined);
   } catch (e) {
-    // A top-up that fails leaves the round exactly as good as it was.
-    console.warn("[convo-image-targets] top-up failed:", e?.message || e);
+    // A deepen that fails leaves the round exactly as good as it was.
+    console.warn("[convo-image-targets] deepen failed:", e?.message || e);
   }
   console.log(
-    `[convo-image-targets] top-up ${before} -> ${out.length} (floor ${MIN_TARGETS}, key=${imageKey} level=${level || "-"})`,
+    `[convo-image-targets] deepen ${before} -> ${out.length} (inventory ${inv.length}, key=${imageKey} level=${level || "-"})`,
   );
-  return out;
+  return { targets: out, inventory: inv };
 }
 
 /**
@@ -2120,54 +2420,6 @@ function avoidBlock(avoid) {
     "or a thin round.",
     avoid.map((w) => `- ${w}`).join("\n"),
   ];
-}
-
-function buildUserText(description, lang, misses, level, exclude, prefer, avoid) {
-  const p = PACK[lang];
-  const lines = [
-    `Find ${MIN_TARGETS}-${maxTargetsFor(level)} vocabulary targets in this image. Answer in ${p.langName}.`,
-  ];
-  // Words this learner has already been beaten by. Offered, never demanded:
-  // a word planted in a picture that does not contain it is a question with no
-  // answer, which is worse than not revisiting it at all.
-  if (misses?.length) {
-    lines.push(
-      "",
-      "This learner has previously failed to name these words. If ANY of them is",
-      "genuinely present in this image and would make a fair target, include it,",
-      "mark it with \"revisit\": true, and follow every other rule for it as normal.",
-      "Include NONE of them if none is really there. Do not stretch:",
-      misses.map((m) => `- ${m}`).join("\n"),
-    );
-  }
-  // Words this picture has already taught this learner. The point is variety on
-  // a RE-VISIT: a level change that served essentially the same answers, and an
-  // exit and re-entry that replayed the same cycle, are both this list being
-  // empty when it should not have been.
-  //
-  // A hard instruction rather than a preference, and safe to make hard because
-  // it can only ever narrow: the picture still holds everything else in it, and
-  // if it genuinely holds nothing else the floor and the top-up handle a short
-  // round the way they always have.
-  if (exclude?.length) {
-    lines.push(
-      "",
-      "This learner has ALREADY been taught these words from this picture. Find",
-      "OTHER things. Do not return any of these, or a longer phrase built around",
-      "one of them:",
-      exclude.map((w) => `- ${w}`).join("\n"),
-    );
-  }
-  lines.push(...preferBlock(prefer));
-  lines.push(...avoidBlock(avoid));
-  if (description) {
-    lines.push(
-      "",
-      "What this scene is (for grounding — describe only what you can actually SEE):",
-      description
-    );
-  }
-  return lines.join("\n");
 }
 
 // ── Handler ─────────────────────────────────────────────────────────────────
@@ -2369,7 +2621,7 @@ async function scan(req, res) {
             // five down to four is thin for the same reason and gets the same
             // one extra ask.
             checked = await topUpIfThin(openaiForCheck, model, imageUrl, {
-              description, lang, level, imageKey, targets: checked, exclude, prefer, deep,
+              sb, imageKey, description, lang, level, targets: checked, exclude, prefer, avoid, misses, deep,
             });
             if (checked.length >= MIN_SERVED_TARGETS || checked.length === kept.length) {
               await writeRow(sb, { imageKey, lang, level, targets: checked, model });
@@ -2424,53 +2676,56 @@ async function scan(req, res) {
 
   const MODEL = pickModel();
 
-  // 6) ONE vision call. temperature 0 for determinism, same as word-image.
-  let resp;
+  // 6) The INVENTORY: one band-free vision look, cached per picture. Every
+  //    band, both languages and every deepening draw from this one row, which
+  //    is also what makes a level change cheap: the looking is already done.
+  let inventory = await readInventory(sb, imageKey);
+  if (!inventory) {
+    let looked;
+    try {
+      looked = await withPhase("inventory", () =>
+        runInventory(openai, MODEL, imageUrl, { description, lang }),
+      );
+    } catch (e) {
+      console.error("[convo-image-targets] inventory failed", e?.message || e);
+      return res
+        .status(200)
+        .json(empty(imageKey, lang, e?.code === "bad_model_json" ? "bad_model_json" : "model_failed"));
+    }
+    inventory = looked.entries;
+    if (!inventory.length) {
+      // Opposite failures, reported apart: a blank wall is no_targets, a model
+      // whose every entry failed validation is a regression worth a warning.
+      if (looked.rawCount > 0) {
+        console.warn(
+          `[convo-image-targets] all ${looked.rawCount} targets failed validation ` +
+            `(lang=${lang} model=${MODEL} key=${imageKey})`,
+        );
+        return res.status(200).json(empty(imageKey, lang, "no_valid_targets"));
+      }
+      return res.status(200).json(empty(imageKey, lang, "no_targets"));
+    }
+    await writeInventory(sb, imageKey, inventory);
+  }
+
+  // 7) The BAND PASS: which entries serve THIS band, and what to call them.
+  //    Text-only and cheap; the band is only ever in the room for the WORDS,
+  //    never for the looking, which is the whole of the airport fix.
+  let pass;
   try {
-    resp = await timed("generate", () =>
-      openai.chat.completions.create({
-        model: MODEL,
-        temperature: 0,
-        // Twelve targets, each carrying a cloze, four choices, aliases, a
-        // riddle and sometimes a regional note. At 1400 the twelfth target was
-        // cut off mid-JSON, and a truncated set does not fail loudly — jsonrepair
-        // salvages the whole targets it can see and the round quietly comes back
-        // short, which is the exact thing the bigger cap exists to prevent.
-        max_tokens: 2800,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: buildLocatePrompt(lang, level, deep) },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: buildUserText(description, lang, misses, level, exclude, prefer, avoid) },
-              { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
-            ],
-          },
-        ],
+    pass = await withPhase("bandpass", () =>
+      runBandPass(openai, MODEL, inventory, {
+        lang, level, deep, description, misses, exclude, prefer, avoid,
       }),
     );
   } catch (e) {
-    console.error("[convo-image-targets] model call failed", e?.message || e);
-    return res.status(200).json(empty(imageKey, lang, "model_failed"));
+    console.error("[convo-image-targets] band pass failed", e?.message || e);
+    return res
+      .status(200)
+      .json(empty(imageKey, lang, e?.code === "bad_model_json" ? "bad_model_json" : "model_failed"));
   }
-
-  const raw = resp?.choices?.[0]?.message?.content || "{}";
-  let parsed;
-  try {
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      parsed = JSON.parse(jsonrepair(raw));
-    }
-  } catch (e) {
-    console.warn("[convo-image-targets] could not parse model JSON", e?.message || e);
-    return res.status(200).json(empty(imageKey, lang, "bad_model_json"));
-  }
-
-  // 7) Validate. The seed is the image key, so the choice order is stable for
-  //    this image forever — cache hit or fresh call, the round is the same.
-  const rawTargets = Array.isArray(parsed?.targets) ? parsed.targets : [];
+  const counts = pass.counts;
+  const rawTargets = pass.chosen;
   const sane = sanitizeLocatedList(rawTargets, lang, level, deep);
 
   // 7b) The first wave. A handful of located targets are verified and written
@@ -2545,7 +2800,7 @@ async function scan(req, res) {
   //     response, which is the point: a top-up used to be ten seconds the
   //     learner stood through, and is now ten seconds they play through.
   const beforeTopUp = targets.length;
-  targets = await topUpIfThin(openai, MODEL, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer, deep });
+  targets = await topUpIfThin(openai, MODEL, imageUrl, { sb, imageKey, description, lang, level, targets, exclude, prefer, avoid, misses, deep, inventory, offeredIds: rawTargets.map((t) => t._invId).filter((n) => Number.isInteger(n)) });
   if (targets.length > beforeTopUp) {
     // Top-up returns located targets; only the new ones need writing.
     const fresh = targets.slice(beforeTopUp);
@@ -2565,14 +2820,19 @@ async function scan(req, res) {
     // is a prompt or a model regression — the classic shape being coordinates
     // returned as percentages, where every point fails the [0,1] range check and
     // the whole set silently evaporates.
+    // NEVER a bare refusal. The counts came free with the band pass, so the
+    // answer can say which band CAN field a round, and the frontend can offer
+    // it by name instead of blaming the photograph.
+    const near = nearestBand(level, counts);
+    const honesty = { bandShort: true, ...(near ? { nearest: near } : null), counts };
     if (rawTargets.length || sane.length) {
       console.warn(
         `[convo-image-targets] all ${rawTargets.length} targets failed validation ` +
           `(lang=${lang} model=${MODEL} key=${imageKey})`
       );
-      return sendOnce(res, empty(imageKey, lang, "no_valid_targets"));
+      return sendOnce(res, { ...empty(imageKey, lang, "no_valid_targets"), ...honesty });
     }
-    return sendOnce(res, empty(imageKey, lang, "no_targets"));
+    return sendOnce(res, { ...empty(imageKey, lang, "no_targets"), ...honesty });
   }
 
   if (targets.length < rawTargets.length) {
@@ -2600,5 +2860,11 @@ async function scan(req, res) {
   // The tail's real product. A learner who started on the early four collects
   // the rest by reading this row back; a learner who arrives later reads it as
   // an ordinary cache hit and waits for nothing at all.
-  return sendOnce(res, { ok: true, cached: false, imageKey, lang, targets });
+  // A thin round is still served (it beats nothing), but it says so, and says
+  // where a full one lives, so the caller can offer that band by name.
+  const shortInfo =
+    targets.length < MIN_SERVED_TARGETS
+      ? { bandShort: true, ...(nearestBand(level, counts) ? { nearest: nearestBand(level, counts) } : null), counts }
+      : null;
+  return sendOnce(res, { ok: true, cached: false, imageKey, lang, targets, ...shortInfo });
 }

@@ -113,6 +113,11 @@ function reply(obj) {
 // checks, and since v7 must not be counting the enumeration pass or the top-up
 // either. Detected by a phrase unique to each prompt.
 const KIND = {
+  // v10: the mine call (deepen) carries the top-up's sentinel sentence and ALSO
+  // inventory-prompt phrases, so topUp must be matched BEFORE inventory.
+  topUp: "Already taken, do NOT return any of these",
+  inventory: "Build its nameable INVENTORY",
+  bandpass: "choosing WORDS for a language learner from the nameable INVENTORY",
   // Anchored on the opening line rather than on the question, which is reworded
   // whenever the check gains a new one. When the crop prompt grew its
   // prominence question the old phrase vanished, every crop check was routed to
@@ -121,7 +126,6 @@ const KIND = {
   crop: "a small crop taken from a larger photograph",
   relocalize: "give its bounding box",
   enumerate: "find EVERY separate instance",
-  topUp: "Already taken, do NOT return any of these",
   // v8 split generation in two. LOCATE chooses the words and places them;
   // ENRICH writes the round for the ones that survived the crop check. Order
   // matters in this table: the enrich prompt also carries the band text, so it
@@ -136,6 +140,15 @@ function kindOf(req) {
 }
 
 /** Every call of one kind, so a count assertion means what it says. */
+/**
+ * v10: a fresh scan writes TWO rows now, the band-free inventory and the band
+ * row. Every existing assertion about "the row this scan wrote" means the band
+ * row, so this is what they read.
+ */
+function bandUpserts() {
+  return sbState.upserts.filter((u) => u.payload?.level !== "__inv1");
+}
+
 function callsOf(kind) {
   return createSpy.mock.calls.filter(([req]) => kindOf(req) === kind);
 }
@@ -170,7 +183,52 @@ function mockRound(targets, opts = {}) {
       case "enumerate":
         return Promise.resolve(reply({ items: opts.instances ?? [] }));
       case "topUp":
-        return Promise.resolve(modelReply(opts.topUp ?? []));
+        // The mine call: inventory entries for the deepen, offset past the base
+        // fixture the way the route offsets past the cached inventory.
+        return Promise.resolve(
+          reply({
+            inventory: (opts.topUp ?? []).map((t, i) => ({
+              gloss: t.label,
+              granularity: "object",
+              box: t.box,
+              boxes: t.boxes,
+              point: t.point,
+            })),
+          }),
+        );
+      case "inventory":
+        return Promise.resolve(
+          reply({
+            inventory: targets.map((t) => ({
+              gloss: t.label,
+              granularity: "object",
+              box: t.box,
+              boxes: t.boxes,
+              point: t.point,
+            })),
+          }),
+        );
+      case "bandpass": {
+        // Answered from the inventory listing THIS call was sent, parsed back
+        // out of the user turn, so the ids always match the route's own
+        // whatever sanitize dropped or a mining pass offset. The gloss IS the
+        // fixture label, so the round comes out shaped exactly as it used to.
+        const user = String(req?.messages?.[1]?.content || "");
+        const listed = [...user.matchAll(/^(\d+)\. (.+) \((?:object|part|material|surface|state|action)\)$/gm)]
+          .map((m) => ({
+            id: Number(m[1]),
+            label: m[2],
+            // Carry the fixture's own difficulty through, so tests can still
+            // drive the normalization path with a junk value.
+            difficulty: ([...targets, ...(opts.topUp ?? [])].find((t) => t.label === m[2]) || {}).difficulty || "easy",
+          }));
+        return Promise.resolve(
+          reply({
+            targets: listed,
+            counts: opts.counts ?? { A1: 6, A2: 6, B1: 6, B2: 6, C1: 6, C2: 6 },
+          }),
+        );
+      }
       case "enrich": {
         // Answered from the SAME fixture the locate call is answered from, so
         // one target list still drives a whole round the way it did when there
@@ -244,7 +302,7 @@ describe("convo-image-targets exclusions", () => {
   it("tells the scan which words this picture has already taught", async () => {
     const api = await client();
     await post(api, { exclude: ["chair", "lamp"] });
-    const user = callsOf("generate")[0][0].messages[1].content;
+    const user = callsOf("bandpass")[0][0].messages[1].content;
     const text = JSON.stringify(user);
     expect(text).toContain("ALREADY been taught");
     expect(text).toContain("- chair");
@@ -254,7 +312,7 @@ describe("convo-image-targets exclusions", () => {
   it("says nothing about exclusions when there are none", async () => {
     const api = await client();
     await post(api);
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text).not.toContain("ALREADY been taught");
   });
 
@@ -280,19 +338,19 @@ describe("convo-image-targets exclusions", () => {
   it("is never part of the cache key, so one learner cannot fork a picture", async () => {
     const api = await client();
     await post(api, { exclude: ["chair"] });
-    const key = sbState.upserts.at(-1).payload.image_key;
+    const key = bandUpserts().at(-1).payload.image_key;
 
     sbState.upserts.length = 0;
     const api2 = await client();
     await post(api2, { exclude: ["lamp", "door"] });
-    expect(sbState.upserts.at(-1).payload.image_key).toBe(key);
+    expect(bandUpserts().at(-1).payload.image_key).toBe(key);
   });
 
   it("caps a long history rather than sending a paragraph on every request", async () => {
     const many = Array.from({ length: 60 }, (_, i) => `word${i}`);
     const api = await client();
     await post(api, { exclude: many });
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text).toContain("- word0");
     expect(text).not.toContain("- word30");
   });
@@ -408,7 +466,7 @@ describe("convo-image-targets breadth by band", () => {
   it("tells a beginner band to reach for universal nameables", async () => {
     const api = await client();
     await post(api, { level: "A1" });
-    const sys = callsOf("generate")[0][0].messages[0].content;
+    const sys = callsOf("bandpass")[0][0].messages[0].content;
     expect(sys).toContain("BREADTH AT THIS BAND");
     expect(sys).toContain("a hand");
     expect(sys).toContain("play ANY picture");
@@ -417,7 +475,7 @@ describe("convo-image-targets breadth by band", () => {
   it("tells a high band it may go anywhere in the frame", async () => {
     const api = await client();
     await post(api, { level: "C2" });
-    const sys = callsOf("generate")[0][0].messages[0].content;
+    const sys = callsOf("bandpass")[0][0].messages[0].content;
     expect(sys).toContain("BREADTH AT THIS BAND");
     expect(sys).toContain("ANYWHERE in the frame");
   });
@@ -429,7 +487,7 @@ describe("convo-image-targets breadth by band", () => {
       createSpy.mockClear();
       const api = await client();
       await post(api, { level });
-      const sys = callsOf("generate")[0][0].messages[0].content;
+      const sys = callsOf("bandpass")[0][0].messages[0].content;
       expect(sys, `band ${level}`).toContain("Lead with the words this scene is about");
     }
   });
@@ -437,7 +495,7 @@ describe("convo-image-targets breadth by band", () => {
   it("says nothing about breadth when there is no band at all", async () => {
     const api = await client();
     await post(api, { level: "" });
-    const sys = callsOf("generate")[0][0].messages[0].content;
+    const sys = callsOf("bandpass")[0][0].messages[0].content;
     expect(sys).not.toContain("BREADTH AT THIS BAND");
   });
 });
@@ -453,7 +511,7 @@ describe("convo-image-targets band calibration", () => {
       createSpy.mockClear();
       const api = await client();
       await post(api, { level });
-      const sys = callsOf("generate")[0][0].messages[0].content;
+      const sys = callsOf("bandpass")[0][0].messages[0].content;
       expect(sys, level).toContain(`LEVEL SELF-CHECK (${level} only`);
       expect(sys, level).toContain("an espresso machine");
       expect(sys, level).toContain("is a coffee maker");
@@ -463,7 +521,7 @@ describe("convo-image-targets band calibration", () => {
   it("gives the HIGH bands the opposite check, and never both", async () => {
     const api = await client();
     await post(api, { level: "C2" });
-    const sys = callsOf("generate")[0][0].messages[0].content;
+    const sys = callsOf("bandpass")[0][0].messages[0].content;
     expect(sys).toContain("LEVEL SELF-CHECK (C2 only");
     expect(sys).not.toContain("is a coffee maker");
   });
@@ -473,7 +531,7 @@ describe("convo-image-targets band calibration", () => {
       createSpy.mockClear();
       const api = await client();
       await post(api, { level });
-      const sys = callsOf("generate")[0][0].messages[0].content;
+      const sys = callsOf("bandpass")[0][0].messages[0].content;
       expect(sys, level).not.toContain("LEVEL SELF-CHECK");
     }
   });
@@ -533,7 +591,7 @@ describe("convo-image-targets preferences", () => {
   it("offers the learner's words to the scan, as a preference", async () => {
     const api = await client();
     await post(api, { prefer: ["mug", "windowsill"] });
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text).toContain("already working on");
     expect(text).toContain("- mug");
     expect(text).toContain("- windowsill");
@@ -546,7 +604,7 @@ describe("convo-image-targets preferences", () => {
   it("says nothing at all when the learner has no words yet", async () => {
     const api = await client();
     await post(api);
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text).not.toContain("already working on");
   });
 
@@ -576,7 +634,7 @@ describe("convo-image-targets preferences", () => {
     // word in two voices.
     const api = await client();
     await post(api, { misses: ["a ticket"], prefer: ["a ticket", "mug"] });
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text).toContain("previously failed to name");
     expect(text).toContain("- mug");
     // Once, in the misses block, and not again in the preference block.
@@ -588,7 +646,7 @@ describe("convo-image-targets preferences", () => {
     // demanded and forbidden in the same prompt.
     const api = await client();
     await post(api, { exclude: ["chair"], prefer: ["chair", "mug"] });
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text).toContain("- mug");
     expect(text.split("- chair").length - 1).toBe(1);
   });
@@ -596,7 +654,7 @@ describe("convo-image-targets preferences", () => {
   it("self-dedupes, because the caller merges two of its own lists", async () => {
     const api = await client();
     await post(api, { prefer: ["mug", "mug", "MUG"] });
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text.toLowerCase().split("- mug").length - 1).toBe(1);
   });
 
@@ -608,7 +666,7 @@ describe("convo-image-targets preferences", () => {
     const many = Array.from({ length: 40 }, (_, i) => `pref${i}`);
     const api = await client();
     await post(api, { prefer: many });
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text).toContain("- pref11");
     expect(text).not.toContain("- pref12");
   });
@@ -616,7 +674,7 @@ describe("convo-image-targets preferences", () => {
   it("steers away from words met on OTHER pictures, softly", async () => {
     const api = await client();
     await post(api, { avoid: ["cup", "phone"] });
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text).toContain("on OTHER pictures");
     expect(text).toContain("- cup");
     // The sentence that keeps it a steer. A second cafe genuinely does contain a
@@ -627,7 +685,7 @@ describe("convo-image-targets preferences", () => {
   it("never asks for a word and steers away from it in the same prompt", async () => {
     const api = await client();
     await post(api, { prefer: ["cup"], avoid: ["cup", "phone"] });
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text).toContain("already working on");
     expect(text).toContain("- phone");
     // "cup" appears once, in the preference block, not again in the avoid list.
@@ -638,7 +696,7 @@ describe("convo-image-targets preferences", () => {
     const many = Array.from({ length: 40 }, (_, i) => `av${i}`);
     const api = await client();
     await post(api, { avoid: many });
-    const text = JSON.stringify(callsOf("generate")[0][0].messages[1].content);
+    const text = JSON.stringify(callsOf("bandpass")[0][0].messages[1].content);
     expect(text).toContain("- av15");
     expect(text).not.toContain("- av16");
   });
@@ -646,12 +704,12 @@ describe("convo-image-targets preferences", () => {
   it("is never part of the cache key, so one learner cannot fork a picture", async () => {
     const api = await client();
     await post(api, { prefer: ["mug"] });
-    const key = sbState.upserts.at(-1).payload.image_key;
+    const key = bandUpserts().at(-1).payload.image_key;
 
     sbState.upserts.length = 0;
     const api2 = await client();
     await post(api2, { prefer: ["windowsill", "lapel"] });
-    expect(sbState.upserts.at(-1).payload.image_key).toBe(key);
+    expect(bandUpserts().at(-1).payload.image_key).toBe(key);
   });
 });
 
@@ -706,23 +764,23 @@ describe("convo-image-targets first playable", () => {
 
     // A row written at this moment would serve four targets to every future
     // visit and never be recomputed.
-    const wrote = sbState.upserts.length ? sbState.upserts[0].payload.targets.length : 0;
+    const wrote = bandUpserts().length ? bandUpserts()[0].payload.targets.length : 0;
     expect(wrote === 0 || wrote > served).toBe(true);
 
     // And the tail does land, with more than was served.
-    expect(await settled(() => sbState.upserts.length > 0)).toBe(true);
-    expect(sbState.upserts.at(-1).payload.targets.length).toBeGreaterThan(served);
+    expect(await settled(() => bandUpserts().length > 0)).toBe(true);
+    expect(bandUpserts().at(-1).payload.targets.length).toBeGreaterThan(served);
   });
 
   it("the follow-up collects the rest under the scanId it was given", async () => {
     const api = await client();
     const first = await post(api, { firstPlayable: true });
-    expect(await settled(() => sbState.upserts.length > 0)).toBe(true);
+    expect(await settled(() => bandUpserts().length > 0)).toBe(true);
 
     // What the tail wrote is what a follow-up reads.
     // Exactly what the tail wrote, stamps included, which is what the next read
     // of that row will find.
-    const wrote = sbState.upserts.at(-1).payload;
+    const wrote = bandUpserts().at(-1).payload;
     sbState.row = { targets: wrote.targets, v: wrote.v, verified: wrote.verified };
     createSpy.mockClear();
 
@@ -797,14 +855,14 @@ describe("convo-image-targets contract", () => {
     }
 
     // Exactly ONE model call for the whole set — the cost promise.
-    expect(callsOf("generate")).toHaveLength(1);
+    expect(callsOf("inventory")).toHaveLength(1);
   });
 
   it("sends the image as a vision content part at temperature 0", async () => {
     const api = await client();
     await post(api);
 
-    const call = callsOf("generate")[0][0];
+    const call = callsOf("inventory")[0][0];
     expect(call.temperature).toBe(0);
     expect(call.model).toBe("gpt-4.1-mini");
     expect(call.response_format).toEqual({ type: "json_object" });
@@ -823,7 +881,7 @@ describe("convo-image-targets contract", () => {
     process.env.LUX_AI_VISION_MODEL = "vision-model";
     const api = await client();
     await post(api);
-    expect(callsOf("generate")[0][0].model).toBe("vision-model");
+    expect(callsOf("inventory")[0][0].model).toBe("vision-model");
   });
 
   it("enforces the admin gate (401, no model call)", async () => {
@@ -862,9 +920,9 @@ describe("convo-image-targets cache", () => {
     // It IS written back once, to stamp that it has been examined under the
     // current rules. A set with no boxes has nothing to crop-check, and the
     // stamp is what stops every future read asking the same question again.
-    expect(sbState.upserts).toHaveLength(1);
-    expect(sbState.upserts[0].payload.verified).toBe(3);
-    expect(sbState.upserts[0].payload.targets).toEqual(stored);
+    expect(bandUpserts()).toHaveLength(1);
+    expect(bandUpserts()[0].payload.verified).toBe(3);
+    expect(bandUpserts()[0].payload.targets).toEqual(stored);
   });
 
   it("a set cached BEFORE aliases existed is still served, not re-billed", async () => {
@@ -926,8 +984,8 @@ describe("convo-image-targets cache", () => {
     const r = await post(api);
 
     expect(r.body.cached).toBe(false);
-    expect(callsOf("generate")).toHaveLength(1); // ONCE, not once per bad target
-    expect(sbState.upserts).toHaveLength(1);
+    expect(callsOf("inventory")).toHaveLength(1); // ONCE, not once per bad target
+    expect(bandUpserts()).toHaveLength(1);
     expect(r.body.targets).toHaveLength(6);
   });
 
@@ -972,9 +1030,9 @@ describe("convo-image-targets cache", () => {
     const r = await post(api);
 
     expect(r.body.cached).toBe(false);
-    expect(callsOf("generate")).toHaveLength(1);
-    expect(sbState.upserts).toHaveLength(1);
-    expect(sbState.upserts[0].payload.v).toBe(1);
+    expect(callsOf("inventory")).toHaveLength(1);
+    expect(bandUpserts()).toHaveLength(1);
+    expect(bandUpserts()[0].payload.v).toBe(1);
   });
 
   it("an empty cached array is a MISS, not an empty round", async () => {
@@ -982,15 +1040,15 @@ describe("convo-image-targets cache", () => {
     const api = await client();
     const r = await post(api);
     expect(r.body.cached).toBe(false);
-    expect(callsOf("generate")).toHaveLength(1);
+    expect(callsOf("inventory")).toHaveLength(1);
   });
 
   it("writes the cache keyed (image_key, lang, level) with the validated targets", async () => {
     const api = await client();
     const r = await post(api);
 
-    expect(sbState.upserts).toHaveLength(1);
-    const { table, payload, opts } = sbState.upserts[0];
+    expect(bandUpserts()).toHaveLength(1);
+    const { table, payload, opts } = bandUpserts()[0];
     expect(table).toBe("image_targets");
     expect(opts).toEqual({ onConflict: "image_key,lang,level" });
     expect(payload.image_key).toBe(r.body.imageKey);
@@ -1056,11 +1114,11 @@ describe("convo-image-targets cache", () => {
     const r = await post(api, { level: "A1" });
 
     expect(r.body.targets).toHaveLength(6);
-    const system = callsOf("generate")[0][0].messages[0].content;
+    const system = callsOf("bandpass")[0][0].messages[0].content;
     expect(system).toContain("VOCABULARY LEVEL");
     expect(system).toContain("A1 beginner");
 
-    const { payload, opts } = sbState.upserts[0];
+    const { payload, opts } = bandUpserts()[0];
     expect(payload.level).toBe("A1");
     expect(opts).toEqual({ onConflict: "image_key,lang,level" });
   });
@@ -1068,14 +1126,14 @@ describe("convo-image-targets cache", () => {
   it("no level asked for stores the empty band, which is what old rows hold", async () => {
     const api = await client();
     await post(api);
-    expect(sbState.upserts[0].payload.level).toBe("");
-    expect(callsOf("generate")[0][0].messages[0].content).not.toContain("VOCABULARY LEVEL");
+    expect(bandUpserts()[0].payload.level).toBe("");
+    expect(callsOf("bandpass")[0][0].messages[0].content).not.toContain("VOCABULARY LEVEL");
   });
 
   it("an unknown level is ignored rather than cached under a junk key", async () => {
     const api = await client();
     await post(api, { level: "Z9" });
-    expect(sbState.upserts[0].payload.level).toBe("");
+    expect(bandUpserts()[0].payload.level).toBe("");
   });
 
   it("the two ends of the scale are told to lean inward", async () => {
@@ -1083,20 +1141,20 @@ describe("convo-image-targets cache", () => {
     // words stops being a game about the scene.
     const api = await client();
     await post(api, { level: "A1" });
-    expect(callsOf("generate")[0][0].messages[0].content).toContain("lean up to A2");
+    expect(callsOf("bandpass")[0][0].messages[0].content).toContain("lean up to A2");
 
     vi.resetModules();
     createSpy.mockClear();
     const api2 = await client();
     await post(api2, { level: "C2" });
-    expect(callsOf("generate")[0][0].messages[0].content).toContain("lean down to C1");
+    expect(callsOf("bandpass")[0][0].messages[0].content).toContain("lean down to C1");
   });
 
   it("a caller-supplied imageKey becomes the cache key", async () => {
     const api = await client();
     const r = await post(api, { imageKey: "convo-7-shot-3" });
     expect(r.body.imageKey).toBe("convo-7-shot-3");
-    expect(sbState.upserts[0].payload.image_key).toBe("convo-7-shot-3");
+    expect(bandUpserts()[0].payload.image_key).toBe("convo-7-shot-3");
   });
 
   it("the derived key is stable for the same image and different for another", async () => {
@@ -1113,7 +1171,7 @@ describe("convo-image-targets cache", () => {
     const en = await post(api, { lang: "en" });
     const es = await post(api, { lang: "es" });
     expect(en.body.imageKey).toBe(es.body.imageKey);
-    expect(sbState.upserts.map((u) => u.payload.lang)).toEqual(["en", "es"]);
+    expect(bandUpserts().map((u) => u.payload.lang)).toEqual(["en", "es"]);
   });
 
   it("runs cacheless when Supabase env is missing", async () => {
@@ -1122,7 +1180,7 @@ describe("convo-image-targets cache", () => {
     const r = await post(api);
     expect(r.status).toBe(200);
     expect(r.body.targets).toHaveLength(6);
-    expect(sbState.upserts).toHaveLength(0);
+    expect(bandUpserts()).toHaveLength(0);
   });
 
   it("a failing cache read degrades to a fresh model call", async () => {
@@ -1281,7 +1339,7 @@ describe("convo-image-targets crop verification", () => {
   it("asks the prompt for every instance, and forbids a silent pick", async () => {
     const api = await client();
     await post(api);
-    const system = callsOf("generate")[0][0].messages[0].content;
+    const system = callsOf("inventory")[0][0].messages[0].content;
     expect(system).toContain('"boxes"');
     expect(system).toContain("Never pick one of several lookalikes silently");
   });
@@ -1302,8 +1360,8 @@ describe("convo-image-targets serve-time verification", () => {
 
     expect(r.body.cached).toBe(true);
     expect(cropSpy).toHaveBeenCalledTimes(4);
-    expect(sbState.upserts).toHaveLength(1);
-    expect(sbState.upserts[0].payload.verified).toBe(3);
+    expect(bandUpserts()).toHaveLength(1);
+    expect(bandUpserts()[0].payload.verified).toBe(3);
   });
 
   it("re-examines a row stamped by the older audit, then re-stamps it", async () => {
@@ -1322,8 +1380,8 @@ describe("convo-image-targets serve-time verification", () => {
     // that decided what to cut.
     expect(callsOf("crop").length).toBeGreaterThan(0);
     expect(callsOf("enumerate")).toHaveLength(0);
-    expect(sbState.upserts).toHaveLength(1);
-    expect(sbState.upserts[0].payload.verified).toBe(3);
+    expect(bandUpserts()).toHaveLength(1);
+    expect(bandUpserts()[0].payload.verified).toBe(3);
   });
 
   it("checks EVERY instance the locate call listed, not just the clearest", async () => {
@@ -1355,7 +1413,7 @@ describe("convo-image-targets serve-time verification", () => {
     expect(chair.box).toEqual({ x: 0.1, y: 0.6, w: 0.12, h: 0.25 });
     // One vision call did the locating. The separate enumeration pass is gone.
     expect(callsOf("enumerate")).toHaveLength(0);
-    expect(callsOf("generate")).toHaveLength(1);
+    expect(callsOf("inventory")).toHaveLength(1);
   });
 
   it("keeps only the located instances that survive their own crop check", async () => {
@@ -1438,7 +1496,7 @@ describe("convo-image-targets serve-time verification", () => {
     expect(r.body.cached).toBe(true);
     expect(cropSpy).not.toHaveBeenCalled();
     expect(createSpy).not.toHaveBeenCalled();
-    expect(sbState.upserts).toHaveLength(0);
+    expect(bandUpserts()).toHaveLength(0);
   });
 
   it("regenerates when the crop check guts an old row", async () => {
@@ -1472,7 +1530,7 @@ describe("convo-image-targets level teeth", () => {
   it("every band carries worked examples in the target language, not a description", async () => {
     const api = await client();
     await post(api, { level: "C1" });
-    const system = callsOf("generate")[0][0].messages[0].content;
+    const system = callsOf("bandpass")[0][0].messages[0].content;
     expect(system).toContain("VOCABULARY LEVEL");
     expect(system).toContain("driftwood");
     expect(system).toContain("a tourniquet");
@@ -1483,7 +1541,7 @@ describe("convo-image-targets level teeth", () => {
   it("the Spanish pack gets Spanish exemplars", async () => {
     const api = await client();
     await post(api, { level: "C1", lang: "es" });
-    const system = callsOf("generate")[0][0].messages[0].content;
+    const system = callsOf("bandpass")[0][0].messages[0].content;
     expect(system).toContain("el torniquete");
     expect(system).toContain("la gasa");
     expect(system).not.toContain("driftwood");
@@ -1492,15 +1550,19 @@ describe("convo-image-targets level teeth", () => {
   it("only C1 and C2 get the self-check, and it names the failure it exists for", async () => {
     const api = await client();
     await post(api, { level: "C2" });
-    const c2 = callsOf("generate")[0][0].messages[0].content;
+    const c2 = callsOf("bandpass")[0][0].messages[0].content;
     expect(c2).toContain("LEVEL SELF-CHECK");
-    expect(c2).toContain("a first-aid kit");
+    // The check SWAPS within the inventory now, never drops for visibility:
+    // dropping the boarding pass for being visible is the filed airport bug.
+    expect(c2).toContain("SWAP");
+    expect(c2).toContain("a bucket hat");
+    expect(c2).toContain("JUDGE THE WORD, NOT THE THING");
 
     vi.resetModules();
     createSpy.mockClear();
     const api2 = await client();
     await post(api2, { level: "B1" });
-    expect(callsOf("generate")[0][0].messages[0].content).not.toContain("LEVEL SELF-CHECK");
+    expect(callsOf("bandpass")[0][0].messages[0].content).not.toContain("LEVEL SELF-CHECK");
   });
 
   it("a basic noun is dropped at C2 and kept at B1", async () => {
@@ -1576,7 +1638,7 @@ describe("convo-image-targets level teeth", () => {
     mockRound((withLevel(["the sky", "a mug", "a chalkboard"])));
     const api = await client();
     await post(api);
-    expect(sbState.upserts[0].payload.targets.map((t) => t.label)).toEqual(["a mug", "a chalkboard"]);
+    expect(bandUpserts()[0].payload.targets.map((t) => t.label)).toEqual(["a mug", "a chalkboard"]);
   });
 });
 
@@ -1794,11 +1856,11 @@ describe("convo-image-targets validation", () => {
   it("asks LOCATE for the box and ENRICH for the literal cloze, one job each", async () => {
     const api = await client();
     await post(api);
-    expect(callsOf("generate")).toHaveLength(1);
+    expect(callsOf("inventory")).toHaveLength(1);
     expect(callsOf("enrich")).toHaveLength(1);
 
     // Locate: what and where, and the quality rules for a box a learner taps.
-    const locate = callsOf("generate")[0][0].messages[0].content;
+    const locate = callsOf("inventory")[0][0].messages[0].content;
     expect(locate).toContain('"box"');
     expect(locate).toContain("BOUNDING BOX");
     expect(locate).toContain("VISUALLY UNAMBIGUOUS");
@@ -1995,7 +2057,7 @@ describe("convo-image-targets validation", () => {
     expect(callsOf("enrich")[0][0].messages[0].content).toContain('"aliases"');
     // The v8 guarantee, and the reason the split exists: nothing is spent
     // writing alternative names for targets the crop check has not passed yet.
-    expect(callsOf("generate")[0][0].messages[0].content).not.toContain('"aliases"');
+    expect(callsOf("inventory")[0][0].messages[0].content).not.toContain('"aliases"');
   });
 
   it("normalizes an unknown difficulty to medium", async () => {
@@ -2029,7 +2091,7 @@ describe("convo-image-targets localization", () => {
   it("the es pack asks for Spanish labels with their article", async () => {
     const api = await client();
     await post(api, { lang: "es" });
-    const system = callsOf("generate")[0][0].messages[0].content;
+    const system = callsOf("bandpass")[0][0].messages[0].content;
     expect(system).toContain("Spanish (neutral Latin American)");
     expect(system).toContain("la taza");
     expect(system).toContain("The article carries the gender");
@@ -2039,7 +2101,7 @@ describe("convo-image-targets localization", () => {
   it("the en pack asks for English labels with their article", async () => {
     const api = await client();
     await post(api, { lang: "en" });
-    const system = callsOf("generate")[0][0].messages[0].content;
+    const system = callsOf("bandpass")[0][0].messages[0].content;
     expect(system).toContain("English");
     expect(system).toContain('"a mug"');
     expect(system).not.toContain("neutral Latin American");
@@ -2049,7 +2111,7 @@ describe("convo-image-targets localization", () => {
     const api = await client();
     const r = await post(api, { lang: undefined, pack: "es" });
     expect(r.body.lang).toBe("es");
-    expect(callsOf("generate")[0][0].messages[0].content).toContain("neutral Latin American");
+    expect(callsOf("bandpass")[0][0].messages[0].content).toContain("neutral Latin American");
   });
 
   it("an explicit lang wins over pack", async () => {
@@ -2062,7 +2124,7 @@ describe("convo-image-targets localization", () => {
     const api = await client();
     const r = await post(api, { lang: "fr" });
     expect(r.body.lang).toBe("en");
-    expect(callsOf("generate")[0][0].messages[0].content).toContain('"a mug"');
+    expect(callsOf("bandpass")[0][0].messages[0].content).toContain('"a mug"');
   });
 
   it("forgives case and region on the pack value", async () => {
@@ -2123,7 +2185,7 @@ describe("convo-image-targets degradation", () => {
     const r = await post(api);
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ ok: true, targets: [], reason: "model_failed" });
-    expect(sbState.upserts).toHaveLength(0);
+    expect(bandUpserts()).toHaveLength(0);
   });
 
   it("unparseable model output degrades gracefully (bad_model_json)", async () => {
@@ -2140,7 +2202,7 @@ describe("convo-image-targets degradation", () => {
         {
           message: {
             content:
-              '{"targets":[{"label":"a mug","point":{"x":0.3,"y":0.6},"cloze":"Holding ___.","choices":["a mug","a plate","a kettle","a spoon"],}]}',
+              '{"inventory":[{"gloss":"a mug","granularity":"object","point":{"x":0.3,"y":0.6},}]}',
           },
         },
       ],
@@ -2163,7 +2225,7 @@ describe("convo-image-targets degradation", () => {
     const r = await post(api);
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ ok: true, targets: [], reason: "no_valid_targets" });
-    expect(sbState.upserts).toHaveLength(0);
+    expect(bandUpserts()).toHaveLength(0);
   });
 
   it("coordinates returned as percentages lose every target and say so", async () => {
@@ -2184,7 +2246,7 @@ describe("convo-image-targets degradation", () => {
     const r = await post(api);
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ ok: true, targets: [], reason: "no_targets" });
-    expect(sbState.upserts).toHaveLength(0);
+    expect(bandUpserts()).toHaveLength(0);
   });
 });
 
@@ -2247,7 +2309,7 @@ describe("convo-image-targets B1 vocabulary", () => {
     // ordinary; the WORD is not one a B1 learner holds.
     const api = await client();
     await post(api, { level: "B1" });
-    const sys = callsOf("generate")[0][0].messages[0].content;
+    const sys = callsOf("bandpass")[0][0].messages[0].content;
     expect(sys).toContain("a clipboard");
     expect(sys).toContain("an apron");
     expect(sys).toContain("B2 or above");
@@ -2256,7 +2318,7 @@ describe("convo-image-targets B1 vocabulary", () => {
   it("keeps parts of things out of B1, where C1 owns them", async () => {
     const api = await client();
     await post(api, { level: "B1" });
-    const sys = callsOf("generate")[0][0].messages[0].content;
+    const sys = callsOf("bandpass")[0][0].messages[0].content;
     expect(sys).toContain("a windowsill");
     expect(sys).toContain("are parts, and parts");
   });
@@ -2264,7 +2326,7 @@ describe("convo-image-targets B1 vocabulary", () => {
   it("offers B1 examples a B1 learner would actually hold", async () => {
     const api = await client();
     await post(api, { level: "B1" });
-    const sys = callsOf("generate")[0][0].messages[0].content;
+    const sys = callsOf("bandpass")[0][0].messages[0].content;
     for (const w of ["a backpack", "a receipt", "a blanket", "a napkin"]) {
       expect(sys, w).toContain(w);
     }
