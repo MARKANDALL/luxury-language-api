@@ -1411,11 +1411,25 @@ The learner may still ANSWER with the sharper word and be marked right; that is
 handled by the aliases, and it is not a reason to ask with the sharper word.`
       : "";
 
+  // A deep draw exists for the rapid-fire mode, whose whole texture is breadth:
+  // it burns three words a second and a band-typical handful is one lap. So it
+  // is told to take everything the band can honestly hold, including the words
+  // one band to either side, marked at their real difficulty.
+  const deepDraw = deep
+    ? `
+
+THIS IS A DEEP DRAW, for a rapid-fire mode that burns through words. Return as
+MANY entries as honestly serve this level, up to the cap, not a comfortable
+handful. Include words one band below and one band above as well, marked
+"easy" and "hard" respectively; a rapid mode wants breadth more than it wants a
+perfectly tuned centre.`
+    : "";
+
   return `
 You are choosing WORDS for a language learner from the nameable INVENTORY of a
 photograph. Someone has already looked at the picture and listed everything in
 it; your job is which entries to teach at this level, and what to call them.
-${band}${wordNotThing}${swap}
+${band}${wordNotThing}${swap}${deepDraw}
 
 Pick between ${MIN_TARGETS} and ${cap} entries. For each, return:
 - "id": the inventory entry's id, copied exactly.
