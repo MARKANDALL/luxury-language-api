@@ -24,6 +24,7 @@ import coachPage from "../routes/coach-page.js";
 import convoImage from "../routes/convo-image.js";
 import convoImageTargets from "../routes/convo-image-targets.js";
 import ispyRecap from "../routes/ispy-recap.js";
+import ispySentence from "../routes/ispy-sentence.js";
 import wordMisses from "../routes/word-misses.js";
 import convoReport from "../routes/convo-report.js";
 import convoTurn from "../routes/convo-turn.js";
@@ -197,6 +198,7 @@ const ROUTES = {
   "convo-image": convoImage,
   "convo-image-targets": convoImageTargets,
   "ispy-recap": ispyRecap,
+  "ispy-sentence": ispySentence,
   "word-misses": wordMisses,
   "convo-report": convoReport,
   "convo-turn": convoTurn,
@@ -320,6 +322,7 @@ const ADMIN_ONLY = new Set([
   "convo-image",
   "convo-image-targets",
   "ispy-recap",
+  "ispy-sentence",
   "word-misses",
   "convo-turn",
   "dictate",
