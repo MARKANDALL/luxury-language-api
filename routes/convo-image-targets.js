@@ -237,6 +237,11 @@ const MAX_CHOICES = 4;
 // answers to: swim trunks, swimming trunks, trunks, a bathing suit, a swimsuit,
 // board shorts are six names for the same thing, and a learner who produces the
 // wrong one of them should never be told they are wrong.
+// How many near-miss terms to keep. Few: this list only has to catch the
+// obvious ways to describe a thing, and a long one starts holding words that
+// are really synonyms, which would turn right answers into "close".
+const MAX_NEAR = 4;
+
 const MAX_ALIASES = 8;
 
 // The regional usage note that rides with a set of variants, when there is one.
@@ -511,9 +516,17 @@ If the picture will not yield enough of these, lean up to A2 rather than inventi
     A2: `A2 elementary. Everyday objects, clothes and furniture from a first year of study.
 YES: "a jacket", "a towel", "a mirror", "a suitcase", "a shelf".
 NO: parts of objects, materials, or specialist names.`,
-    B1: `B1 intermediate. Ordinary specific nouns, including everyday compounds.
-YES: "a backpack", "a paper cup", "a life jacket", "a windowsill", "a first-aid kit".
-NO: bare basics a beginner already owns ("a bag", "a cup"), and nothing technical.`,
+    B1: `B1 intermediate. Ordinary specific nouns and everyday compounds, of the kind
+someone meets in daily life rather than at work or in a trade.
+YES: "a backpack", "a paper cup", "a notebook", "a receipt", "a blanket",
+     "a bucket", "a napkin", "a shelf".
+NO: bare basics a beginner already owns ("a bag", "a cup").
+NO: workplace, trade or safety equipment. "a clipboard", "an apron", "a life
+    jacket", "a first-aid kit" and "a stethoscope" are all B2 or above, however
+    ordinary the OBJECT looks: the question is whether a B1 learner holds the
+    WORD, and for these they do not.
+NO: parts of things. "a windowsill", "a cuff" and "a hem" are parts, and parts
+    belong at C1.`,
     B2: `B2 upper intermediate. The specific name for the thing rather than its category.
 YES: "a windbreaker" rather than "a jacket"; "a thermos" rather than "a bottle";
      "a stretcher" rather than "a bed"; "a paperback" rather than "a book".
@@ -541,9 +554,16 @@ If the picture will not yield enough of these, lean up to A2 rather than inventi
     A2: `A2 elementary. Everyday objects, clothes and furniture from a first year of study.
 YES: "la chaqueta", "la toalla", "el espejo", "la maleta", "el estante".
 NO: parts of objects, materials, or specialist names.`,
-    B1: `B1 intermediate. Ordinary specific nouns, including everyday compounds.
-YES: "la mochila", "el vaso de papel", "el chaleco salvavidas", "el botiquin".
-NO: bare basics a beginner already owns ("la bolsa", "la taza"), and nothing technical.`,
+    B1: `B1 intermediate. Ordinary specific nouns and everyday compounds, of the kind
+someone meets in daily life rather than at work or in a trade.
+YES: "la mochila", "el vaso de papel", "el cuaderno", "el recibo", "la manta",
+     "la cubeta", "la servilleta", "el estante".
+NO: bare basics a beginner already owns ("la bolsa", "la taza").
+NO: workplace, trade or safety equipment. "el portapapeles", "el delantal",
+    "el chaleco salvavidas" and "el botiquin" are all B2 or above, however
+    ordinary the OBJECT looks: the question is whether a B1 learner holds the
+    WORD, and for these they do not.
+NO: parts of things, which belong at C1.`,
     B2: `B2 upper intermediate. The specific name for the thing rather than its category.
 YES: "el cortavientos" rather than "la chaqueta"; "el termo" rather than "la botella";
      "la camilla" rather than "la cama".
@@ -851,6 +871,22 @@ function applyEnrichment(base, raw, lang, seed) {
   if (head) pushAlias(head);
   (Array.isArray(raw?.aliases) ? raw.aliases : []).forEach(pushAlias);
 
+  // Near misses: reasonable descriptions of this thing that are NOT its name.
+  //
+  // Filtered against the aliases and the label, and that filter is the whole
+  // safety of the feature. A term that is BOTH would make a right answer wrong,
+  // and the frontend checks near last precisely so acceptance always wins; this
+  // makes the same guarantee one step earlier, where it is cheaper.
+  const near = [];
+  for (const v of Array.isArray(raw?.near) ? raw.near : []) {
+    const str = String(v == null ? "" : v).trim().replace(/\s+/g, " ").slice(0, 60);
+    if (!str || near.length >= MAX_NEAR) continue;
+    const key = fold(str);
+    // aliasSeen already holds the label and every accepted alias.
+    if (!key || aliasSeen.has(key) || near.some((n) => fold(n) === key)) continue;
+    near.push(str);
+  }
+
   // The usage note. Kept only when there is something for it to be about: a note
   // with no variant behind it is a lecture attached to the plain word, and the
   // frontend only says it after an alias was matched anyway.
@@ -883,6 +919,7 @@ function applyEnrichment(base, raw, lang, seed) {
     choices: shuffled,
     answerIndex,
     aliases,
+    ...(near.length ? { near } : null),
     // Omitted rather than empty, so a target from before this field existed and
     // a target that simply has no regional variation are the same shape.
     ...(note && hasVariant ? { americanNote: note } : null),
@@ -1363,6 +1400,18 @@ For each one return:
   and for any target whose name is the same everywhere.
   One short sentence in ${p.langName}, addressed to the learner, naming the form
   they will actually hear. ${p.noteRule}
+- "near": up to 4 answers a learner might REASONABLY give for this thing that are
+  NOT its name and must NOT be accepted as it. These are descriptions and
+  neighbouring words, not synonyms: anything you would accept belongs in
+  "aliases" instead, and putting a real name here would make a right answer
+  wrong.
+  For "a ceiling leak" they are "a hole", "water damage", "a stain", "a crack".
+  For "a colander" they are "a bowl", "a strainer" only if a strainer is a
+  DIFFERENT object here, "a pot".
+  The game uses these to say "close, but I want the exact word" and hand the
+  turn back without charging a guess, so a wrong entry here costs the learner
+  nothing; an entry that is really a synonym costs them a correct answer.
+  Omit the field when nothing plausible comes to mind.
 - "riddle": the ATTRIBUTES of this thing and nothing else, in ${p.langName}, for
   the game "I spy something red". ${p.riddleRule}
   Two or three attributes at most, from what is actually visible: colour first,
@@ -1379,6 +1428,7 @@ Output MUST be valid JSON only, exactly:
 { "targets": [ { "label": "...",
                  "cloze": "...", "choices": ["...","...","...","..."],
                  "aliases": ["...","..."],
+                 "near": ["...","..."],
                  "americanNote": "...",
                  "riddle": "..." } ] }
 `.trim();

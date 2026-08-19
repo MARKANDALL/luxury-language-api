@@ -185,6 +185,7 @@ function mockRound(targets, opts = {}) {
               cloze: t.cloze,
               choices: t.choices,
               aliases: t.aliases,
+              near: t.near,
               americanNote: t.americanNote,
               riddle: t.riddle,
             })),
@@ -2184,5 +2185,90 @@ describe("convo-image-targets degradation", () => {
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ ok: true, targets: [], reason: "no_targets" });
     expect(sbState.upserts).toHaveLength(0);
+  });
+});
+
+// ── Near misses, and the B1 band's own vocabulary ───────────────────────────
+
+describe("convo-image-targets near misses", () => {
+  it("asks the enrich call for reasonable descriptions that are NOT the word", async () => {
+    const api = await client();
+    await post(api, { level: "C1" });
+    const enrich = callsOf("enrich")[0][0].messages[0].content;
+    expect(enrich).toContain('"near"');
+    expect(enrich).toContain("a ceiling leak");
+    // The line that keeps it safe: a synonym here would make a right answer wrong.
+    expect(enrich).toContain("belongs in");
+    expect(enrich).toContain('"aliases"');
+  });
+
+  it("never keeps a near term that is also the label or an alias", async () => {
+    // The guarantee: acceptance always wins. A term on both lists would turn a
+    // correct answer into "close, try again".
+    mockRound([
+      {
+        label: "a mug",
+        point: { x: 0.3, y: 0.5 },
+        box: { x: 0.25, y: 0.45, w: 0.1, h: 0.1 },
+        cloze: "Holding ___.",
+        choices: ["a mug", "a", "b", "c"],
+        aliases: ["a cup"],
+        near: ["a cup", "a mug", "a bowl"],
+      },
+    ]);
+    const api = await client();
+    const res = await post(api, { level: "B1" });
+    const t = res.body.targets.find((x) => x.label === "a mug");
+    expect(t).toBeTruthy();
+    expect(t.near || []).not.toContain("a cup");
+    expect(t.near || []).not.toContain("a mug");
+    expect(t.near || []).toContain("a bowl");
+  });
+
+  it("omits the field entirely rather than shipping an empty one", async () => {
+    mockRound([
+      {
+        label: "a plate",
+        point: { x: 0.3, y: 0.5 },
+        box: { x: 0.25, y: 0.45, w: 0.1, h: 0.1 },
+        cloze: "Beside ___.",
+        choices: ["a plate", "a", "b", "c"],
+      },
+    ]);
+    const api = await client();
+    const res = await post(api, { level: "B1" });
+    expect(res.body.targets[0]).not.toHaveProperty("near");
+  });
+});
+
+describe("convo-image-targets B1 vocabulary", () => {
+  it("puts workplace and safety kit ABOVE B1, naming the filed words", async () => {
+    // Mark questioned "a clipboard" and "an apron" at B1. The object is
+    // ordinary; the WORD is not one a B1 learner holds.
+    const api = await client();
+    await post(api, { level: "B1" });
+    const sys = callsOf("generate")[0][0].messages[0].content;
+    expect(sys).toContain("a clipboard");
+    expect(sys).toContain("an apron");
+    expect(sys).toContain("B2 or above");
+  });
+
+  it("keeps parts of things out of B1, where C1 owns them", async () => {
+    const api = await client();
+    await post(api, { level: "B1" });
+    const sys = callsOf("generate")[0][0].messages[0].content;
+    expect(sys).toContain("a windowsill");
+    expect(sys).toContain("are parts, and parts");
+  });
+
+  it("offers B1 examples a B1 learner would actually hold", async () => {
+    const api = await client();
+    await post(api, { level: "B1" });
+    const sys = callsOf("generate")[0][0].messages[0].content;
+    for (const w of ["a backpack", "a receipt", "a blanket", "a napkin"]) {
+      expect(sys, w).toContain(w);
+    }
+    // And the old over-reaching examples are gone from the YES list.
+    expect(sys).not.toContain('"a first-aid kit".');
   });
 });
