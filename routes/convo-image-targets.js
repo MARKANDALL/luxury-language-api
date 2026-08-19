@@ -175,7 +175,25 @@ const MAX_TARGETS = 12;
 // written up front for targets that were about to be deleted. Now the extra ask
 // costs a few hundred locate tokens and some crop checks that run in parallel,
 // and it buys back a serial round trip.
-function maxTargetsFor(level) {
+/**
+ * How many targets a DEEP scan may return.
+ *
+ * Lightning asks for this. A sprint runs forty-five to ninety seconds at roughly
+ * three seconds a word, so a pool of twelve is one lap and a bit and then it is
+ * recycling; a playtest watched a lap run out after about six words and start
+ * again on the same ones Riddle had just served.
+ *
+ * Twenty-four is two full laps at the longest band, which is the point at which
+ * the clock runs out before the words do. Mark has explicitly authorised paying
+ * for it in load time.
+ */
+const DEEP_TARGETS = 24;
+
+/** The floor a deep scan tops up to, rather than MIN_TARGETS. */
+const DEEP_MIN_TARGETS = 16;
+
+function maxTargetsFor(level, deep = false) {
+  if (deep) return DEEP_TARGETS;
   return HIGH_BANDS.has(level) ? 16 : MAX_TARGETS;
 }
 
@@ -1018,7 +1036,7 @@ function dedupeSameReferent(list, level) {
  * Sanitize a whole LOCATE response: drop duplicates by head noun and by
  * referent, cap at MAX_TARGETS.
  */
-function sanitizeLocatedList(rawList, lang, level) {
+function sanitizeLocatedList(rawList, lang, level, deep = false) {
   const out = [];
   const heads = new Set();
   for (const raw of Array.isArray(rawList) ? rawList : []) {
@@ -1034,7 +1052,7 @@ function sanitizeLocatedList(rawList, lang, level) {
     if (heads.has(head)) continue;
     heads.add(head);
     out.push(t);
-    if (out.length === maxTargetsFor(level)) break;
+    if (out.length === maxTargetsFor(level, deep)) break;
   }
   // Applied AFTER the head-word pass and BEFORE verification, so a duplicate
   // never costs a crop check, and never reaches the round or the recap.
@@ -1229,7 +1247,7 @@ handled by the aliases, and it is not a reason to ask with the sharper word.`
  * answer anyway, because it is looking at the picture with those labels in
  * mind. The COUNT CHECK below is that job, moved here.
  */
-function buildLocatePrompt(lang, level) {
+function buildLocatePrompt(lang, level, deep = false) {
   const p = PACK[lang];
   const { band, bandCheck } = bandText(lang, level);
   return `
@@ -1237,7 +1255,7 @@ You are looking at a photorealistic illustration from a language-learning
 conversation. Find the things in it that are worth teaching as vocabulary, and
 describe where each one is.${band}
 
-Return between ${MIN_TARGETS} and ${maxTargetsFor(level)} targets. Every label must be in
+Return between ${MIN_TARGETS} and ${maxTargetsFor(level, deep)} targets. Every label must be in
 ${p.langName}. Return JSON only, no markdown.
 
 Do NOT write sentences, questions, clues or wrong answers here. A later pass
@@ -1825,13 +1843,13 @@ async function writeRow(sb, { imageKey, lang, level, targets, model }) {
  * same price) or by loosening the check (which is what produced the boxes the
  * fifth playtest filmed).
  */
-function buildTopUpText(description, lang, have, level, exclude, prefer) {
+function buildTopUpText(description, lang, have, level, exclude, prefer, deep = false) {
   const p = PACK[lang];
   // Asked for the room to the CAP, not the deficit to the floor. Attrition is
   // the reason this call exists, so requesting exactly what is missing hands
   // the crop check one candidate and ends up exactly where it started: the
   // first run of this asked for 1, got 1, lost it, and reported 4 -> 4.
-  const want = maxTargetsFor(level) - have.length;
+  const want = maxTargetsFor(level, deep) - have.length;
   return [
     `This image has already given ${have.length} vocabulary target(s). Find up to ${want} MORE,`,
     `different from those, in the same image. Answer in ${p.langName}.`,
@@ -1933,14 +1951,29 @@ async function enrichTargets(openai, model, imageUrl, targets, { lang, level, se
   return out;
 }
 
-async function topUpIfThin(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer }) {
-  if (!targets.length || targets.length >= MIN_TARGETS || !imageUrl) return targets;
-  return withPhase("topup", () =>
-    runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer }),
-  );
+async function topUpIfThin(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer, deep }) {
+  const floor = deep ? DEEP_MIN_TARGETS : MIN_TARGETS;
+  if (!targets.length || targets.length >= floor || !imageUrl) return targets;
+  // A deep scan may top up TWICE. One extra ask reliably clears the ordinary
+  // floor of five; getting from a thin set to sixteen is a bigger climb, and
+  // attrition on the second pass is just as real as on the first. Two is the
+  // cap: a third would be paying vision-call money to scrape a picture that has
+  // already said what it holds.
+  const rounds = deep ? 2 : 1;
+  let out = targets;
+  for (let n = 0; n < rounds && out.length < floor; n++) {
+    const before = out.length;
+    // eslint-disable-next-line no-await-in-loop -- each pass must see what the
+    // last one added, or the second would ask for the same words again.
+    out = await withPhase("topup", () =>
+      runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets: out, exclude, prefer, deep }),
+    );
+    if (out.length === before) break; // the picture has nothing else to give
+  }
+  return out;
 }
 
-async function runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer }) {
+async function runTopUp(openai, model, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer, deep }) {
   const before = targets.length;
   let out = targets;
   try {
@@ -1957,11 +1990,11 @@ async function runTopUp(openai, model, imageUrl, { description, lang, level, ima
         max_tokens: 2800,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: buildLocatePrompt(lang, level) },
+          { role: "system", content: buildLocatePrompt(lang, level, deep) },
           {
             role: "user",
             content: [
-              { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label), level, exclude, prefer) },
+              { type: "text", text: buildTopUpText(description, lang, out.map((t) => t.label), level, exclude, prefer, deep) },
               { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
             ],
           },
@@ -2013,7 +2046,7 @@ async function runTopUp(openai, model, imageUrl, { description, lang, level, ima
       });
       if (fresh.length) {
         const okFresh = await verifyTargets(openai, model, imageUrl, fresh, lang);
-        out = [...out, ...okFresh].slice(0, maxTargetsFor(level));
+        out = [...out, ...okFresh].slice(0, maxTargetsFor(level, deep));
       }
     }
   } catch (e) {
@@ -2241,6 +2274,11 @@ async function scan(req, res) {
       return true;
     })
     .slice(0, MAX_AVOIDED);
+  // A DEEP scan: more targets, at the cost of more time. Lightning asks for this
+  // because a sprint burns through an ordinary pool in one lap. Not part of the
+  // cache key: a deeper row is strictly better for every caller, so it upgrades
+  // the same row rather than forking a second one.
+  const deep = body?.deep === true;
   const imageUrl = (body.imageUrl || "").toString().trim();
   const description = (body.description || "").toString().trim().slice(0, MAX_DESCRIPTION_CHARS);
 
@@ -2317,7 +2355,9 @@ async function scan(req, res) {
           // serve it: a set cached before boxes existed cannot be crop-checked
           // and is not wrong for that.
           await writeRow(sb, { imageKey, lang, level, targets: kept, model: pickModel() });
-          return res.status(200).json({ ok: true, cached: true, imageKey, lang, targets: kept });
+          if (!(deep && kept.length < DEEP_MIN_TARGETS)) {
+            return res.status(200).json({ ok: true, cached: true, imageKey, lang, targets: kept });
+          }
         }
         if (servable && data.verified !== VERIFIED_V && imageUrl) {
           const openaiForCheck = await tryOpenAI();
@@ -2329,7 +2369,7 @@ async function scan(req, res) {
             // five down to four is thin for the same reason and gets the same
             // one extra ask.
             checked = await topUpIfThin(openaiForCheck, model, imageUrl, {
-              description, lang, level, imageKey, targets: checked, exclude, prefer,
+              description, lang, level, imageKey, targets: checked, exclude, prefer, deep,
             });
             if (checked.length >= MIN_SERVED_TARGETS || checked.length === kept.length) {
               await writeRow(sb, { imageKey, lang, level, targets: checked, model });
@@ -2344,7 +2384,7 @@ async function scan(req, res) {
                 `(key=${imageKey} level=${level || "-"})`,
             );
           }
-        } else if (servable) {
+        } else if (servable && !(deep && kept.length < DEEP_MIN_TARGETS)) {
           return res.status(200).json({ ok: true, cached: true, imageKey, lang, targets: kept });
         }
         if (imageUrl) {
@@ -2399,7 +2439,7 @@ async function scan(req, res) {
         max_tokens: 2800,
         response_format: { type: "json_object" },
         messages: [
-          { role: "system", content: buildLocatePrompt(lang, level) },
+          { role: "system", content: buildLocatePrompt(lang, level, deep) },
           {
             role: "user",
             content: [
@@ -2431,7 +2471,7 @@ async function scan(req, res) {
   // 7) Validate. The seed is the image key, so the choice order is stable for
   //    this image forever — cache hit or fresh call, the round is the same.
   const rawTargets = Array.isArray(parsed?.targets) ? parsed.targets : [];
-  const sane = sanitizeLocatedList(rawTargets, lang, level);
+  const sane = sanitizeLocatedList(rawTargets, lang, level, deep);
 
   // 7b) The first wave. A handful of located targets are verified and written
   //     ahead of the rest so a round can start on them.
@@ -2505,7 +2545,7 @@ async function scan(req, res) {
   //     response, which is the point: a top-up used to be ten seconds the
   //     learner stood through, and is now ten seconds they play through.
   const beforeTopUp = targets.length;
-  targets = await topUpIfThin(openai, MODEL, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer });
+  targets = await topUpIfThin(openai, MODEL, imageUrl, { description, lang, level, imageKey, targets, exclude, prefer, deep });
   if (targets.length > beforeTopUp) {
     // Top-up returns located targets; only the new ones need writing.
     const fresh = targets.slice(beforeTopUp);
