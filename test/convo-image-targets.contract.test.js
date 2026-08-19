@@ -124,6 +124,7 @@ const KIND = {
   // the generation branch, and twelve tests failed for a reason that had nothing
   // to do with the route.
   crop: "a small crop taken from a larger photograph",
+  tighten: "snug bounding box",
   relocalize: "give its bounding box",
   enumerate: "find EVERY separate instance",
   // v8 split generation in two. LOCATE chooses the words and places them;
@@ -196,6 +197,11 @@ function mockRound(targets, opts = {}) {
             })),
           }),
         );
+      case "tighten":
+        // The snug ask. opts.snug is a box in CROP fractions, or absent to
+        // decline; the recheck that follows a shrink flows through the crop
+        // branch above like any other crop question.
+        return Promise.resolve(reply(opts.snug ? { box: opts.snug } : { absent: true }));
       case "inventory":
         return Promise.resolve(
           reply({
@@ -1235,7 +1241,10 @@ describe("convo-image-targets crop verification", () => {
     const api = await client();
     await post(api);
 
-    expect(cropSpy).toHaveBeenCalledTimes(3);
+    // Three verify cuts plus three tighten-pass padded cuts: every accepted
+    // primary box buys ONE refinement crop (Stage D). The snug ask returns
+    // nothing under this mock, so no recheck cut follows.
+    expect(cropSpy).toHaveBeenCalledTimes(6);
     const asked = createSpy.mock.calls
       .map((c) => JSON.stringify(c[0].messages))
       .filter((t) => t.includes(KIND.crop));
@@ -1305,7 +1314,7 @@ describe("convo-image-targets crop verification", () => {
     const api = await client();
     const r = await post(api);
 
-    expect(cropSpy).toHaveBeenCalledTimes(2);
+    expect(cropSpy).toHaveBeenCalledTimes(3) // 2 instance checks + 1 tighten pad cut;
     expect(r.body.targets[0].boxes).toHaveLength(2);
   });
 
@@ -1359,7 +1368,7 @@ describe("convo-image-targets serve-time verification", () => {
     const r = await post(api);
 
     expect(r.body.cached).toBe(true);
-    expect(cropSpy).toHaveBeenCalledTimes(4);
+    expect(cropSpy).toHaveBeenCalledTimes(8) // 4 heal checks + 4 tighten pad cuts;
     expect(bandUpserts()).toHaveLength(1);
     expect(bandUpserts()[0].payload.verified).toBe(3);
   });
@@ -2332,5 +2341,67 @@ describe("convo-image-targets B1 vocabulary", () => {
     }
     // And the old over-reaching examples are gone from the YES list.
     expect(sys).not.toContain('"a first-aid kit".');
+  });
+});
+
+
+// ── Stage D: the tighten pass ───────────────────────────────────────────────
+//
+// A box that passed verification is not necessarily SNUG, and the arrow anchors
+// on the box edge: a loose box parks the arrow beside the object. Every gate in
+// the refinement fails toward the box that already passed, and these tests are
+// those gates.
+
+describe("convo-image-targets box tightening", () => {
+  const loose = () => [{
+    label: "a kettle",
+    point: { x: 0.5, y: 0.5 },
+    box: { x: 0.4, y: 0.4, w: 0.2, h: 0.2 },
+    cloze: "On the stove sits ___.",
+    choices: ["a kettle", "a pot", "a pan", "a jug"],
+  }];
+
+  it("keeps the tighter box when it shrinks and still shows the thing", async () => {
+    // The snug ask answers in CROP fractions; centred half-size inside the
+    // padded crop maps back to a strictly smaller image box.
+    mockRound(loose(), { snug: { x: 0.3, y: 0.3, w: 0.4, h: 0.4 } });
+    const api = await client();
+    const r = await post(api);
+    const t = r.body.targets[0];
+    expect(t.box.w).toBeLessThan(0.2);
+    expect(t.box.h).toBeLessThan(0.2);
+    // The point follows the box it belongs to.
+    expect(t.point.x).toBeCloseTo(t.box.x + t.box.w / 2, 5);
+    expect(t.point.y).toBeCloseTo(t.box.y + t.box.h / 2, 5);
+  });
+
+  it("keeps the ORIGINAL box when the tightened crop no longer shows it", async () => {
+    // A snug box of the wrong thing is worse than a loose box of the right one.
+    // First ask per box passes verification; opts.shows turns false afterwards,
+    // so the recheck on the tightened crop fails.
+    let asks = 0;
+    mockRound(loose(), {
+      snug: { x: 0.3, y: 0.3, w: 0.4, h: 0.4 },
+      shows: () => { asks += 1; return asks <= 1; },
+    });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets[0].box).toEqual({ x: 0.4, y: 0.4, w: 0.2, h: 0.2 });
+  });
+
+  it("does not churn a box for a marginal shrink", async () => {
+    // Nearly the whole padded crop: bigger than 90% of the old area once
+    // mapped back, so not worth keeping.
+    mockRound(loose(), { snug: { x: 0.02, y: 0.02, w: 0.96, h: 0.96 } });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets[0].box).toEqual({ x: 0.4, y: 0.4, w: 0.2, h: 0.2 });
+  });
+
+  it("keeps the original when the snug ask declines", async () => {
+    mockRound(loose()); // no opts.snug: the tighten branch answers absent
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets[0].box).toEqual({ x: 0.4, y: 0.4, w: 0.2, h: 0.2 });
   });
 });

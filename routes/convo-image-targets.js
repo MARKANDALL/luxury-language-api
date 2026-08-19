@@ -1927,6 +1927,134 @@ async function pooled(jobs, limit) {
  * tickets in frame, a second box that points at a wing mirror would score a tap
  * on the wing mirror.
  */
+// ── Box tightening ──────────────────────────────────────────────────────────
+//
+// A box that passed verification still is not necessarily SNUG, and the arrow
+// anchors on the box edge: a loose box parks the arrow beside the object, which
+// on film reads as a near miss and makes the sprint a guess. So every accepted
+// primary box gets one refinement: a padded crop around it, an ask for the snug
+// bounds of the label WITHIN that crop, and the tightened box is kept only when
+// it genuinely shrank AND its own crop still shows the thing. Every gate fails
+// toward the box that already passed.
+
+// How much context the refinement crop carries around the accepted box. Enough
+// that the model can see where the object ends; little enough that a neighbour
+// does not move in.
+const TIGHTEN_PAD = 0.35;
+// A tightened box must be at most this fraction of the old area to be worth
+// keeping: below a real shrink, churn is all downside.
+const TIGHTEN_KEEP_RATIO = 0.9;
+
+/** The padded crop region around a box, clamped to the frame. */
+function paddedBox(b) {
+  const px = b.w * TIGHTEN_PAD;
+  const py = b.h * TIGHTEN_PAD;
+  const x = Math.max(0, b.x - px);
+  const y = Math.max(0, b.y - py);
+  return {
+    x,
+    y,
+    w: Math.min(1 - x, b.w + px * 2),
+    h: Math.min(1 - y, b.h + py * 2),
+  };
+}
+
+/** Ask for the snug bounds of `label` within a crop. Fractions OF THE CROP. */
+async function askSnug(openai, model, crop, label, langName) {
+  try {
+    const resp = await openai.chat.completions.create({
+      model,
+      temperature: 0,
+      max_tokens: 120,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `This is a crop from a larger photograph. Give the snug bounding box of
+"${label}" (${langName}) WITHIN THIS CROP: x and y its top-left corner as
+fractions of the crop from the left and top edges, w and h its width and height
+as fractions of the crop. The box must HUG the thing: no margin, no neighbours.
+If "${label}" is not visible in this crop, say so instead of guessing.
+Return JSON only: { "box": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 } }
+or { "absent": true }`,
+            },
+            { type: "image_url", image_url: { url: crop, detail: "low" } },
+          ],
+        },
+      ],
+    });
+    const parsed = JSON.parse(resp?.choices?.[0]?.message?.content || "{}");
+    if (parsed?.absent === true) return null;
+    return unitBox(parsed?.box);
+  } catch (e) {
+    console.warn("[convo-image-targets] snug ask failed:", e?.message || e);
+    return null;
+  }
+}
+
+/**
+ * Tighten every accepted primary box, in the same pool the crop checks use.
+ *
+ * Returns the same targets, some with a snugger box, boxes[0] and point moved
+ * with it. Secondaries are left alone: they exist so any instance scores, and
+ * the arrow only ever anchors on the primary.
+ */
+async function tightenBoxes(openai, model, imageUrl, targets, lang, size) {
+  const langName = PACK[lang].langName;
+  const check = pickCheckModel();
+  const jobs = targets.map((t, i) => async () => {
+    const b = t.box;
+    if (!b || t.boxOk === false) return null;
+    const pad = paddedBox(b);
+    if (pad.w <= 0 || pad.h <= 0) return null;
+    const crop = await timed("tighten.cut", () => cropRegion(imageUrl, pad, size));
+    if (!crop) return null;
+    const snug = await timed("tighten.ask", () => askSnug(openai, check, crop, t.label, langName));
+    if (!snug) return null;
+    // Crop fractions back to image fractions.
+    const cand = unitBox({
+      x: pad.x + snug.x * pad.w,
+      y: pad.y + snug.y * pad.h,
+      w: snug.w * pad.w,
+      h: snug.h * pad.h,
+    });
+    if (!cand) return null;
+    const oldArea = b.w * b.h;
+    const newArea = cand.w * cand.h;
+    if (!(newArea > 0) || newArea > oldArea * TIGHTEN_KEEP_RATIO) return null;
+    // The tightened crop must still show the thing, on the same judge the box
+    // originally passed. A snug box of the WRONG thing is worse than a loose
+    // box of the right one.
+    const recut = await timed("tighten.cut", () => cropRegion(imageUrl, cand, size));
+    if (!recut) return null;
+    const again = await timed("tighten.ask", () => askCrop(openai, check, recut, t.label, langName));
+    if (!again.shows) return null;
+    console.log(
+      `[convo-image-targets] tightened "${t.label}": area ${(oldArea * 100).toFixed(1)}% -> ${(newArea * 100).toFixed(1)}% of frame (${Math.round((1 - newArea / oldArea) * 100)}% smaller)`,
+    );
+    return { i, box: cand, prominence: again.prominence };
+  });
+  const results = await pooled(jobs, VERIFY_CONCURRENCY);
+  let tightened = 0;
+  for (const r of results) {
+    if (!r) continue;
+    const t = targets[r.i];
+    const boxes = Array.isArray(t.boxes) && t.boxes.length ? [...t.boxes] : [t.box];
+    boxes[0] = r.box;
+    t.box = r.box;
+    if (Array.isArray(t.boxes)) t.boxes = boxes;
+    t.point = { x: clampPoint(r.box.x + r.box.w / 2), y: clampPoint(r.box.y + r.box.h / 2) };
+    tightened++;
+  }
+  if (tightened) {
+    console.log(`[convo-image-targets] tighten pass: ${tightened}/${targets.length} boxes snugged`);
+  }
+  return targets;
+}
+
 async function verifyTargets(openai, model, imageUrl, targets, lang) {
   const langName = PACK[lang].langName;
   // Every call below this line is a judgment, not a generation. See
@@ -2064,7 +2192,11 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
         dropped.map((t) => `${t.label} (${t.boxWhy})`).join("; "),
     );
   }
-  return checked.filter((t) => t.boxOk !== false);
+  const kept = checked.filter((t) => t.boxOk !== false);
+  // Stage D: one refinement pass on the survivors, so the arrow anchors on the
+  // thing rather than beside it. Inside verifyTargets so every caller, the
+  // wave, the tail, the deepen and the cached-row heal, inherits it.
+  return withPhase("tighten", () => tightenBoxes(openai, model, imageUrl, kept, lang, size));
 }
 
 function clampPoint(v) {
