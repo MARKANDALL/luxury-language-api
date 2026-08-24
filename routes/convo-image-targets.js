@@ -959,10 +959,24 @@ function applyEnrichment(base, raw, lang, seed) {
     .replace(/[.!?]+$/, "")
     .slice(0, MAX_RIDDLE_CHARS);
   if (riddle) {
+    // WHAT A RIDDLE MAY NOT CONTAIN IS THE ANSWER, which is the head NOUN and
+    // the whole phrase, NOT every word of the label.
+    //
+    // The old rule forbade any word of the head over two letters, and it was
+    // right while labels were bare nouns. Inventory-first generation made labels
+    // describe themselves, and the rule then convicted every riddle for the
+    // exactly the labels that most needed one: "a brown long-sleeve shirt"
+    // forbade brown, long, sleeve and shirt, so no clue about a brown shirt
+    // could survive, and the whole Riddle mode silently emptied on a fresh scan.
+    //
+    // An attribute the label happens to share is not a leak. "I spy something
+    // brown and made of cotton" is a fair clue for a brown shirt: the learner
+    // still has to produce SHIRT, which is the word being taught and the word
+    // the grader compares on.
     const words = riddle.split(" ");
+    const answer = headWord(label, lang);
     const leaks =
-      findPhrase(words, head) >= 0 ||
-      head.split(" ").some((part) => part.length > 2 && findPhrase(words, part) >= 0);
+      findPhrase(words, head) >= 0 || (answer.length > 2 && findPhrase(words, answer) >= 0);
     if (leaks) riddle = "";
   }
 
@@ -1781,9 +1795,12 @@ For each one return:
   the game "I spy something red". ${p.riddleRule}
   Two or three attributes at most, from what is actually visible: colour first,
   then material, size or shape. ${p.riddleExample}
-  It MUST NOT contain the noun, or any word from the noun, or any word that
-  names what the thing IS. "small and red" is a riddle; "a small red toolbox" is
-  the answer. Omit the field if the thing has no attribute worth saying.
+  It MUST NOT contain the NOUN being taught, or any word that names what the
+  thing IS. "small and red" is a riddle; "a small red toolbox" is the answer.
+  Some labels already describe themselves ("a brown long-sleeve shirt"): there,
+  keep the noun out ("shirt") and the clue is fine even though it repeats an
+  adjective the label also uses. Omit the field only if the thing has no
+  attribute worth saying, which is rare: nearly everything has a colour.
 
 Before you answer, re-read every sentence you wrote and drop or rewrite any that
 is not literally true of this image, and any cloze or riddle that still contains
