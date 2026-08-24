@@ -507,6 +507,7 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
   // from the turn the flag points at. Lazy + graceful: a missing Supabase env
   // never breaks the report.
   let stored = 0;
+  let storedAfn = 0;
   const rows = [
     ...items.map((it) => {
       const t = turnByIndex.get(it.turnIndex);
@@ -548,6 +549,37 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
     }),
   ];
 
+  // AFN nominations: the analyst's own "work on these next" list, up to three
+  // validated category codes, order preserved as rank. Stored in their own
+  // additive table because speech_events.channel carries a CHECK constraint
+  // that a new channel value would violate (migrations/0009).
+  const afnRows = afnCandidates.map((category, i) => ({
+    uid,
+    session_id: sessionId || null,
+    surface,
+    scenario_key: scenarioKey,
+    pack,
+    category,
+    rank: i + 1,
+  }));
+
+  async function insertAfn(sb) {
+    if (!afnRows.length || !sb) return 0;
+    try {
+      const { error } = await sb.from("speech_afn_candidates").insert(afnRows);
+      if (error) {
+        // Never fatal: a missing table (not yet migrated) must not cost the
+        // learner their report or their speech_events rows.
+        console.warn("[session-analyst] afn insert failed", error?.message || error);
+        return 0;
+      }
+      return afnRows.length;
+    } catch (e) {
+      console.warn("[session-analyst] afn storage skipped", e?.message || e);
+      return 0;
+    }
+  }
+
   async function insertRows(sb) {
     if (!rows.length || !sb) return 0;
     try {
@@ -583,6 +615,7 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
       retried,
       model: MODEL,
       stored,
+      storedAfn,
       capturedVia,
       turnCount,
       truncated,
@@ -592,7 +625,9 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
 
   // No session id: nothing to dedupe against, so this is exactly the old path.
   if (!sessionKey) {
-    stored = await insertRows(await getSb());
+    const sbNoKey = await getSb();
+    stored = await insertRows(sbNoKey);
+    storedAfn = await insertAfn(sbNoKey);
     return res.status(200).json(buildBody());
   }
 
@@ -629,6 +664,7 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
   // are now superseded: drop them first so the learner is not counted twice.
   if (priorPass) await clearSupersededEvents(sb, sessionKey);
   stored = await insertRows(sb);
+  storedAfn = await insertAfn(sb);
 
   const finalBody = buildBody();
   await finalizePass(sb, sessionKey, { stored_events: stored, report: finalBody });
