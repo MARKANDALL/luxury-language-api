@@ -111,6 +111,11 @@ export default async function handler(req, res) {
   const uid = (body.uid || "").toString().trim().slice(0, 80);
   const sessionId = (body.sessionId || body.session_id || "").toString().trim().slice(0, 120);
   const surface = (body.surface || "guided").toString().trim().slice(0, 40) || "guided";
+  // The scenario's STABLE id (never its pack-localized title). Additive and
+  // optional: a client that does not send one writes null, exactly as every row
+  // before migration 0007 did. See migrations/0007_speech_events_scenario_key.sql.
+  const scenarioKey =
+    (body.scenarioKey || body.scenario_key || "").toString().trim().slice(0, 80) || null;
   const packRaw = (body.pack || "en").toString().trim().toLowerCase();
   const pack = VALID_PACKS.has(packRaw) ? packRaw : "en";
   const levelRaw = (body.level || "B1").toString().trim().toUpperCase();
@@ -386,6 +391,7 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
         uid,
         session_id: sessionId || null,
         surface,
+        scenario_key: scenarioKey,
         turn_index: it.turnIndex,
         pack,
         channel: it.channel,
@@ -404,6 +410,7 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
         uid,
         session_id: sessionId || null,
         surface,
+        scenario_key: scenarioKey,
         turn_index: s.turnIndex,
         pack,
         channel: "strength",

@@ -310,3 +310,46 @@ describe("session-analyst contract", () => {
     expect(createSpy).not.toHaveBeenCalled();
   });
 });
+
+// ── Per-scenario keying (migration 0007) ─────────────────────────────────────
+describe("session-analyst scenario_key", () => {
+  it("writes the stable scenario id onto every row, items and strengths alike", async () => {
+    createSpy.mockResolvedValueOnce(reply(SYNTHETIC_REPORT));
+    const api = await client();
+    const r = await send(api, { turns: SYNTHETIC_TURNS, scenarioKey: "coffee" });
+
+    expect(r.status).toBe(200);
+    const rows = insertSpy.mock.calls[0][0];
+    expect(rows).toHaveLength(3); // 2 items + 1 strength
+    for (const row of rows) expect(row.scenario_key).toBe("coffee");
+    // surface is untouched: the two axes stay orthogonal.
+    for (const row of rows) expect(row.surface).toBe("guided");
+  });
+
+  it("writes null when the client sends no scenario, matching every pre-0007 row", async () => {
+    createSpy.mockResolvedValueOnce(reply(SYNTHETIC_REPORT));
+    const api = await client();
+    await send(api, { turns: SYNTHETIC_TURNS });
+
+    const rows = insertSpy.mock.calls[0][0];
+    for (const row of rows) expect(row.scenario_key).toBeNull();
+  });
+
+  it("treats an empty or whitespace-only scenario id as null, never as a bucket", async () => {
+    createSpy.mockResolvedValueOnce(reply(SYNTHETIC_REPORT));
+    const api = await client();
+    await send(api, { turns: SYNTHETIC_TURNS, scenarioKey: "   " });
+
+    const rows = insertSpy.mock.calls[0][0];
+    for (const row of rows) expect(row.scenario_key).toBeNull();
+  });
+
+  it("accepts the snake_case spelling and clamps an over-long id", async () => {
+    createSpy.mockResolvedValueOnce(reply(SYNTHETIC_REPORT));
+    const api = await client();
+    await send(api, { turns: SYNTHETIC_TURNS, scenario_key: "x".repeat(200) });
+
+    const rows = insertSpy.mock.calls[0][0];
+    expect(rows[0].scenario_key).toHaveLength(80);
+  });
+});
