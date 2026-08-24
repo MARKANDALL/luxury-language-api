@@ -16,7 +16,9 @@
 //        c. Zero flags is a valid, expected output.
 //   3. Provenance-aware. chip_read turns produce NO flags and NO credit;
 //      chip_modified turns are judged only on what changed; both enforced by
-//      the "judgeable" set server-side, not just by the prompt.
+//      the "judgeable" set server-side, not just by the prompt. dictated and
+//      composed turns are the learner's OWN words with nothing on screen that
+//      supplied them, so they gate and judge exactly as spontaneous does.
 //   4. Store all, surface few. All valid events go to speech_events; the route
 //      returns everything (sorted most-severe first) and the UI shows <=3+1.
 //   5. One LLM call per session (a single repair retry is allowed ONLY when the
@@ -56,7 +58,29 @@ const ASR_CONFIDENCE_MIN = 0.85; // hard law 2b
 const SPONTANEOUS_WORD_GATE = 12; // hard law 2a
 const VALID_PACKS = new Set(["es", "en"]);
 const CEFR_VALUES = new Set(["A1", "A2", "B1", "B2", "C1", "C2"]);
-const PROVENANCE_VALUES = new Set(["spontaneous", "chip_read", "chip_modified"]);
+// Every provenance the frontend may send.
+//   spontaneous   - free speech, no chip on screen explained it
+//   chip_read     - the learner read a suggestion chip verbatim
+//   chip_modified - the learner started from a chip and edited it
+//   dictated      - the learner dictated the words (either dictation mode)
+//   composed      - the learner TYPED the text themselves (a custom passage)
+const PROVENANCE_VALUES = new Set([
+  "spontaneous",
+  "chip_read",
+  "chip_modified",
+  "dictated",
+  "composed",
+]);
+
+// The learner's OWN production, with nothing on screen that supplied the words.
+// These three are interchangeable for both the gate and judgeability: dictating
+// a sentence or typing it is no less the learner's own language than saying it,
+// and treating them differently would silently withhold feedback on it.
+//
+// This set is why adding the two new values changes NOTHING for existing
+// payloads: before this, dictated turns arrived tagged "spontaneous" and were
+// gated and judged exactly as this set now gates and judges them.
+const OWN_PRODUCTION = new Set(["spontaneous", "dictated", "composed"]);
 const ITEM_CHANNELS = new Set(["grammar", "word_choice"]);
 const ITEM_SEVERITIES = new Set(["blocked", "noticeable", "polish"]);
 const SEVERITY_RANK = { blocked: 0, noticeable: 1, polish: 2 };
@@ -174,7 +198,7 @@ export default async function handler(req, res) {
     turns
       .filter(
         (t) =>
-          (t.provenance === "spontaneous" || t.provenance === "chip_modified") &&
+          (OWN_PRODUCTION.has(t.provenance) || t.provenance === "chip_modified") &&
           t.asrConfidence >= ASR_CONFIDENCE_MIN
       )
       .map((t) => t.index)
@@ -281,7 +305,7 @@ export default async function handler(req, res) {
   // be isolated on the backend (see PR Disclosures). Under the gate: NO LLM call,
   // NO rows written, insufficient.
   const spontaneousWords = turns
-    .filter((t) => t.provenance === "spontaneous" && t.asrConfidence >= ASR_CONFIDENCE_MIN)
+    .filter((t) => OWN_PRODUCTION.has(t.provenance) && t.asrConfidence >= ASR_CONFIDENCE_MIN)
     .reduce((n, t) => n + wordCount(t.text), 0);
 
   if (spontaneousWords < SPONTANEOUS_WORD_GATE) {
