@@ -13,15 +13,38 @@
 import request from "supertest";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mkServer } from "./_helpers/mkServer.js";
+import { makeFakeSupabase, LUX_UNIQUE } from "./_helpers/fakeSupabase.js";
 
-const { insertSpy, createSpy } = vi.hoisted(() => ({
-  insertSpy: vi.fn(() => Promise.resolve({ error: null })),
+const { insertSpy, createSpy, sbRef } = vi.hoisted(() => ({
+  insertSpy: vi.fn(),
   createSpy: vi.fn(async () => ({ choices: [{ message: { content: "{}" } }] })),
+  sbRef: { current: null },
 }));
 
 vi.mock("../lib/supabase.js", () => ({
-  getSupabaseAdmin: () => ({ from: () => ({ insert: insertSpy }) }),
+  getSupabaseAdmin: () => sbRef.current,
 }));
+
+// A real in-memory Supabase (rows + a real unique constraint), with the
+// speech_events insert also routed through insertSpy so the existing
+// row-shape assertions keep reading the exact payload the route builds.
+function freshSupabase() {
+  const fake = makeFakeSupabase({ unique: LUX_UNIQUE });
+  return {
+    ...fake,
+    from(table) {
+      const b = fake.from(table);
+      if (table !== "speech_events") return b;
+      return {
+        ...b,
+        insert: (payload) => {
+          insertSpy(payload);
+          return b.insert(payload);
+        },
+      };
+    },
+  };
+}
 
 vi.mock("openai", () => ({
   OpenAI: class {
@@ -35,6 +58,7 @@ beforeEach(() => {
   vi.resetModules();
   insertSpy.mockClear();
   createSpy.mockClear();
+  sbRef.current = freshSupabase();
   process.env.ADMIN_TOKEN = "test_admin_token";
   process.env.OPENAI_API_KEY = "sk-test";
 });

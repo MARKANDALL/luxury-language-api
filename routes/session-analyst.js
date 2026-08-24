@@ -22,6 +22,12 @@
 //   5. One LLM call per session (a single repair retry is allowed ONLY when the
 //      model returns unparseable/invalid JSON). On a second failure: fail silent
 //      (no rows, error status) — no UI section beats a broken one.
+//   6. Idempotent per session. The same session may now be submitted more than
+//      once (exit capture, then an explicit End Session). A later pass
+//      supersedes an earlier one ONLY if it carries strictly more turns;
+//      otherwise it is a no-op that replays the stored report without an LLM
+//      call and without writing a duplicate speech_events row. Enforced
+//      server-side in lib/session-analysis-store.js, never by the client.
 //
 // Cloned from the routes/coach-ask.js + routes/word-info.js skeleton: same CORS
 // + admin-token gate, same json_object + jsonrepair parsing, same lazy/graceful
@@ -29,6 +35,14 @@
 // per-tap gpt-4.1-mini tier.
 //
 // Contract: see the backend PR description (§2.2). Table: speech_events (§2.4).
+
+import {
+  readPass,
+  commitPass,
+  finalizePass,
+  clearSupersededEvents,
+  normalizeCapturedVia,
+} from "../lib/session-analysis-store.js";
 
 export const config = {
   api: {
@@ -116,6 +130,14 @@ export default async function handler(req, res) {
   // before migration 0007 did. See migrations/0007_speech_events_scenario_key.sql.
   const scenarioKey =
     (body.scenarioKey || body.scenario_key || "").toString().trim().slice(0, 80) || null;
+  // How this pass was triggered. 'explicit' = End Session / Save, 'exit' = a
+  // pagehide / visibilitychange hook, 'switch' = the learner moved to another
+  // scenario in the same page load. A caller that sends nothing is 'explicit',
+  // which is exactly what every pre-existing caller is.
+  const capturedVia = normalizeCapturedVia(body.capturedVia || body.captured_via);
+  // The client trimmed the payload to fit the fetch keepalive body cap, so the
+  // analysis is honest but partial. Recorded, never acted on.
+  const truncated = body.truncated === true;
   const packRaw = (body.pack || "en").toString().trim().toLowerCase();
   const pack = VALID_PACKS.has(packRaw) ? packRaw : "en";
   const levelRaw = (body.level || "B1").toString().trim().toUpperCase();
@@ -158,6 +180,89 @@ export default async function handler(req, res) {
       .map((t) => t.index)
   );
 
+  // 3b) IDEMPOTENCY SCAFFOLD (hard law 6). turnCount is the whole supersede rule:
+  // the number of user turns THIS pass carries, after bounding. A session with
+  // no id cannot be deduped, so it takes the pre-idempotency path untouched.
+  const turnCount = turns.length;
+  const sessionKey = sessionId
+    ? { uid, sessionId, surface, scenarioKey }
+    : null;
+
+  // One lazily-built Supabase client for both the idempotency reads and the
+  // event insert. Lazy + graceful exactly as before: a missing env, or a table
+  // that has not been migrated yet, degrades to today's behaviour.
+  let _sb;
+  async function getSb() {
+    if (_sb !== undefined) return _sb;
+    try {
+      const { getSupabaseAdmin } = await import("../lib/supabase.js");
+      _sb = getSupabaseAdmin() || null;
+    } catch (e) {
+      console.warn("[session-analyst] storage skipped", e?.message || e);
+      _sb = null;
+    }
+    return _sb;
+  }
+
+  // The pass already recorded for this session, if any. Read BEFORE any model
+  // call so a duplicate costs one SELECT rather than an LLM round trip.
+  const priorPass = sessionKey ? await readPass(await getSb(), sessionKey) : null;
+
+  // Record this pass and return the body, or replay a winning pass's stored
+  // body when a concurrent equal-or-longer pass beat us to the key.
+  // `writeRows` runs ONLY when this pass owns the key.
+  async function settle(payloadBody, { evidence, storedEvents = 0, writeRows = null }) {
+    if (!sessionKey) {
+      // No session id: nothing to dedupe against. Old path, unchanged.
+      if (writeRows) await writeRows();
+      return payloadBody;
+    }
+    const sb = await getSb();
+    const { won, existing } = await commitPass(
+      sb,
+      sessionKey,
+      {
+        pack,
+        captured_via: capturedVia,
+        turn_count: turnCount,
+        truncated,
+        evidence,
+        stored_events: storedEvents,
+        report: payloadBody,
+      },
+      priorPass != null
+    );
+    if (!won) {
+      // Another pass owns the key. Never write rows behind it. Replay its
+      // report when it has one; otherwise hand back our own body unstored, so
+      // the caller still renders something real.
+      if (existing?.report) {
+        return { ...existing.report, meta: { ...(existing.report.meta || {}), deduped: true } };
+      }
+      return { ...payloadBody, meta: { ...(payloadBody.meta || {}), deduped: true } };
+    }
+    if (writeRows) await writeRows();
+    return payloadBody;
+  }
+
+  // `report` must be present: a record whose report is null is a pass that
+  // claimed the key and then failed before finishing, and must not suppress a
+  // real analysis.
+  if (priorPass && priorPass.report && priorPass.turn_count >= turnCount) {
+    // A pass carrying at least as many turns already landed. No LLM, no rows,
+    // no duplicate: replay what it returned so the UI renders identically.
+    const replay = priorPass.report;
+    return res.status(200).json({
+      ...replay,
+      meta: {
+        ...(replay.meta || {}),
+        deduped: true,
+        capturedVia: priorPass.captured_via || null,
+        priorTurnCount: priorPass.turn_count,
+      },
+    });
+  }
+
   // 4) Load the per-pack dictionary — the ONLY language content. Never inject the
   // pack string into the path unsanitized (VALID_PACKS whitelist above).
   let dict;
@@ -180,6 +285,10 @@ export default async function handler(req, res) {
     .reduce((n, t) => n + wordCount(t.text), 0);
 
   if (spontaneousWords < SPONTANEOUS_WORD_GATE) {
+    // NOT recorded. Hard law 2a is "store nothing" under the gate, and that
+    // includes the idempotency record: a below-gate pass costs no LLM call and
+    // writes no speech_events row, so there is nothing to protect against a
+    // repeat. Re-running the gate is pure local arithmetic.
     return res.status(200).json({
       ok: true,
       evidence: "insufficient",
@@ -193,6 +302,9 @@ export default async function handler(req, res) {
         gate: SPONTANEOUS_WORD_GATE,
         llmCalled: false,
         stored: 0,
+        capturedVia,
+        turnCount,
+        truncated,
       },
     });
   }
@@ -312,15 +424,26 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
   // Model-declared insufficient (e.g. short transactional turns past the gate):
   // return the note, store nothing.
   if (report.evidence === "insufficient") {
-    return res.status(200).json({
+    const modelInsufficient = {
       ok: true,
       evidence: "insufficient",
       evidenceNote: report.evidenceNote || dict.insufficientNote || "",
       items: [],
       strengths: [],
       afnCandidates: [],
-      meta: { pack, spontaneousWords, gate: SPONTANEOUS_WORD_GATE, llmCalled: true, retried, stored: 0 },
-    });
+      meta: {
+        pack,
+        spontaneousWords,
+        gate: SPONTANEOUS_WORD_GATE,
+        llmCalled: true,
+        retried,
+        stored: 0,
+        capturedVia,
+        turnCount,
+        truncated,
+      },
+    };
+    return res.status(200).json(await settle(modelInsufficient, { evidence: "insufficient" }));
   }
 
   // 9) Server-side validation. Never trust the model: drop unknown categories,
@@ -425,29 +548,27 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
     }),
   ];
 
-  if (rows.length) {
+  async function insertRows(sb) {
+    if (!rows.length || !sb) return 0;
     try {
-      const { getSupabaseAdmin } = await import("../lib/supabase.js");
-      const sb = getSupabaseAdmin();
-      if (sb) {
-        // Awaited (not fire-and-forget): the row must land before the serverless
-        // function can freeze after the response.
-        const { error } = await sb.from("speech_events").insert(rows);
-        if (error) {
-          console.warn("[session-analyst] insert failed", error?.message || error);
-        } else {
-          stored = rows.length;
-        }
+      // Awaited (not fire-and-forget): the row must land before the serverless
+      // function can freeze after the response.
+      const { error } = await sb.from("speech_events").insert(rows);
+      if (error) {
+        console.warn("[session-analyst] insert failed", error?.message || error);
+        return 0;
       }
+      return rows.length;
     } catch (e) {
       // env not configured / import failed: return the report anyway.
       console.warn("[session-analyst] storage skipped", e?.message || e);
+      return 0;
     }
   }
 
   // 11) Return the report + metadata. UI surfaces <=3 items + 1 strength; the
   // API returns everything it stored, most-severe first.
-  return res.status(200).json({
+  const buildBody = (extraMeta = {}) => ({
     ok: true,
     evidence: "sufficient",
     evidenceNote: report.evidenceNote || "",
@@ -462,6 +583,54 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
       retried,
       model: MODEL,
       stored,
+      capturedVia,
+      turnCount,
+      truncated,
+      ...extraMeta,
     },
   });
+
+  // No session id: nothing to dedupe against, so this is exactly the old path.
+  if (!sessionKey) {
+    stored = await insertRows(await getSb());
+    return res.status(200).json(buildBody());
+  }
+
+  // Claim the key BEFORE writing any row, so a pass that loses the race can
+  // never leave duplicate speech_events behind. The report is filled in after
+  // the insert, once meta.stored is a real number (finalizePass).
+  const sb = await getSb();
+  const { won, existing } = await commitPass(
+    sb,
+    sessionKey,
+    {
+      pack,
+      captured_via: capturedVia,
+      turn_count: turnCount,
+      truncated,
+      evidence: "sufficient",
+      stored_events: 0,
+      report: null,
+    },
+    priorPass != null
+  );
+
+  if (!won) {
+    if (existing?.report) {
+      return res.status(200).json({
+        ...existing.report,
+        meta: { ...(existing.report.meta || {}), deduped: true },
+      });
+    }
+    return res.status(200).json(buildBody({ deduped: true, stored: 0 }));
+  }
+
+  // We own the key. If a shorter pass wrote rows for this session earlier, they
+  // are now superseded: drop them first so the learner is not counted twice.
+  if (priorPass) await clearSupersededEvents(sb, sessionKey);
+  stored = await insertRows(sb);
+
+  const finalBody = buildBody();
+  await finalizePass(sb, sessionKey, { stored_events: stored, report: finalBody });
+  return res.status(200).json(finalBody);
 }
