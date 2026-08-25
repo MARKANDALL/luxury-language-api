@@ -111,6 +111,7 @@
 // image bytes at all.
 
 import { cropRegion, imageSize, releaseSource } from "../lib/image-crop.js";
+import { cropWindow } from "../lib/crop-window.js";
 import { withTiming, withPhase, timed, report } from "../lib/scan-timing.js";
 
 import crypto from "node:crypto";
@@ -320,6 +321,64 @@ const VISIBILITY = new Set(VISIBILITY_ORDER);
 // thing is in the picture you are about to be shown, and the sixth playtest's
 // chair crop kept that promise only in the sense that a sliver of chair was
 // present behind a table, some papers, a lap and an arm.
+/**
+ * Is the thing the model found actually INSIDE the box we asked about?
+ *
+ * THE HOLE THIS CLOSES. The crop is padded by 55 percent each side and 85
+ * percent below, which is right for judging (a thing cut exactly at its own
+ * bounds is hard to recognise) and is exactly how a displaced box passed. A box
+ * drawn over the window between two people cuts a crop containing slivers of
+ * both their jackets, so "is a suit jacket visible in this crop" is honestly
+ * YES, and a box naming the window was kept as a box naming a jacket. Rendering
+ * a scan's boxes showed three of eight in that state.
+ *
+ * So the model is asked WHERE, and the answer is mapped out of crop space and
+ * back into the picture: the centre it reports has to land inside the box
+ * itself, with a small tolerance so a box that hugs its object honestly is not
+ * punished for the model rounding. A sliver at the edge now fails, which is the
+ * centring requirement stated in pixels.
+ *
+ * @param {{x,y,w,h}} box normalized
+ * @param {{x,y}} where the model's centre, in CROP fractions
+ * @param {{w,h}} dim the picture's pixel size
+ * @returns {boolean} true when it cannot be checked, because an unanswerable
+ *          question is not evidence against the box
+ */
+function centreLandsInBox(box, where, dim) {
+  if (!where || !box || !dim?.w || !dim?.h) return true;
+  const win = cropWindow(box, dim);
+  if (!win) return true;
+  // Crop fraction -> pixels -> picture fraction.
+  const px = (win.x + where.x * win.w) / dim.w;
+  const py = (win.y + where.y * win.h) / dim.h;
+  // A tenth of the box, but never more than two percent of the FRAME. The
+  // fraction alone was the wrong shape: on a box covering a third of the
+  // picture it forgave three percent of the whole scene, which is enough for a
+  // box over a man's tie to accept his hands two hand-widths away, measured on
+  // a real scan. Small boxes keep their rounding allowance; large ones stop
+  // buying reach with their size.
+  const tx = Math.min(box.w * 0.1, 0.02);
+  const ty = Math.min(box.h * 0.1, 0.02);
+  return (
+    px >= box.x - tx && px <= box.x + box.w + tx && py >= box.y - ty && py <= box.y + box.h + ty
+  );
+}
+
+/**
+ * The point to serve for a box: the model's heart when the box still holds it,
+ * the box's centre otherwise. One rule, used everywhere a box is replaced.
+ */
+function heartFor(point, box) {
+  const holds =
+    point &&
+    Number.isFinite(point.x) && Number.isFinite(point.y) &&
+    point.x >= box.x && point.x <= box.x + box.w &&
+    point.y >= box.y && point.y <= box.y + box.h;
+  return holds
+    ? { x: clampPoint(point.x), y: clampPoint(point.y) }
+    : { x: clampPoint(box.x + box.w / 2), y: clampPoint(box.y + box.h / 2) };
+}
+
 const PROMINENCE_ORDER = ["main", "part", "edge"];
 const PROMINENCE = new Set(PROMINENCE_ORDER);
 
@@ -808,11 +867,17 @@ function sanitizeLocated(raw, lang, level) {
     .slice(0, 60);
   if (!label) return null;
 
-  // Where the thing is. A valid box wins, because its CENTRE is a better marker
-  // spot than a point the model estimated separately: a point drawn a little low
-  // reads as the desk behind the calculator, and the box says which of the two
-  // was meant. A missing or broken box falls back to the point, which is also
-  // what every row cached before boxes existed does.
+  // Where the thing is. The box says WHICH thing was meant; the point says where
+  // its heart is, and both are wanted.
+  //
+  // The box centre used to win outright, on the reasoning that a point drawn a
+  // little low reads as the desk behind the calculator. It is the wrong spot for
+  // the one case where box centre and heart genuinely differ: a standing
+  // person's box centre is around their hips. So the point is kept when it
+  // lands inside the box and only overruled when it does not, which is exactly
+  // the "drawn a little low" case the old rule was written for. A missing or
+  // broken box falls back to the point, which is also what every row cached
+  // before boxes existed does.
   //
   // A label can name more than one thing in frame. The fifth playtest asked
   // "where is the parking ticket" in a scene holding two of them, one on each
@@ -827,8 +892,9 @@ function sanitizeLocated(raw, lang, level) {
   if (box && !boxes.some((b) => b.x === box.x && b.y === box.y && b.w === box.w && b.h === box.h)) {
     boxes.unshift(box);
   }
-  const px = box ? unitCoord(box.x + box.w / 2) : unitCoord(raw.point?.x);
-  const py = box ? unitCoord(box.y + box.h / 2) : unitCoord(raw.point?.y);
+  const heart = box ? heartFor(raw.point, box) : null;
+  const px = heart ? heart.x : unitCoord(raw.point?.x);
+  const py = heart ? heart.y : unitCoord(raw.point?.y);
   if (px === null || py === null) return null;
 
   const difficultyRaw = String(raw.difficulty == null ? "" : raw.difficulty).trim().toLowerCase();
@@ -1325,10 +1391,28 @@ async function runInventory(openai, model, imageUrl, { description, taken = [], 
     out.push({ id: startId + out.length, ...e });
     if (out.length >= (mining ? MINE_MAX : INVENTORY_MAX)) break;
   }
+  // THE ODD ONE OUT WITH NO BOX. A boxless entry cannot be crop-verified,
+  // tightened, tapped or pointed at with an arrow: it is served on the model's
+  // unchecked word alone, and a real scan served "a paper clip" that way, with
+  // its point on a bare table edge and no clip anywhere near it.
+  //
+  // Dropped only when the SAME answer gave boxes for other entries, which is
+  // the difference between a model that failed on one entry and a model (or a
+  // row cached before boxes existed) working without them at all. The second is
+  // a regime this pipeline still supports; the first is a mistake.
+  const boxed = out.filter((e) => e.box);
+  const trimmed = boxed.length && boxed.length < out.length ? boxed : out;
+  if (trimmed.length < out.length) {
+    console.log(
+      `[convo-image-targets] inventory dropped ${out.length - trimmed.length} boxless: ` +
+        out.filter((e) => !e.box).map((e) => e.gloss).join("; "),
+    );
+  }
+
   // rawCount is what the model OFFERED, kept beside what survived, because
   // "found nothing" and "found things that all failed validation" are opposite
   // failures and the handler reports them apart.
-  return { entries: out, rawCount: list.length };
+  return { entries: trimmed, rawCount: list.length };
 }
 
 /** The inventory row, if this picture has one. */
@@ -1868,7 +1952,16 @@ Be strict about "edge". A crop that is mostly a table, some papers and an arm,
 with a sliver of the thing behind them, is "edge" however certain you are that
 the thing is there.
 
-Return JSON only: { "shows": true, "prominence": "main" }
+Question 3, only if yes: WHERE in this crop is the thing?
+
+Give "where" as { "x", "y" }, the CENTRE of the thing as fractions of the crop:
+x from the left edge, y from the top edge, both 0.00 to 1.00. Be accurate. If
+the thing sits over on the right of the crop, x is near 1.00; if it is in the
+middle, x is near 0.50. This is checked against where the crop was cut from, so
+a guess of 0.5, 0.5 for something that is actually off at the side is worse than
+saying no.
+
+Return JSON only: { "shows": true, "prominence": "main", "where": { "x": 0.5, "y": 0.5 } }
 or { "shows": false, "why": "<six words>" }`;
 }
 
@@ -1891,12 +1984,21 @@ async function askCrop(openai, model, crop, label, langName) {
     });
     const parsed = JSON.parse(resp?.choices?.[0]?.message?.content || "{}");
     const prom = String(parsed?.prominence || "").toLowerCase();
+    const wx = Number(parsed?.where?.x);
+    const wy = Number(parsed?.where?.y);
     return {
       shows: parsed?.shows === true,
       why: String(parsed?.why || "").slice(0, 60),
       // Unrated but shown is treated as "part": good enough to score, not
       // asserted to be worth cropping.
       prominence: PROMINENCE.has(prom) ? prom : "part",
+      // Where in the CROP, for the centring check. Absent when the model did
+      // not answer, and absent is not a failure: an older cached judgement and
+      // a model that skipped the field are the same shape.
+      where:
+        Number.isFinite(wx) && Number.isFinite(wy) && wx >= 0 && wx <= 1 && wy >= 0 && wy <= 1
+          ? { x: wx, y: wy }
+          : null,
     };
   } catch (e) {
     // A verification that could not be run is NOT a failure of the target. The
@@ -2063,7 +2165,20 @@ async function tightenBoxes(openai, model, imageUrl, targets, lang, size) {
     if (!cand) return null;
     const oldArea = b.w * b.h;
     const newArea = cand.w * cand.h;
-    if (!(newArea > 0) || newArea > oldArea * TIGHTEN_KEEP_RATIO) return null;
+    if (!(newArea > 0)) return null;
+    // Two reasons to take the new box, and the second is v11's.
+    //
+    // SHRANK: it hugs the thing better, which is what this pass was built for.
+    // RECENTRED: the snug box's centre is not inside the OLD box at all, which
+    // means the model has just told us the thing is somewhere else. That is a
+    // displaced box being repaired rather than dropped, and repairing is much
+    // the better outcome: the alternative empties a round over a box the
+    // pipeline could have fixed from an answer it already paid for.
+    const shrank = newArea <= oldArea * TIGHTEN_KEEP_RATIO;
+    const nx = cand.x + cand.w / 2;
+    const ny = cand.y + cand.h / 2;
+    const recentred = nx < b.x || nx > b.x + b.w || ny < b.y || ny > b.y + b.h;
+    if (!shrank && !recentred) return null;
     // The tightened crop must still show the thing, on the same judge the box
     // originally passed. A snug box of the WRONG thing is worse than a loose
     // box of the right one.
@@ -2071,8 +2186,18 @@ async function tightenBoxes(openai, model, imageUrl, targets, lang, size) {
     if (!recut) return null;
     const again = await timed("tighten.ask", () => askCrop(openai, check, recut, t.label, langName));
     if (!again.shows) return null;
+    // The recheck answers about a PADDED crop like every other check, so it
+    // needs the same centring test, or the candidate is accepted on a sliver
+    // exactly as the original box was.
+    if (!centreLandsInBox(cand, again.where, size)) return null;
+    // And a RECENTRE is a much bigger claim than a shrink: it says the thing is
+    // somewhere else entirely. Measured on a real scan, a loose recentre moved
+    // a correct box off a man in a suit and onto the window behind him. So it
+    // must be the crop's main subject, not merely present in it.
+    if (recentred && again.prominence !== "main") return null;
     console.log(
-      `[convo-image-targets] tightened "${t.label}": area ${(oldArea * 100).toFixed(1)}% -> ${(newArea * 100).toFixed(1)}% of frame (${Math.round((1 - newArea / oldArea) * 100)}% smaller)`,
+      `[convo-image-targets] ${recentred ? "RECENTRED" : "tightened"} "${t.label}": area ${(oldArea * 100).toFixed(1)}% -> ${(newArea * 100).toFixed(1)}% of frame` +
+        (recentred ? ` (centre moved outside the old box)` : ` (${Math.round((1 - newArea / oldArea) * 100)}% smaller)`),
     );
     return { i, box: cand, prominence: again.prominence };
   });
@@ -2085,17 +2210,7 @@ async function tightenBoxes(openai, model, imageUrl, targets, lang, size) {
     boxes[0] = r.box;
     t.box = r.box;
     if (Array.isArray(t.boxes)) t.boxes = boxes;
-    // The model's own point is the HEART, and a person's heart is not the
-    // middle of their box, so it is kept whenever the tightened box still
-    // contains it. Only a point the shrink left outside falls back to centre.
-    const kept = t.point;
-    const holds =
-      kept &&
-      kept.x >= r.box.x && kept.x <= r.box.x + r.box.w &&
-      kept.y >= r.box.y && kept.y <= r.box.y + r.box.h;
-    if (!holds) {
-      t.point = { x: clampPoint(r.box.x + r.box.w / 2), y: clampPoint(r.box.y + r.box.h / 2) };
-    }
+    t.point = heartFor(t.point, r.box);
     tightened++;
   }
   if (tightened) {
@@ -2148,6 +2263,12 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
         // unjudged is not evidence that it would make a good crop.
         if (!crop) return { ti, ci, shows: true, prominence: "part" };
         const a = await timed("crop.ask", () => askCrop(openai, check, crop, p.t.label, langName));
+        // THE CENTRING REQUIREMENT. Present in the padded crop is not the same
+        // claim as inside the box, and the gap between those two is where a
+        // displaced box lived.
+        if (a.shows && !centreLandsInBox(c.box, a.where, size)) {
+          return { ti, ci, shows: false, why: "thing is outside this box" };
+        }
         return { ti, ci, shows: a.shows, why: a.why, prominence: a.prominence };
       }),
     ),
@@ -2182,7 +2303,8 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
       const crop = await timed("crop.cut", () => cropRegion(imageUrl, again, size));
       if (!crop) return null;
       const a = await timed("crop.ask", () => askCrop(openai, check, crop, p.t.label, langName));
-      return a.shows ? { ti, box: again, visibility: a.prominence || "partial" } : null;
+      if (!a.shows || !centreLandsInBox(again, a.where, size)) return null;
+      return { ti, box: again, visibility: a.prominence || "partial" };
     }),
     VERIFY_CONCURRENCY,
   );
@@ -2227,9 +2349,12 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
       // perfectly good name and find target, because a box that is right is
       // still right even when the view of it is poor.
       cropOk: CROP_GATE.has(kept[0].prominence),
-      // The point follows the box it belongs to, or the marker keeps pointing
-      // at where the box used to be.
-      point: { x: clampPoint(first.x + first.w / 2), y: clampPoint(first.y + first.h / 2) },
+      // The point follows the box it belongs to, unless the model's own HEART
+      // still lands inside that box, in which case it is the better answer: a
+      // person's heart is their chest and their box's middle is their hips.
+      // This line ran before the tighten pass, so replacing it there was not
+      // enough; the heart was already gone by the time tightening looked.
+      point: heartFor(t.point, first),
       boxOk: true,
     };
   });

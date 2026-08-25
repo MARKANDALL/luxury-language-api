@@ -177,7 +177,12 @@ function mockRound(targets, opts = {}) {
         if (!shows) return Promise.resolve(reply({ shows: false, why: "not in crop" }));
         const prom =
           typeof opts.prominence === "function" ? opts.prominence(text) : opts.prominence || "main";
-        return Promise.resolve(reply({ shows: true, prominence: prom }));
+        // v11: `where` is the thing's centre in CROP fractions. The default is
+        // dead centre, which maps back inside any box; a test that wants the
+        // displaced case sets opts.where to push it out to an edge.
+        return Promise.resolve(
+          reply({ shows: true, prominence: prom, where: opts.where || { x: 0.5, y: 0.5 } }),
+        );
       }
       case "relocalize":
         return Promise.resolve(reply(opts.relocalized ?? { box: { x: 0.4, y: 0.4, w: 0.1, h: 0.1 } }));
@@ -2361,6 +2366,16 @@ describe("convo-image-targets box tightening", () => {
     choices: ["a kettle", "a pot", "a pan", "a jug"],
   }];
 
+  it("REFUSES a recentre that is not the crop's main subject", async () => {
+    // A recentre says the thing is somewhere else entirely, which is a much
+    // bigger claim than a shrink. Measured on a real scan, a loose recentre
+    // moved a correct box off a man in a suit and onto the window behind him.
+    mockRound(loose(), { snug: { x: 0.85, y: 0.85, w: 0.12, h: 0.12 }, prominence: "part" });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets[0].box).toEqual({ x: 0.4, y: 0.4, w: 0.2, h: 0.2 });
+  });
+
   it("keeps the tighter box when it shrinks and still shows the thing", async () => {
     // The snug ask answers in CROP fractions; centred half-size inside the
     // padded crop maps back to a strictly smaller image box.
@@ -2403,5 +2418,105 @@ describe("convo-image-targets box tightening", () => {
     const api = await client();
     const r = await post(api);
     expect(r.body.targets[0].box).toEqual({ x: 0.4, y: 0.4, w: 0.2, h: 0.2 });
+  });
+});
+
+
+// ── The centring requirement (v11 B) ────────────────────────────────────────
+//
+// The crop is PADDED, by 55 percent each side and 85 below, which is right for
+// judging and is exactly how a displaced box passed. A box drawn over the
+// window between two people cuts a crop containing slivers of both jackets, so
+// "is a suit jacket visible in this crop" is honestly yes. Rendering one real
+// scan's boxes found three of eight in that state.
+
+describe("convo-image-targets box centring", () => {
+  const one = (label) => [{
+    label,
+    point: { x: 0.5, y: 0.5 },
+    box: { x: 0.4, y: 0.4, w: 0.1, h: 0.1 },
+    cloze: "Here is ___.",
+    choices: [label, "a pot", "a pan", "a jug"],
+  }];
+
+  it("keeps a box whose thing is in the middle of the crop", async () => {
+    mockRound(one("a kettle"), { where: { x: 0.5, y: 0.5 } });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets).toHaveLength(1);
+  });
+
+  it("REJECTS a box whose thing is a sliver at the crop's edge", async () => {
+    // x 0.02 of a crop 2.1 box-widths across lands far outside the box: the
+    // model is saying the thing is beside the box, not in it.
+    mockRound(one("a suit jacket"), { where: { x: 0.02, y: 0.5 } });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets).toHaveLength(0);
+    expect(r.body.reason).toBe("no_valid_targets");
+  });
+
+  it("rejects a thing sitting below the box as well as beside it", async () => {
+    mockRound(one("a table top"), { where: { x: 0.5, y: 0.97 } });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets).toHaveLength(0);
+  });
+
+  it("does not punish a box for a centre reported just off its rim", async () => {
+    // The crop is 2.1 box-widths wide, so the box occupies the middle ~0.48 of
+    // it: 0.40 and 0.60 are inside the box, and a tenth-of-a-box tolerance
+    // covers the rounding either way.
+    for (const where of [{ x: 0.4, y: 0.5 }, { x: 0.6, y: 0.5 }]) {
+      mockRound(one("a kettle"), { where });
+      const api = await client();
+      const r = await post(api);
+      expect(r.body.targets).toHaveLength(1);
+    }
+  });
+
+  it("keeps a box when the model did not answer where at all", async () => {
+    // An unanswerable question is not evidence against the box, and a cached
+    // judgement from before the field existed is the same shape.
+    mockRound(one("a kettle"), { where: null });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets).toHaveLength(1);
+  });
+});
+
+
+// ── The boxless odd one out (v11 B) ─────────────────────────────────────────
+//
+// A boxless entry cannot be crop-verified, tightened, tapped or pointed at: it
+// is served on the model's unchecked word alone. A real scan served "a paper
+// clip" that way, with its point on a bare table edge. But a whole answer with
+// no boxes is a different regime, and rows cached before boxes existed still
+// live in it, so only the odd one out goes.
+
+describe("convo-image-targets boxless entries", () => {
+  const withBox = (label, x) => ({
+    label, point: { x, y: 0.5 }, box: { x, y: 0.4, w: 0.08, h: 0.12 },
+    cloze: "Here is ___.", choices: [label, "a pot", "a pan", "a jug"],
+  });
+  const noBox = (label, x) => ({
+    label, point: { x, y: 0.5 },
+    cloze: "Here is ___.", choices: [label, "a pot", "a pan", "a jug"],
+  });
+
+  it("drops the one entry that came back without a box", async () => {
+    mockRound([withBox("a kettle", 0.2), noBox("a paper clip", 0.5), withBox("a ladle", 0.7)]);
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets.map((t) => t.label)).toEqual(["a kettle", "a ladle"]);
+  });
+
+  it("keeps an answer that gave no boxes AT ALL, which is a different regime", async () => {
+    // Rows cached before boxes existed still live here, and so does a model
+    // answering an older shape. Dropping these would empty the round.
+    mockRound([noBox("a mug", 0.2), noBox("a jar", 0.5), noBox("a window", 0.8)]);
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets.map((t) => t.label)).toEqual(["a mug", "a jar", "a window"]);
   });
 });
