@@ -90,6 +90,8 @@ vi.mock("../lib/supabase.js", () => ({
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
+import { cropWindow } from "../lib/crop-window.js";
+
 const IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
 
 // A well-formed English target set, spread across the picture.
@@ -112,6 +114,37 @@ function reply(obj) {
 // how many times the model was asked to GENERATE must not be counting crop
 // checks, and since v7 must not be counting the enumeration pass or the top-up
 // either. Detected by a phrase unique to each prompt.
+/**
+ * The box a crop was cut for, decoded from what the crop mock returned.
+ *
+ * The route hands the crop straight to the model, so the encoded suffix arrives
+ * in the message the model mock is looking at.
+ */
+function cropBoxOf(text) {
+  const m = /QQ==#([-\d.,]+)/.exec(String(text || ""));
+  if (!m) return null;
+  const [x, y, w, h] = m[1].split(",").map(Number);
+  return [x, y, w, h].every(Number.isFinite) ? { x, y, w, h } : null;
+}
+
+/**
+ * Bounds, in CROP fractions, that exactly cover `box`: what a good model says
+ * about an honest box. Uses the route's own crop-window arithmetic rather than
+ * a hand-computed constant, so a change to the padding cannot silently turn
+ * every default answer into a partial-coverage failure.
+ */
+function boundsCovering(box) {
+  if (!box) return { x: 0.26, y: 0.28, w: 0.48, h: 0.44 };
+  const dim = { w: 1600, h: 900 }; // matches sizeSpy, so the window is the real one
+  const win = cropWindow(box, dim);
+  return {
+    x: (box.x * dim.w - win.x) / win.w,
+    y: (box.y * dim.h - win.y) / win.h,
+    w: (box.w * dim.w) / win.w,
+    h: (box.h * dim.h) / win.h,
+  };
+}
+
 const KIND = {
   // v10: the mine call (deepen) carries the top-up's sentinel sentence and ALSO
   // inventory-prompt phrases, so topUp must be matched BEFORE inventory.
@@ -177,11 +210,23 @@ function mockRound(targets, opts = {}) {
         if (!shows) return Promise.resolve(reply({ shows: false, why: "not in crop" }));
         const prom =
           typeof opts.prominence === "function" ? opts.prominence(text) : opts.prominence || "main";
-        // v11: `where` is the thing's centre in CROP fractions. The default is
-        // dead centre, which maps back inside any box; a test that wants the
-        // displaced case sets opts.where to push it out to an edge.
+        // v12: `bounds` is the thing's whole visible extent in CROP fractions.
+        // The default covers the middle of the crop, which is exactly where an
+        // honest box sits inside its own padded crop: the crop is 2.1
+        // box-widths across, so the box occupies the middle ~0.48 of it. A test
+        // that wants a displaced or partial box overrides opts.bounds.
         return Promise.resolve(
-          reply({ shows: true, prominence: prom, where: opts.where || { x: 0.5, y: 0.5 } }),
+          reply({
+            shows: true,
+            prominence: prom,
+            bounds:
+              opts.bounds === null
+                ? undefined
+                : (typeof opts.bounds === "function"
+                    ? opts.bounds(cropBoxOf(text))
+                    : opts.bounds) || boundsCovering(cropBoxOf(text)),
+            ...(opts.cut ? { cut: true } : null),
+          }),
         );
       }
       case "relocalize":
@@ -280,7 +325,12 @@ beforeEach(() => {
   // A crop always cuts, and every crop shows what it claims, unless a test says
   // otherwise. Default-pass keeps the other eighty tests about what they were
   // about instead of about verification.
-  cropSpy.mockResolvedValue("data:image/jpeg;base64,QQ==");
+  // Encodes the BOX it was asked to cut. The model mock decodes it and answers
+  // bounds that exactly cover that box, which is what a good model would say
+  // about an honest box, whatever shape the fixture chose.
+  cropSpy.mockImplementation((_url, box) =>
+    Promise.resolve(`data:image/jpeg;base64,QQ==#${box ? [box.x, box.y, box.w, box.h].join(",") : ""}`),
+  );
   sizeSpy.mockResolvedValue({ w: 1600, h: 900 });
   sbState.enabled = true;
   sbState.row = null;
@@ -1261,7 +1311,9 @@ describe("convo-image-targets crop verification", () => {
       if (!text.includes(KIND.crop)) continue;
       const images = call[0].messages[0].content.filter((c) => c.type === "image_url");
       expect(images).toHaveLength(1);
-      expect(images[0].image_url.url).toBe("data:image/jpeg;base64,QQ==");
+      // The crop mock encodes the box it cut onto the end of the URI, so the
+      // model mock can answer bounds about the right box.
+      expect(images[0].image_url.url).toMatch(/^data:image\/jpeg;base64,QQ==#/);
     }
   });
 
@@ -1880,7 +1932,7 @@ describe("convo-image-targets validation", () => {
     expect(locate).toContain("VISUALLY UNAMBIGUOUS");
     expect(locate).toContain("re-read your own list once");
     expect(locate).toContain("TIGHT");
-    expect(locate).toContain("IT MUST CONTAIN THE THING YOU NAMED");
+    expect(locate).toContain("IT MUST CONTAIN ALL OF THE THING YOU NAMED");
     expect(locate).toContain("NEVER A PERSON'S BODY");
     expect(locate).toContain("NO VAST SURFACES");
     // And it is told, in as many words, not to do the writing. This is the
@@ -2422,15 +2474,21 @@ describe("convo-image-targets box tightening", () => {
 });
 
 
-// ── The centring requirement (v11 B) ────────────────────────────────────────
+// ── Coverage, not centring (v11 B, upgraded in v12) ─────────────────────────
 //
 // The crop is PADDED, by 55 percent each side and 85 below, which is right for
-// judging and is exactly how a displaced box passed. A box drawn over the
-// window between two people cuts a crop containing slivers of both jackets, so
-// "is a suit jacket visible in this crop" is honestly yes. Rendering one real
-// scan's boxes found three of eight in that state.
+// judging and is exactly how a displaced box passed: a box over the window
+// between two people cuts a crop containing slivers of both jackets, so "is a
+// suit jacket visible in this crop" is honestly yes.
+//
+// Centring caught that and missed the other half. A clipboard box starting
+// below the clip still held the clipboard's CENTRE; a person's box starting at
+// the chin still held most of the person. Both passed, and both were filed from
+// a rendered scan. Coverage asks the two questions a bounding box is actually
+// making a claim about: does it CONTAIN the thing, and is it not much BIGGER
+// than the thing.
 
-describe("convo-image-targets box centring", () => {
+describe("convo-image-targets box coverage", () => {
   const one = (label) => [{
     label,
     point: { x: 0.5, y: 0.5 },
@@ -2439,46 +2497,76 @@ describe("convo-image-targets box centring", () => {
     choices: [label, "a pot", "a pan", "a jug"],
   }];
 
-  it("keeps a box whose thing is in the middle of the crop", async () => {
-    mockRound(one("a kettle"), { where: { x: 0.5, y: 0.5 } });
+  it("keeps a box that bounds its thing", async () => {
+    mockRound(one("a kettle"));
     const api = await client();
     const r = await post(api);
     expect(r.body.targets).toHaveLength(1);
+    expect(r.body.targets[0].box).toEqual({ x: 0.4, y: 0.4, w: 0.1, h: 0.1 });
   });
 
-  it("REJECTS a box whose thing is a sliver at the crop's edge", async () => {
-    // x 0.02 of a crop 2.1 box-widths across lands far outside the box: the
-    // model is saying the thing is beside the box, not in it.
-    mockRound(one("a suit jacket"), { where: { x: 0.02, y: 0.5 } });
+  it("REDRAWS a box whose thing is beside it, rather than accepting it", async () => {
+    // The thing is over at the left of the padded crop, so the box names
+    // something else. The bounds the model just gave ARE the thing's place, so
+    // the box is redrawn to them and re-checked rather than dropped.
+    mockRound(one("a suit jacket"), { bounds: (b) => (b && b.x === 0.4 && b.w === 0.1 ? { x: 0.0, y: 0.28, w: 0.16, h: 0.44 } : undefined) });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets).toHaveLength(1);
+    expect(r.body.targets[0].box.x).toBeLessThan(0.4);
+  });
+
+  it("REDRAWS a box that covers only PART of its thing", async () => {
+    // The clipboard case: the box starts below the clip, so it holds the
+    // thing's centre and passed centring while covering half of it.
+    mockRound(one("a clipboard"), { bounds: (b) => (b && b.x === 0.4 && b.w === 0.1 ? { x: 0.26, y: 0.05, w: 0.48, h: 0.67 } : undefined) });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets).toHaveLength(1);
+    expect(r.body.targets[0].box.y).toBeLessThan(0.4);
+  });
+
+  it("REDRAWS a box that is mostly not the thing", async () => {
+    // A box several times the thing's area accepts taps on whatever else is in
+    // it. This is the test a person's box swallowing the window fails. The
+    // bounds have to map to a SERVABLE box: a redraw is held to the same box
+    // gate a model's own box is, and anything under the minimum side is a
+    // failure rather than a licence to keep the box that just failed.
+    mockRound(one("a name badge"), { bounds: (b) => (b && b.x === 0.4 && b.w === 0.1 ? { x: 0.42, y: 0.4, w: 0.16, h: 0.2 } : undefined) });
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.targets).toHaveLength(1);
+    expect(r.body.targets[0].box.w).toBeLessThan(0.1);
+  });
+
+  it("drops the target when the REDRAW does not check out either", async () => {
+    // A redraw is a new claim and gets its own check.
+    let asks = 0;
+    mockRound(one("a suit jacket"), {
+      bounds: { x: 0.0, y: 0.28, w: 0.16, h: 0.44 },
+      shows: () => ++asks <= 1,
+    });
     const api = await client();
     const r = await post(api);
     expect(r.body.targets).toHaveLength(0);
     expect(r.body.reason).toBe("no_valid_targets");
   });
 
-  it("rejects a thing sitting below the box as well as beside it", async () => {
-    mockRound(one("a table top"), { where: { x: 0.5, y: 0.97 } });
+  it("forgives excess on a thing that runs past the crop's edge", async () => {
+    // Bounds clipped at the edge understate the thing's area, so the excess
+    // ratio would convict an honest box for being bigger than the fragment it
+    // could see.
+    mockRound(one("a long banner"), { bounds: { x: 0.26, y: 0.28, w: 0.16, h: 0.16 }, cut: true });
     const api = await client();
     const r = await post(api);
-    expect(r.body.targets).toHaveLength(0);
+    expect(r.body.targets).toHaveLength(1);
+    expect(r.body.targets[0].box).toEqual({ x: 0.4, y: 0.4, w: 0.1, h: 0.1 });
   });
 
-  it("does not punish a box for a centre reported just off its rim", async () => {
-    // The crop is 2.1 box-widths wide, so the box occupies the middle ~0.48 of
-    // it: 0.40 and 0.60 are inside the box, and a tenth-of-a-box tolerance
-    // covers the rounding either way.
-    for (const where of [{ x: 0.4, y: 0.5 }, { x: 0.6, y: 0.5 }]) {
-      mockRound(one("a kettle"), { where });
-      const api = await client();
-      const r = await post(api);
-      expect(r.body.targets).toHaveLength(1);
-    }
-  });
-
-  it("keeps a box when the model did not answer where at all", async () => {
+  it("keeps a box when the model did not answer at all", async () => {
     // An unanswerable question is not evidence against the box, and a cached
     // judgement from before the field existed is the same shape.
-    mockRound(one("a kettle"), { where: null });
+    mockRound(one("a kettle"), { bounds: null });
     const api = await client();
     const r = await post(api);
     expect(r.body.targets).toHaveLength(1);

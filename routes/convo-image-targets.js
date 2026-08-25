@@ -321,6 +321,91 @@ const VISIBILITY = new Set(VISIBILITY_ORDER);
 // thing is in the picture you are about to be shown, and the sixth playtest's
 // chair crop kept that promise only in the sense that a sliver of chair was
 // present behind a table, some papers, a lap and an arm.
+// How much of the thing's visible extent the box must actually contain. Below
+// this the box is showing a PART of the thing, and a part is what "the box
+// excludes the head" looks like from the outside.
+const COVER_MIN = 0.75;
+// And how much bigger than the thing the box may be. A box with three times the
+// thing's area is mostly not the thing, so it accepts taps on whatever else is
+// in it. Generous, because a bounding box around a diagonal or an irregular
+// object honestly contains a lot of air.
+const EXCESS_MAX = 3;
+
+/**
+ * Map a box given in CROP fractions back into picture fractions.
+ *
+ * The crop is padded, by 55 percent each side and 85 below, so crop space and
+ * picture space are genuinely different and this is the only bridge between
+ * them. Shares cropWindow with the cutter, so the two cannot drift.
+ */
+function boundsToPicture(box, bounds, dim) {
+  const win = cropWindow(box, dim);
+  if (!win || !bounds) return null;
+  const out = {
+    x: (win.x + bounds.x * win.w) / dim.w,
+    y: (win.y + bounds.y * win.h) / dim.h,
+    w: (bounds.w * win.w) / dim.w,
+    h: (bounds.h * win.h) / dim.h,
+  };
+  // Deliberately NOT through unitBox. That gate decides what may be SERVED, and
+  // it has a minimum side: a genuinely small object's bounds fall under it, and
+  // sending a measurement through a serving gate turned the answer into null,
+  // which coversTheThing reads as "unanswerable" and waves through. The exact
+  // case it waved through is a tiny thing in a big box, which is the case the
+  // excess test exists for. Measurement is measurement; whether the result is
+  // servable is asked separately, at the point of redrawing.
+  return [out.x, out.y, out.w, out.h].every(Number.isFinite) && out.w > 0 && out.h > 0 ? out : null;
+}
+
+/** Area of the overlap of two normalized boxes. */
+function overlapArea(a, b) {
+  const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  return w > 0 && h > 0 ? w * h : 0;
+}
+
+/**
+ * Does this box BOUND the thing, or merely touch it?
+ *
+ * THE UPGRADE FROM CENTRING. Asking whether the thing's centre landed in the
+ * box caught a box drawn beside the thing and missed every box drawn across
+ * part of it: a clipboard box that started below the clip still held the
+ * clipboard's centre, and a person's box that started at the chin still held
+ * most of the person. Both passed, and both were filed from a rendered scan.
+ *
+ * Coverage asks the two questions a bounding box is actually making a claim
+ * about. Does the box CONTAIN the thing's visible extent, or is it showing a
+ * part? And is it not much BIGGER than the thing, or is it mostly other things?
+ *
+ * @returns {{ok: boolean, why: string, cover: number, excess: number, found: object|null}}
+ *          `found` is the thing's real place in picture fractions, which is
+ *          what a failed box is redrawn to rather than dropped for.
+ */
+function coversTheThing(box, verdict, dim) {
+  const found = boundsToPicture(box, verdict?.bounds, dim);
+  // Unanswerable is not evidence against the box: an older cached judgement and
+  // a model that skipped the field are the same shape, and dropping targets for
+  // a question that was never put would empty rounds for no reason.
+  if (!found || !dim?.w || !dim?.h) return { ok: true, why: "", cover: 1, excess: 1, found: null };
+
+  const thing = found.w * found.h;
+  if (!(thing > 0)) return { ok: true, why: "", cover: 1, excess: 1, found: null };
+
+  const cover = overlapArea(box, found) / thing;
+  const excess = (box.w * box.h) / thing;
+
+  if (cover < COVER_MIN) {
+    return { ok: false, why: "box covers only part of it", cover, excess, found };
+  }
+  // A thing running past the crop's edge has bounds that are a floor rather
+  // than the truth, so its area is understated and the excess ratio would
+  // convict an honest box for being bigger than the fragment it could see.
+  if (!verdict.cut && excess > EXCESS_MAX) {
+    return { ok: false, why: "box much bigger than the thing", cover, excess, found };
+  }
+  return { ok: true, why: "", cover, excess, found };
+}
+
 /**
  * Is the thing the model found actually INSIDE the box we asked about?
  *
@@ -344,13 +429,11 @@ const VISIBILITY = new Set(VISIBILITY_ORDER);
  * @returns {boolean} true when it cannot be checked, because an unanswerable
  *          question is not evidence against the box
  */
-function centreLandsInBox(box, where, dim) {
-  if (!where || !box || !dim?.w || !dim?.h) return true;
-  const win = cropWindow(box, dim);
-  if (!win) return true;
-  // Crop fraction -> pixels -> picture fraction.
-  const px = (win.x + where.x * win.w) / dim.w;
-  const py = (win.y + where.y * win.h) / dim.h;
+function centreLandsInBox(box, verdict, dim) {
+  const found = boundsToPicture(box, verdict?.bounds, dim);
+  if (!found || !box || !dim?.w || !dim?.h) return true;
+  const px = found.x + found.w / 2;
+  const py = found.y + found.h / 2;
   // A tenth of the box, but never more than two percent of the FRAME. The
   // fraction alone was the wrong shape: on a box covering a third of the
   // picture it forgave three percent of the whole scene, which is enough for a
@@ -1228,8 +1311,12 @@ Return up to ${INVENTORY_MAX} entries. For each:
   to be right.
   * TIGHT. It must hug the object. A box with room to spare around the thing
     accepts taps on whatever is beside it.
-  * IT MUST CONTAIN THE THING YOU NAMED. If the box you would draw does not have
-    the object inside it, the entry is wrong. Check this before you keep it.
+  * IT MUST CONTAIN ALL OF THE THING YOU NAMED, not the part of it that catches
+    your eye. A box for a PERSON runs from the TOP OF THEIR HEAD, hair included,
+    down to whatever of them is visible: a box that starts at the chin is a box
+    of a torso. A box for a garment reaches its hem and its cuffs. A box for a
+    clipboard includes its clip. Trace the whole outline before you write the
+    numbers, then check the box against it.
   * NEVER A PERSON'S BODY. A box over someone's chest, neck, face or arm is only
     acceptable when the thing you named IS what they are wearing or holding, and
     then the box goes around the garment or the item, not the person.
@@ -1269,8 +1356,10 @@ one in "boxes" or make the gloss specific to ONE of them.
 Never pick one of several lookalikes silently.
 
 Before you answer, re-read your own list once and drop anything whose box does not
-contain the thing it names, anything drawn over a person's body that is not
-their clothing or held item, and any vast bare surface.
+contain the WHOLE of the thing it names, anything drawn over a person's body that
+is not their clothing or held item, and any vast bare surface. Look hardest at
+the top edge of every box: a box that begins part way down its object is the
+commonest way this goes wrong.
 
 Output MUST be valid JSON only, exactly:
 { "inventory": [ { "gloss": "...", "granularity": "object",
@@ -1978,16 +2067,24 @@ Be strict about "edge". A crop that is mostly a table, some papers and an arm,
 with a sliver of the thing behind them, is "edge" however certain you are that
 the thing is there.
 
-Question 3, only if yes: WHERE in this crop is the thing?
+Question 3, only if yes: WHERE IS ALL OF IT in this crop?
 
-Give "where" as { "x", "y" }, the CENTRE of the thing as fractions of the crop:
-x from the left edge, y from the top edge, both 0.00 to 1.00. Be accurate. If
-the thing sits over on the right of the crop, x is near 1.00; if it is in the
-middle, x is near 0.50. This is checked against where the crop was cut from, so
-a guess of 0.5, 0.5 for something that is actually off at the side is worse than
-saying no.
+Give "bounds" as { "x", "y", "w", "h" }: the box that contains the thing's WHOLE
+visible extent within this crop, as fractions of the crop. x and y are its
+top-left corner from the left and top edges, w and h its width and height.
 
-Return JSON only: { "shows": true, "prominence": "main", "where": { "x": 0.5, "y": 0.5 } }
+  * ALL of it, not the part that catches your eye. A PERSON runs from the top of
+    their head to whatever of them is visible, hair included. A garment runs to
+    its hem and its cuffs. A clipboard includes its clip.
+  * Only what is IN this crop. If the thing continues past an edge, stop at the
+    edge and say so with "cut": true.
+  * Be accurate rather than safe. These bounds are checked against the box the
+    crop was cut for, and a box that does not cover them is REDRAWN to them, so
+    lazy bounds move a marker onto the wrong thing.
+
+Return JSON only:
+{ "shows": true, "prominence": "main",
+  "bounds": { "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 }, "cut": false }
 or { "shows": false, "why": "<six words>" }`;
 }
 
@@ -2010,21 +2107,21 @@ async function askCrop(openai, model, crop, label, langName) {
     });
     const parsed = JSON.parse(resp?.choices?.[0]?.message?.content || "{}");
     const prom = String(parsed?.prominence || "").toLowerCase();
-    const wx = Number(parsed?.where?.x);
-    const wy = Number(parsed?.where?.y);
+    const bounds = unitBox(parsed?.bounds);
     return {
       shows: parsed?.shows === true,
       why: String(parsed?.why || "").slice(0, 60),
       // Unrated but shown is treated as "part": good enough to score, not
       // asserted to be worth cropping.
       prominence: PROMINENCE.has(prom) ? prom : "part",
-      // Where in the CROP, for the centring check. Absent when the model did
-      // not answer, and absent is not a failure: an older cached judgement and
-      // a model that skipped the field are the same shape.
-      where:
-        Number.isFinite(wx) && Number.isFinite(wy) && wx >= 0 && wx <= 1 && wy >= 0 && wy <= 1
-          ? { x: wx, y: wy }
-          : null,
+      // The thing's whole visible extent WITHIN THE CROP, for the coverage
+      // check. Absent when the model did not answer, and absent is not a
+      // failure: an older cached judgement and a model that skipped the field
+      // are the same shape.
+      bounds,
+      // The thing runs past the crop's edge, so its bounds are a floor rather
+      // than the truth and the excess test cannot be applied to them.
+      cut: parsed?.cut === true,
     };
   } catch (e) {
     // A verification that could not be run is NOT a failure of the target. The
@@ -2215,7 +2312,7 @@ async function tightenBoxes(openai, model, imageUrl, targets, lang, size) {
     // The recheck answers about a PADDED crop like every other check, so it
     // needs the same centring test, or the candidate is accepted on a sliver
     // exactly as the original box was.
-    if (!centreLandsInBox(cand, again.where, size)) return null;
+    if (!coversTheThing(cand, again, size).ok) return null;
     // And a RECENTRE is a much bigger claim than a shrink: it says the thing is
     // somewhere else entirely. Measured on a real scan, a loose recentre moved
     // a correct box off a man in a suit and onto the window behind him. So it
@@ -2289,13 +2386,37 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
         // unjudged is not evidence that it would make a good crop.
         if (!crop) return { ti, ci, shows: true, prominence: "part" };
         const a = await timed("crop.ask", () => askCrop(openai, check, crop, p.t.label, langName));
-        // THE CENTRING REQUIREMENT. Present in the padded crop is not the same
-        // claim as inside the box, and the gap between those two is where a
-        // displaced box lived.
-        if (a.shows && !centreLandsInBox(c.box, a.where, size)) {
-          return { ti, ci, shows: false, why: "thing is outside this box" };
+        if (!a.shows) return { ti, ci, shows: false, why: a.why };
+
+        // COVERAGE, not merely presence. The box has to BOUND the thing's
+        // visible extent without much excess; "somewhere in the padded crop"
+        // was how a box drawn beside the thing survived, and "holds its centre"
+        // was how a box drawn across PART of it survived.
+        const cov = coversTheThing(c.box, a, size);
+        if (cov.ok) return { ti, ci, shows: true, prominence: a.prominence };
+
+        // A REDRAW IS PREFERRED TO ACCEPTING A PARTIAL BOX, and the answer that
+        // pays for it has already been bought: `found` is where the model just
+        // said the whole thing is. Verified in its own right before it is
+        // trusted, because a redraw is a new claim and the round is only as
+        // honest as its last check.
+        // The measurement is one question, whether it is SERVABLE is another. A
+        // redraw has to survive the same box gate a model's own box does, and
+        // one that cannot is a failure rather than a licence to keep the box
+        // that just failed.
+        const redrawn = unitBox(cov.found);
+        if (!redrawn) return { ti, ci, shows: false, why: cov.why };
+        console.log(
+          `[convo-image-targets] redraw "${p.t.label}": ${cov.why} ` +
+            `(cover ${(cov.cover * 100).toFixed(0)}%, excess ${cov.excess.toFixed(1)}x)`,
+        );
+        const recrop = await timed("crop.cut", () => cropRegion(imageUrl, redrawn, size));
+        if (!recrop) return { ti, ci, shows: false, why: cov.why };
+        const b = await timed("crop.ask", () => askCrop(openai, check, recrop, p.t.label, langName));
+        if (!b.shows || !coversTheThing(redrawn, b, size).ok) {
+          return { ti, ci, shows: false, why: cov.why };
         }
-        return { ti, ci, shows: a.shows, why: a.why, prominence: a.prominence };
+        return { ti, ci, shows: true, prominence: b.prominence, box: redrawn, redrawn: true };
       }),
     ),
   );
@@ -2308,7 +2429,9 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
     const cand = plan[v.ti].cands[v.ci];
     // A sliver still SCORES: it is a real instance of the thing and a learner
     // who taps it is right. What it does not do is earn the right to be cropped.
-    if (v.shows) byTarget[v.ti].push({ ...cand, prominence: v.prominence });
+    // A redrawn candidate carries its NEW box: the one the model pointed at when
+    // it was told the old one covered only part of the thing.
+    if (v.shows) byTarget[v.ti].push({ ...cand, ...(v.box ? { box: v.box } : null), prominence: v.prominence });
     else notes[v.ti].push(v.why);
   }
 
@@ -2329,7 +2452,7 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
       const crop = await timed("crop.cut", () => cropRegion(imageUrl, again, size));
       if (!crop) return null;
       const a = await timed("crop.ask", () => askCrop(openai, check, crop, p.t.label, langName));
-      if (!a.shows || !centreLandsInBox(again, a.where, size)) return null;
+      if (!a.shows || !coversTheThing(again, a, size).ok) return null;
       return { ti, box: again, visibility: a.prominence || "partial" };
     }),
     VERIFY_CONCURRENCY,
