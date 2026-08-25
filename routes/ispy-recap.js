@@ -32,6 +32,12 @@ const MAX_SENTENCE_CHARS = 400;
 
 const CEFR = new Set(["A1", "A2", "B1", "B2", "C1", "C2"]);
 
+// Lux teaches American English, and leaving that to the model's default is how
+// "a passenger queue" reached a learner on an airport scene where the word is
+// "a line". Said out loud here as well as in the targets route, because a recap
+// and a bridge sentence are read as the game's own voice.
+const AMERICAN = "Use AMERICAN English throughout: a line not a queue, a faucet, a trash can, an elevator, a sweater, pants, sneakers, a parking lot, a sidewalk. American spelling: color, gray, traveler, center.";
+
 const LANG_NAME = {
   en: "English",
   es: "Spanish (neutral Latin American)",
@@ -86,7 +92,8 @@ function buildPrompt(lang, level, words) {
   const langName = LANG_NAME[lang];
   const guide = SENTENCE_GUIDE[level] || SENTENCE_GUIDE.B1;
   return [
-    `You write a two-sentence recap of a photograph for a language learner, in ${langName}.`,
+    `You write a two-sentence recap of a photograph for a language learner, in ${langName}.` +
+      (lang === "en" ? ` ${AMERICAN}` : ""),
     "",
     "The learner has just played a vocabulary game on this photograph and found",
     "the words listed below. Write TWO sentences that describe the photograph and",

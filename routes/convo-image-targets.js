@@ -1176,6 +1176,24 @@ function sanitizeLocatedList(rawList, lang, level, deep = false) {
 
 // ── The inventory pass ──────────────────────────────────────────────────────
 
+// The one place American English is spelled out, shared by every prompt that
+// NAMES something: the inventory writes the glosses, the band pass writes the
+// labels, and enrich writes the clues, sentences and wrong answers. Lux teaches
+// American English, and leaving that to the model's default served "a passenger
+// queue" repeatedly on an airport scene where the word is "a line".
+//
+// This is about which WORD the game teaches. It does not narrow what a learner
+// may SAY: the regional-note machinery below still accepts "a lift" for an
+// elevator and tells them warmly which one they will usually hear.
+const AMERICAN = `
+AMERICAN ENGLISH, always. Where American and British English use different words
+for the same thing, the American one is the answer: a line (not a queue), a
+faucet, a trash can, an elevator, a flashlight, a sweater, pants, sneakers, a
+cell phone, a parking lot, a sidewalk, a cart, the trunk, the hood, a cookie, an
+apartment, a stroller, a diaper, a bathroom. American spelling too: color,
+gray, traveler, jewelry, center, labeled.
+`.trim();
+
 /**
  * The one vision look. Band-free on purpose: see the constants block above.
  *
@@ -1194,7 +1212,7 @@ Granularities, and every one of them matters:
 - "part": parts of those things. A brim, a cuff, a strap, a screen bezel.
 - "material": what things are made of, where it is visible. Leather, chrome.
 - "surface": distinct surfaces worth naming. A tiled floor, a glass partition.
-- "state": visible conditions. A queue, a crease, a reflection, wear.
+- "state": visible conditions. A line of people, a crease, a reflection, wear.
 - "action": actions frozen in the frame. Pouring, weighing, boarding.
 
 Return up to ${INVENTORY_MAX} entries. For each:
@@ -1239,6 +1257,8 @@ Entries must be VISUALLY UNAMBIGUOUS. Before you keep one, look at what
 surrounds it: if a NEARBY thing could plausibly be given the same gloss, the
 question has two right answers. Either make the gloss specific to one of them or
 list both in "boxes".
+
+${AMERICAN}
 
 Do NOT write sentences, questions, clues or wrong answers here. A later pass
 does that, and only for the entries that survive checking. Naming the thing and
@@ -1532,6 +1552,7 @@ perfectly tuned centre.`
     : "";
 
   return `
+${lang === "en" ? AMERICAN : ""}
 You are choosing WORDS for a language learner from the nameable INVENTORY of a
 photograph. Someone has already looked at the picture and listed everything in
 it; your job is which entries to teach at this level, and what to call them.
@@ -1673,7 +1694,11 @@ function nearestBand(level, counts) {
 
 const PACK = {
   en: {
-    langName: "English",
+    // AMERICAN English, said out loud rather than left to the model's default.
+    // Lux teaches American English, and "English" alone got "a passenger queue"
+    // served repeatedly on an airport scene where the word is "a line". It
+    // rides on every prompt because langName is what every prompt names.
+    langName: "American English",
     articleRule:
       'Write every label as the noun WITH its article, lowercase: "a mug", "the barista", "a window".',
     clozeExample: 'The barista is wearing ___.',
@@ -1833,7 +1858,8 @@ for them.${band}${sentence}
 Write for EVERY one of these, in this order, and change none of them:
 ${labels.map((l, i) => `${i + 1}. ${l}`).join("\n")}
 
-Every string must be in ${p.langName}. Return JSON only, no markdown.
+Every string must be in ${p.langName}. ${lang === "en" ? AMERICAN : ""}
+Return JSON only, no markdown.
 
 For each one return:
 - "label": copied back exactly as it was given, so entries can be matched up.
@@ -1885,14 +1911,14 @@ For each one return:
   Omit the field when nothing plausible comes to mind.
 - "riddle": the ATTRIBUTES of this thing and nothing else, in ${p.langName}, for
   the game "I spy something red". ${p.riddleRule}
-  Two or three attributes at most, from what is actually visible: colour first,
+  Two or three attributes at most, from what is actually visible: color first,
   then material, size or shape. ${p.riddleExample}
   It MUST NOT contain the NOUN being taught, or any word that names what the
   thing IS. "small and red" is a riddle; "a small red toolbox" is the answer.
   Some labels already describe themselves ("a brown long-sleeve shirt"): there,
   keep the noun out ("shirt") and the clue is fine even though it repeats an
   adjective the label also uses. Omit the field only if the thing has no
-  attribute worth saying, which is rare: nearly everything has a colour.
+  attribute worth saying, which is rare: nearly everything has a color.
 
 Before you answer, re-read every sentence you wrote and drop or rewrite any that
 is not literally true of this image, and any cloze or riddle that still contains
