@@ -265,7 +265,8 @@ export default async function handler(req, res) {
         report: payloadBody,
       },
       priorPass != null,
-      deadClaim
+      deadClaim,
+      priorPass?.id || null
     );
     if (!won) {
       // Another pass owns the key. Never write rows behind it. Replay its
@@ -692,7 +693,8 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
       report: null,
     },
     priorPass != null,
-    deadClaim
+    deadClaim,
+    priorPass?.id || null
   );
 
   if (!won) {

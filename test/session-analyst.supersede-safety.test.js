@@ -137,24 +137,30 @@ describe("two conversations of the same scenario in one page load", () => {
 });
 
 describe("a pass that claimed the key and died", () => {
-  it("is taken over by an equal-length retry instead of locking the session", async () => {
-    // The abandoned claim: turn_count set, report never written.
-    sbRef.current.seed(ANALYSES, [
-      {
-        uid: "u1",
-        session_id: "page-load-1",
-        surface: "guided",
-        scenario_key: "coffee",
-        conversation_key: "c1",
-        pack: "es",
-        captured_via: "exit",
-        turn_count: 3,
-        truncated: false,
-        evidence: "sufficient",
-        stored_events: 0,
-        report: null,
-      },
-    ]);
+  // A claim with no report is what BOTH an abandoned pass and a still-running
+  // pass look like, because the claim is written before the rows are. Only age
+  // tells them apart, so the takeover is gated on it.
+  function claim({ ageMs, turnCount = 3 }) {
+    return {
+      id: "rec-1",
+      uid: "u1",
+      session_id: "page-load-1",
+      surface: "guided",
+      scenario_key: "coffee",
+      conversation_key: "c1",
+      pack: "es",
+      captured_via: "exit",
+      turn_count: turnCount,
+      truncated: false,
+      evidence: "sufficient",
+      stored_events: 0,
+      report: null,
+      updated_at: new Date(Date.now() - ageMs).toISOString(),
+    };
+  }
+
+  it("is taken over by an equal-length retry once it has gone stale", async () => {
+    sbRef.current.seed(ANALYSES, [claim({ ageMs: 30 * 60 * 1000 })]);
     createSpy.mockResolvedValueOnce(reply(REPORT));
     const api = await client();
 
@@ -167,6 +173,37 @@ describe("a pass that claimed the key and died", () => {
     expect(rec.report).toBeTruthy();
     expect(rec.captured_via).toBe("explicit");
     expect(sbRef.current.rows(ANALYSES)).toHaveLength(1); // taken over, not duplicated
+  });
+
+  // The regression guard. A pass claims the key, then spends seconds inside its
+  // LLM call and its insert with report still null. A second pass arriving in
+  // that window must not mistake it for abandoned.
+  it("does NOT clobber a claim that is still running", async () => {
+    sbRef.current.seed(ANALYSES, [claim({ ageMs: 2000, turnCount: 3 })]);
+    createSpy.mockResolvedValueOnce(reply(REPORT));
+    const api = await client();
+
+    const r = await send(api, { turns: TURNS, conversationKey: "c1", capturedVia: "explicit" });
+
+    // The live pass keeps the key, and this one writes nothing behind it.
+    expect(sbRef.current.rows(EVENTS)).toHaveLength(0);
+    const [rec] = sbRef.current.rows(ANALYSES);
+    expect(rec.turn_count).toBe(3);
+    expect(rec.captured_via).toBe("exit"); // untouched
+    // The caller still gets a real report rather than an error.
+    expect(r.status).toBe(200);
+    expect(r.body.evidence).toBe("sufficient");
+  });
+
+  it("does NOT let a SHORTER pass take over a longer stale claim", async () => {
+    sbRef.current.seed(ANALYSES, [claim({ ageMs: 30 * 60 * 1000, turnCount: 9 })]);
+    createSpy.mockResolvedValueOnce(reply(REPORT));
+    const api = await client();
+
+    await send(api, { turns: TURNS, conversationKey: "c1", capturedVia: "explicit" });
+
+    expect(sbRef.current.rows(EVENTS)).toHaveLength(0);
+    expect(sbRef.current.rows(ANALYSES)[0].turn_count).toBe(9);
   });
 });
 

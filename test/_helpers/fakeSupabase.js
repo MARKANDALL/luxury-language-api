@@ -9,7 +9,7 @@
 // lib/session-analysis-store.js build:
 //   from(t).select(cols).eq().is().limit(n)
 //   from(t).insert(rowOrRows)
-//   from(t).update(patch).eq().is().lt().select(cols)   // .select() optional
+//   from(t).update(patch).eq().is().lt().lte().select(cols)   // .select() optional
 //   from(t).delete().eq().is()
 //
 // Unique constraints are declared per table as a list of column names; a null
@@ -91,7 +91,17 @@ export function makeFakeSupabase({ unique = {}, failTables = new Set() } = {}) {
         return q;
       },
       lt(col, val) {
-        preds.push((r) => Number(r[col]) < Number(val));
+        // Numbers compare numerically; anything else (timestamps) lexically,
+        // which is how Postgres orders ISO-8601 too.
+        preds.push((r) =>
+          typeof val === "number" ? Number(r[col]) < Number(val) : String(r[col] ?? "") < String(val)
+        );
+        return q;
+      },
+      lte(col, val) {
+        preds.push((r) =>
+          typeof val === "number" ? Number(r[col]) <= Number(val) : String(r[col] ?? "") <= String(val)
+        );
         return q;
       },
       limit(n) {
