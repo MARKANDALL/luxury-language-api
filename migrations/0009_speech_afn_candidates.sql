@@ -48,6 +48,11 @@ create table if not exists public.speech_afn_candidates (
   session_id text,
   surface text,
   scenario_key text,
+  -- Which RUN of that scenario, matching speech_events. The supersede cleanup
+  -- deletes from both tables by the same full key, so this column is not
+  -- optional: without it the delete cannot target one conversation, and the
+  -- insert names a column that does not exist and fails for the whole batch.
+  conversation_key text,
   pack text not null,
 
   -- A taxonomy code from lang/session-analyst/<pack>.js, already whitelisted
@@ -66,7 +71,7 @@ create table if not exists public.speech_afn_candidates (
 create index if not exists idx_speech_afn_uid_created
   on public.speech_afn_candidates (uid, pack, created_at desc);
 create index if not exists idx_speech_afn_session
-  on public.speech_afn_candidates (uid, session_id, surface);
+  on public.speech_afn_candidates (uid, session_id, surface, conversation_key);
 
 -- ========================= RLS =========================
 alter table public.speech_afn_candidates enable row level security;

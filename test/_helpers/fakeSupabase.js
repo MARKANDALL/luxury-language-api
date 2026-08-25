@@ -12,6 +12,8 @@
 //   from(t).update(patch).eq().is().lt().lte().select(cols)   // .select() optional
 //   from(t).delete().eq().is()
 //
+// Unknown columns on insert are REJECTED with PGRST204, like the real thing.
+//
 // Unique constraints are declared per table as a list of column names; a null
 // participates as '' so it matches the coalesce() in migration 0008.
 
@@ -19,7 +21,37 @@ function keyOf(row, cols) {
   return cols.map((c) => (row[c] == null ? "" : String(row[c]))).join(" ");
 }
 
-export function makeFakeSupabase({ unique = {}, failTables = new Set() } = {}) {
+// The real column list of every table this project writes, transcribed from the
+// migrations. PostgREST rejects an insert naming a column that does not exist,
+// for the WHOLE batch, so a fake that silently accepts anything will pass a test
+// that production cannot run. That is not hypothetical: it let a route write
+// conversation_key into speech_afn_candidates for a whole commit before the
+// column existed, with every test green.
+export const LUX_COLUMNS = {
+  // migrations/0003 + 0007
+  speech_events: [
+    "id", "uid", "session_id", "surface", "scenario_key", "conversation_key",
+    "turn_index", "pack", "channel", "category", "severity", "utterance",
+    "suggestion", "explanation", "asr_confidence", "provenance", "created_at",
+  ],
+  // migrations/0008
+  speech_session_analyses: [
+    "id", "uid", "session_id", "surface", "scenario_key", "conversation_key",
+    "pack", "captured_via", "turn_count", "truncated", "evidence",
+    "stored_events", "report", "created_at", "updated_at",
+  ],
+  // migrations/0009
+  speech_afn_candidates: [
+    "id", "uid", "session_id", "surface", "scenario_key", "conversation_key",
+    "pack", "category", "rank", "created_at",
+  ],
+};
+
+export function makeFakeSupabase({
+  unique = {},
+  failTables = new Set(),
+  columns = LUX_COLUMNS,
+} = {}) {
   /** @type {Record<string, object[]>} */
   const tables = Object.create(null);
   const rowsOf = (t) => {
@@ -49,6 +81,26 @@ export function makeFakeSupabase({ unique = {}, failTables = new Set() } = {}) {
 
       if (op === "insert") {
         const incoming = Array.isArray(payload) ? payload : [payload];
+
+        // Reject unknown columns exactly as PostgREST does: one bad name fails
+        // the whole batch, so the route sees stored: 0 rather than a partial write.
+        const known = columns?.[table];
+        if (known) {
+          const allowed = new Set(known);
+          for (const r of incoming) {
+            const bad = Object.keys(r).find((k) => !allowed.has(k));
+            if (bad) {
+              return {
+                data: null,
+                error: {
+                  code: "PGRST204",
+                  message: `Could not find the '${bad}' column of '${table}' in the schema cache`,
+                },
+              };
+            }
+          }
+        }
+
         const cols = unique[table];
         if (cols) {
           const existing = new Set(rows.map((r) => keyOf(r, cols)));
