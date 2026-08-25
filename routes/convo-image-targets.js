@@ -1159,7 +1159,15 @@ Return up to ${INVENTORY_MAX} entries. For each:
   will point at whichever they see first, and being told they are wrong for
   finding the thing they were asked for is the worst answer a game can give.
   Omit the field when there is only one.
-- "point": { "x": 0.00-1.00, "y": 0.00-1.00 } - the centre of the thing.
+- "point": { "x": 0.00-1.00, "y": 0.00-1.00 } - THE HEART OF THE THING: the
+  single spot a person would put a fingertip on to say "that one". This is
+  where an arrow will land, so it must be ON the thing and unmistakably in the
+  middle of it, never on an edge, a corner or a rim.
+  * For a PERSON, the CHEST. Not the face, and not the middle of their bounding
+    box, which for a standing figure is somewhere around the hips.
+  * For a large object, its centre of mass: the middle of the screen, the
+    middle of the counter top, the middle of the suitcase's face.
+  * For a group or a line of things, the middle of the whole cluster.
 
 Entries must be VISUALLY UNAMBIGUOUS. Before you keep one, look at what
 surrounds it: if a NEARBY thing could plausibly be given the same gloss, the
@@ -2077,7 +2085,17 @@ async function tightenBoxes(openai, model, imageUrl, targets, lang, size) {
     boxes[0] = r.box;
     t.box = r.box;
     if (Array.isArray(t.boxes)) t.boxes = boxes;
-    t.point = { x: clampPoint(r.box.x + r.box.w / 2), y: clampPoint(r.box.y + r.box.h / 2) };
+    // The model's own point is the HEART, and a person's heart is not the
+    // middle of their box, so it is kept whenever the tightened box still
+    // contains it. Only a point the shrink left outside falls back to centre.
+    const kept = t.point;
+    const holds =
+      kept &&
+      kept.x >= r.box.x && kept.x <= r.box.x + r.box.w &&
+      kept.y >= r.box.y && kept.y <= r.box.y + r.box.h;
+    if (!holds) {
+      t.point = { x: clampPoint(r.box.x + r.box.w / 2), y: clampPoint(r.box.y + r.box.h / 2) };
+    }
     tightened++;
   }
   if (tightened) {
