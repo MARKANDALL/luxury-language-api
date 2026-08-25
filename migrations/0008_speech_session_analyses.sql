@@ -19,16 +19,30 @@
 -- speech_events rows, and the caller still gets its report back from `report`
 -- so the end-of-session UI renders exactly as it did before.
 --
--- THE KEY IS COMPOSITE, AND THAT IS DELIBERATE. Keying on session_id alone
--- would be wrong: the guided client mints one session id per PAGE LOAD
--- (features/convo/convo-state.js) and never re-mints it, while startScenario()
--- clears the transcript per SCENARIO. Two scenarios in one page load therefore
--- share a session id with turn indices both restarting at 1. Under a bare
--- session_id key, a second, shorter scenario would look like a duplicate of the
--- first and be silently discarded. Adding surface and scenario_key separates
--- them. coalesce(scenario_key, '') is required because Postgres treats NULLs in
--- a unique index as distinct, which would defeat dedupe on every row that has
--- no scenario (all streaming sessions started with no ?scenario= param).
+-- THE KEY IS COMPOSITE, AND EVERY PART OF IT EARNS ITS PLACE. Keying on
+-- session_id alone would be wrong: the guided client mints one session id per
+-- PAGE LOAD (features/convo/convo-state.js) and never re-mints it, while
+-- startScenario() clears the transcript per conversation. Two conversations in
+-- one page load therefore share a session id with turn indices both restarting
+-- at 1.
+--
+-- surface separates the guided, streaming and practice machines.
+--
+-- scenario_key separates two DIFFERENT scenarios in one page load.
+--
+-- conversation_key separates two runs of the SAME scenario in one page load,
+-- which scenario_key cannot: talk the cafe scenario, end it, then talk it again,
+-- and every other column matches. Without this part the supersede rule would
+-- read the second conversation as a duplicate of the first and either discard it
+-- (when it is shorter) or DELETE the first conversation's speech_events rows to
+-- make way for it (when it is longer). The second outcome is data loss on the
+-- ordinary End Session path, with no exit capture involved, which is why this
+-- column is here rather than deferred.
+--
+-- coalesce(..., '') is required on both optional parts because Postgres treats
+-- NULLs in a unique index as distinct, which would defeat dedupe on every row
+-- that has no scenario (all streaming sessions started with no ?scenario=
+-- param) or no conversation key (any client older than this change).
 --
 -- NO FOREIGN KEY to speech_events on purpose: a pass that produced zero flags
 -- is a real, valuable pass (zero flags is a valid analyst outcome) and must
@@ -49,6 +63,8 @@ create table if not exists public.speech_session_analyses (
   session_id text not null,
   surface text not null,
   scenario_key text,
+  -- Which RUN of that scenario. See the key argument above.
+  conversation_key text,
   pack text not null,
 
   -- 'explicit' = End Session / Save. 'exit' = pagehide or visibilitychange.
@@ -78,7 +94,9 @@ create table if not exists public.speech_session_analyses (
 -- ========================= IDEMPOTENCY KEY =========================
 -- The one index the dedupe depends on. coalesce() is load-bearing: see above.
 create unique index if not exists uq_speech_session_analyses_key
-  on public.speech_session_analyses (uid, session_id, surface, coalesce(scenario_key, ''));
+  on public.speech_session_analyses (
+    uid, session_id, surface, coalesce(scenario_key, ''), coalesce(conversation_key, '')
+  );
 
 -- "Is exit capture actually working, and how much is it recovering?"
 create index if not exists idx_speech_session_analyses_via

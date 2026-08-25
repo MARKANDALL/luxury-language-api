@@ -32,7 +32,24 @@
 -- Idempotent: safe to run repeatedly (Supabase SQL editor).
 
 alter table public.speech_events
-  add column if not exists scenario_key text;
+  add column if not exists scenario_key text,
+  add column if not exists conversation_key text;
+
+-- conversation_key: WHICH RUN of that scenario, not which scenario.
+--
+-- These are two different questions and the second one has no answer without
+-- this column. The guided client mints session_id once per PAGE LOAD and never
+-- re-mints it, while startScenario() clears the transcript for each new
+-- conversation. Talk the cafe scenario, end it, then talk the cafe scenario
+-- again in the same page load, and both conversations share uid, session_id,
+-- surface AND scenario_key. Without a per-run value they are indistinguishable,
+-- and the analyst's supersede rule would treat the second conversation as a
+-- duplicate of the first: either discarding it, or deleting the first
+-- conversation's rows to make way for it. That second case is data loss, which
+-- is why this column exists rather than being deferred.
+--
+-- Minted per conversation by the client and otherwise opaque. Nullable and not
+-- backfillable for exactly the same reason scenario_key is not.
 
 -- Answering "show me this learner's patterns in THIS scenario" without a full
 -- per-uid scan. Partial, because rows without a scenario are never looked up
@@ -40,3 +57,9 @@ alter table public.speech_events
 create index if not exists idx_speech_events_scenario
   on public.speech_events (uid, pack, scenario_key)
   where scenario_key is not null;
+
+-- Supporting the supersede cleanup, which deletes one conversation's rows by
+-- the full analyst key. Without this the delete is a per-uid scan.
+create index if not exists idx_speech_events_conversation
+  on public.speech_events (uid, session_id, surface, conversation_key)
+  where conversation_key is not null;

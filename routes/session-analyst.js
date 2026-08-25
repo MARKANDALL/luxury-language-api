@@ -154,6 +154,12 @@ export default async function handler(req, res) {
   // before migration 0007 did. See migrations/0007_speech_events_scenario_key.sql.
   const scenarioKey =
     (body.scenarioKey || body.scenario_key || "").toString().trim().slice(0, 80) || null;
+  // WHICH RUN of that scenario. scenario_key cannot separate two conversations
+  // of the SAME scenario in one page load, because the guided client mints one
+  // session id per page load; without this the supersede rule would delete the
+  // first conversation's rows to make way for the second. See migrations/0007.
+  const conversationKey =
+    (body.conversationKey || body.conversation_key || "").toString().trim().slice(0, 120) || null;
   // How this pass was triggered. 'explicit' = End Session / Save, 'exit' = a
   // pagehide / visibilitychange hook, 'switch' = the learner moved to another
   // scenario in the same page load. A caller that sends nothing is 'explicit',
@@ -209,7 +215,7 @@ export default async function handler(req, res) {
   // no id cannot be deduped, so it takes the pre-idempotency path untouched.
   const turnCount = turns.length;
   const sessionKey = sessionId
-    ? { uid, sessionId, surface, scenarioKey }
+    ? { uid, sessionId, surface, scenarioKey, conversationKey }
     : null;
 
   // One lazily-built Supabase client for both the idempotency reads and the
@@ -231,6 +237,10 @@ export default async function handler(req, res) {
   // The pass already recorded for this session, if any. Read BEFORE any model
   // call so a duplicate costs one SELECT rather than an LLM round trip.
   const priorPass = sessionKey ? await readPass(await getSb(), sessionKey) : null;
+  // A record with no report is an abandoned claim: a pass that took the key and
+  // died before it finished. It must be taken over, not competed with, or an
+  // equal-length retry loses the strictly-more-turns comparison forever.
+  const deadClaim = !!priorPass && !priorPass.report;
 
   // Record this pass and return the body, or replay a winning pass's stored
   // body when a concurrent equal-or-longer pass beat us to the key.
@@ -254,7 +264,8 @@ export default async function handler(req, res) {
         stored_events: storedEvents,
         report: payloadBody,
       },
-      priorPass != null
+      priorPass != null,
+      deadClaim
     );
     if (!won) {
       // Another pass owns the key. Never write rows behind it. Replay its
@@ -265,6 +276,12 @@ export default async function handler(req, res) {
       }
       return { ...payloadBody, meta: { ...(payloadBody.meta || {}), deduped: true } };
     }
+    // We own the key. A pass that supersedes an earlier one must clear the
+    // earlier one's rows even when THIS pass stores none: a model-declared
+    // insufficient verdict over more turns still replaces what came before, and
+    // leaving the old rows behind would keep flags the newer, fuller reading
+    // decided were not there.
+    if (priorPass) await clearSupersededEvents(sb, sessionKey);
     if (writeRows) await writeRows();
     return payloadBody;
   }
@@ -540,6 +557,7 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
         session_id: sessionId || null,
         surface,
         scenario_key: scenarioKey,
+        conversation_key: conversationKey,
         turn_index: it.turnIndex,
         pack,
         channel: it.channel,
@@ -559,6 +577,7 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
         session_id: sessionId || null,
         surface,
         scenario_key: scenarioKey,
+        conversation_key: conversationKey,
         turn_index: s.turnIndex,
         pack,
         channel: "strength",
@@ -582,6 +601,7 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
     session_id: sessionId || null,
     surface,
     scenario_key: scenarioKey,
+    conversation_key: conversationKey,
     pack,
     category,
     rank: i + 1,
@@ -671,7 +691,8 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
       stored_events: 0,
       report: null,
     },
-    priorPass != null
+    priorPass != null,
+    deadClaim
   );
 
   if (!won) {
@@ -691,6 +712,15 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
   storedAfn = await insertAfn(sb);
 
   const finalBody = buildBody();
-  await finalizePass(sb, sessionKey, { stored_events: stored, report: finalBody });
+  // Only a pass whose rows actually landed may be recorded as finished. If the
+  // insert failed, the claim keeps its null report, which the reader treats as
+  // an abandoned claim and takes over, so the session can still be analyzed on
+  // a later attempt instead of being locked at zero events by a report that
+  // says otherwise. The learner still gets their report either way.
+  if (!rows.length || stored > 0) {
+    await finalizePass(sb, sessionKey, { stored_events: stored, report: finalBody }, turnCount);
+  } else {
+    console.warn("[session-analyst] rows failed to store; leaving the pass claimable");
+  }
   return res.status(200).json(finalBody);
 }

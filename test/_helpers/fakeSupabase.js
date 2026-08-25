@@ -130,5 +130,11 @@ export function makeFakeSupabase({ unique = {}, failTables = new Set() } = {}) {
 
 // The constraint set this project actually has.
 export const LUX_UNIQUE = {
-  speech_session_analyses: ["uid", "session_id", "surface", "scenario_key"],
+  speech_session_analyses: [
+    "uid",
+    "session_id",
+    "surface",
+    "scenario_key",
+    "conversation_key",
+  ],
 };
