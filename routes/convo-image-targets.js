@@ -216,14 +216,107 @@ const INV_V = 101; // far from TARGETS_V, so a band row can never read as invent
 // How many entries the first look returns, and how many a mining pass may add.
 // 32 is far past what any band round needs; it exists so six bands and a deep
 // Lightning bank can all draw without a second look at the pixels.
-const INVENTORY_MAX = 32;
-const MINE_MAX = 16;
+// THE CEILING WAS THE PROBLEM, not the model's imagination.
+//
+// Standing in front of the interview scene Mark named the man's ring, the word
+// RESUME printed on the clipboard, individual fingers, fingernails, the shirt
+// under the blazer, her earring, her eyebrows, nose, lips, the KIND of smile she
+// has, his intense expression, his wrinkled forehead, his stubble, the stripes
+// on the tie. Thirty-two entries cannot hold that, so the pass spent them on
+// topic-adjacent basics and stopped, and every downstream shortage (a four-word
+// pool, a hidden Lightning chip, a Riddle with nothing to say, words repeating
+// across modes) is that ceiling wearing a different symptom.
+//
+// The inventory is cached once per image and shared by every band, both
+// languages and every deepening, so this is paid for once per photograph, ever.
+const INVENTORY_MAX = 90;
+const MINE_MAX = 40;
 
 // The granularities the inventory is asked to cover. "action" is a thing frozen
 // in the frame (pouring, boarding, waving); "state" is a condition (wet, torn,
 // crowded, delayed). Both are nameable and both are exactly what the high bands
 // starve without.
-const GRANULARITIES = ["object", "part", "material", "surface", "state", "action"];
+const GRANULARITIES = [
+  "object", "part", "material", "surface", "state", "action",
+  // v13. The first six were about THINGS, and a photograph of people is mostly
+  // not things: a face is the richest surface in most scenes and had nowhere to
+  // live. "person" carries anatomy and features, "text" carries words actually
+  // printed in the frame, and "interpretive" carries what a scene means, which
+  // is the only tier a C2 learner is really short of.
+  "person", "text", "interpretive",
+];
+
+/**
+ * The sweep: what the inventory pass must WALK rather than wander.
+ *
+ * A checklist, not a vibe. Each tier carries a floor, and the floors add up to
+ * more than any one pass would volunteer, which is the point: breadth is forced
+ * by structure instead of hoped for. Floors are per-tier minimums where the
+ * picture can honestly support them, never a licence to invent.
+ */
+const SWEEP_TIERS = [
+  {
+    key: "person",
+    min: 14,
+    title: "EVERY PERSON, HEAD TO TOE",
+    body: `Work down each visible person in turn and do not skip:
+  hair (and its style), hairline, forehead and any lines on it, eyebrows, eyes,
+  eyelashes, the gaze and where it is directed, nose, cheeks, lips, mouth, teeth
+  if shown, chin, jaw, stubble or beard, ears, earrings and any other jewelry,
+  neck, shoulders, arms, hands, individual fingers, fingernails, knuckles,
+  a ring on a finger, a watch;
+  then EVERY LAYER OF CLOTHING separately, and the parts of each layer: a collar,
+  a lapel, a cuff, a button, a buttonhole, a seam, a hem, a pocket, a zip, and
+  the PATTERN on it (stripes, a check, a weave, a knit).
+  Say WHOSE it is when two people are present ("the man's tie").`,
+  },
+  {
+    key: "object",
+    min: 10,
+    title: "EVERY OBJECT, PART BY PART",
+    body: `Each whole object, then its PARTS, then what it is MADE OF, then its
+  CONDITION: a clipboard, then its clip, its board, its paper, the metal of the
+  clip, the fact that a corner is bent. Small things count and are often the best
+  words in the picture.`,
+  },
+  {
+    key: "text",
+    min: 2,
+    title: "TEXT THAT IS ACTUALLY PRINTED IN THE PICTURE",
+    body: `Words visible on paper, screens, badges, signs, labels and packaging are
+  nameable things in their own right: "the word RESUME", "a name badge with a
+  name on it", "a departures board". Only what is legible; never guess text you
+  cannot read.`,
+  },
+  {
+    key: "scene",
+    min: 6,
+    title: "THE SCENE ITSELF",
+    body: `Spatial relations (what is behind, between, resting on, leaning against
+  what), the LIGHT (its direction, its quality, a highlight, a shadow, a
+  reflection), the setting and its surfaces, and ACTIONS IN PROGRESS: gesturing,
+  listening, explaining, holding, waiting.`,
+  },
+  {
+    key: "interpretive",
+    min: 6,
+    title: "WHAT THE PICTURE MEANS",
+    body: `The tier a mastery learner is actually short of, and the one a list of
+  nouns can never reach: body language, posture, eye contact or its absence, the
+  CHARACTER of an expression (a polite smile, a strained smile, an intense stare,
+  a furrowed brow), the mood between people, the tension or ease in the room,
+  the FIRST IMPRESSION the scene gives, and what the situation IS (a job
+  interview, a disagreement, a farewell). These are still things you can point
+  at: box the face, the hands or the pair of people that carry the meaning.`,
+  },
+];
+
+/** The sweep, as prompt text. */
+function sweepText() {
+  return SWEEP_TIERS.map(
+    (t) => `${t.title} (at least ${t.min} entries where the picture supports them):\n  ${t.body}`,
+  ).join("\n\n");
+}
 
 /** The floor a deep scan tops up to, rather than MIN_TARGETS. */
 const DEEP_MIN_TARGETS = 16;
@@ -231,6 +324,28 @@ const DEEP_MIN_TARGETS = 16;
 function maxTargetsFor(level, deep = false) {
   if (deep) return DEEP_TARGETS;
   return HIGH_BANDS.has(level) ? 16 : MAX_TARGETS;
+}
+
+/**
+ * How many candidates the band pass should NAME, as opposed to how many the
+ * round will serve.
+ *
+ * VERIFICATION IS LOSSY AND ALWAYS WAS. Measured across three scenes on the
+ * v13 sweep, roughly half of every batch dies in the crop check, most of it to
+ * "no such thing visible in this crop": a box the inventory drew loosely, which
+ * is the price of asking one pass to both NAME ninety things and PLACE all of
+ * them. Asking the band pass for exactly the round size therefore guarantees a
+ * short round, which is what put four words on the interview scene.
+ *
+ * So it over-asks, and the surplus is trimmed after verification rather than
+ * before. The cost is text tokens on a cheap pass; the alternative is a hidden
+ * Lightning chip and a Riddle with nothing to say, which is what pool shortage
+ * has actually cost this game every round since v10.
+ */
+const BAND_OVERASK = 2.2;
+
+function bandDraftFor(level, deep = false) {
+  return Math.min(INVENTORY_MAX, Math.ceil(maxTargetsFor(level, deep) * BAND_OVERASK));
 }
 
 // ── First playable ──────────────────────────────────────────────────────────
@@ -325,11 +440,33 @@ const VISIBILITY = new Set(VISIBILITY_ORDER);
 // this the box is showing a PART of the thing, and a part is what "the box
 // excludes the head" looks like from the outside.
 const COVER_MIN = 0.75;
-// And how much bigger than the thing the box may be. A box with three times the
-// thing's area is mostly not the thing, so it accepts taps on whatever else is
-// in it. Generous, because a bounding box around a diagonal or an irregular
-// object honestly contains a lot of air.
-const EXCESS_MAX = 3;
+
+// And how much bigger than the thing the box may be.
+//
+// TIGHT, AND THE NUMBER IS MEASURED RATHER THAN CHOSEN. v12 used 3x on the
+// reasoning that a bounding box around an irregular object honestly contains a
+// lot of air. It does, but not that much: logging cover and excess for every
+// candidate across three real scenes, the boxes that PASSED coverage came in at
+// 1.24x and 1.24x, and nothing honest was anywhere near 3. What 3x bought was
+// sprawl, which is what Mark saw on the rasters, and it bought it for nothing.
+//
+// This governs what may be STORED, which is a claim about where the object is.
+// How forgiving a TAP is has moved out entirely, into acceptRects, where it
+// belongs: those two numbers pull in opposite directions and one number doing
+// both jobs is how honest boxes came to sprawl.
+const EXCESS_MAX = 1.5;
+
+// How many times a box may be redrawn before the target is given up on.
+//
+// One redraw was not enough and the miss was structural. The bounds come from a
+// crop cut around the ORIGINAL box, so when that box is badly placed the crop
+// holds only part of the real object and the bounds are clipped to what was
+// visible. The redraw lands nearer, its own crop then sees more of the thing,
+// and it is judged short AGAIN, so v12 dropped five of seven redraws on the
+// interview scene and thinned the pool. Iterating converges: each crop is
+// centred better than the last, and two extra asks are far cheaper than a lost
+// target.
+const REDRAW_TRIES = 3;
 
 /**
  * Map a box given in CROP fractions back into picture fractions.
@@ -1250,7 +1387,7 @@ function sanitizeLocatedList(rawList, lang, level, deep = false) {
     if (heads.has(head)) continue;
     heads.add(head);
     out.push(t);
-    if (out.length === maxTargetsFor(level, deep)) break;
+    if (out.length === bandDraftFor(level, deep)) break;
   }
   // Applied AFTER the head-word pass and BEFORE verification, so a duplicate
   // never costs a crop check, and never reaches the round or the recap.
@@ -1290,13 +1427,24 @@ conversation. Build its nameable INVENTORY: everything in the picture a person
 could point at and name, across EVERY granularity, so that later passes can
 teach from it at any level from beginner to mastery.
 
-Granularities, and every one of them matters:
+THIS IS A SWEEP, NOT A GLANCE. Someone standing in front of this picture can
+name a hundred things in it, and the ones they reach for last are the best words
+in it. Work the checklist below in order and go all the way down each part of
+it. Do not stop when you have "enough": there is no enough, there is only what
+is honestly visible, and stopping early is the one way to fail this task.
+
+${sweepText()}
+
+Granularities, one per entry:
 - "object": whole things. A kiosk, a suitcase, a lanyard, a hat.
 - "part": parts of those things. A brim, a cuff, a strap, a screen bezel.
 - "material": what things are made of, where it is visible. Leather, chrome.
 - "surface": distinct surfaces worth naming. A tiled floor, a glass partition.
 - "state": visible conditions. A line of people, a crease, a reflection, wear.
 - "action": actions frozen in the frame. Pouring, weighing, boarding.
+- "person": anatomy, features and expression. A furrowed brow, a knuckle.
+- "text": words actually legible in the picture. The word RESUME on a page.
+- "interpretive": what the scene means. Eye contact, a polite smile, tension.
 
 Return up to ${INVENTORY_MAX} entries. For each:
 - "gloss": a short plain-English noun phrase naming the thing precisely.
@@ -1354,6 +1502,13 @@ placing it is the whole job.
 COUNT CHECK, entry by entry: if there are several of a thing, either list every
 one in "boxes" or make the gloss specific to ONE of them.
 Never pick one of several lookalikes silently.
+
+SWEEP CHECK, before you answer. Count your own entries per tier against the
+minimums above. If a tier is short, go back to the picture and look again at
+what that tier covers rather than padding another tier: a scene with two people
+in it has not run out of person entries at four. The only acceptable reason for
+a short tier is that the picture genuinely does not contain it (no legible text,
+nobody in frame).
 
 Before you answer, re-read your own list once and drop anything whose box does not
 contain the WHOLE of the thing it names, anything drawn over a person's body that
@@ -1590,7 +1745,7 @@ function thinnestGranularities(inventory) {
 function buildBandPassPrompt(lang, level, deep) {
   const p = PACK[lang];
   const { band } = bandText(lang, level);
-  const cap = maxTargetsFor(level, deep);
+  const cap = bandDraftFor(level, deep);
 
   // The lesson of the airport diagnosis, stated as the rule it should always
   // have been. The old self-check asked "would a B1 learner name this THING"
@@ -1646,6 +1801,31 @@ You are choosing WORDS for a language learner from the nameable INVENTORY of a
 photograph. Someone has already looked at the picture and listed everything in
 it; your job is which entries to teach at this level, and what to call them.
 ${band}${wordNotThing}${swap}${deepDraw}
+
+ORDER MATTERS: the first entries you list are the ones a learner meets first,
+and a short round may never reach the last. Rank them:
+
+  1. TIED TO THE CONVERSATION. The scene description above says what this picture
+     was made for. A word that belongs to that subject is worth more than an
+     equally good word that does not: in an interview scene, the resume and the
+     handshake before the window frame and the floor.
+  2. CONCRETE BUT GENERAL. Solid nameable things and their parts, in no
+     particular relation to the topic.
+  3. INTERPRETIVE. What the scene means: an expression, a mood, body language,
+     the situation itself. Last in the order and NOT last in value, because at
+     the top bands it is the only tier that is genuinely hard.
+
+${
+  HIGH_BANDS.has(level)
+    ? `AT THIS BAND, REACH FOR THE HARD TIERS. Parts, materials, textures, small
+features and interpretive entries are what this level is for; whole ordinary
+objects belong two bands down. Where B1 would be given "a face", ask for "a
+furrowed brow"; where B1 gets "a jacket", ask for "a lapel" or "a herringbone
+weave".`
+    : `AT THIS BAND, STAY CONCRETE. Whole things and their obvious parts. Leave
+the textures, the materials and the interpretive entries to the bands above:
+a learner who cannot yet say "a jacket" is not helped by "a herringbone weave".`
+}
 
 Pick between ${MIN_TARGETS} and ${cap} entries. For each, return:
 - "id": the inventory entry's id, copied exactly.
@@ -2386,37 +2566,81 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
         // unjudged is not evidence that it would make a good crop.
         if (!crop) return { ti, ci, shows: true, prominence: "part" };
         const a = await timed("crop.ask", () => askCrop(openai, check, crop, p.t.label, langName));
-        if (!a.shows) return { ti, ci, shows: false, why: a.why };
 
-        // COVERAGE, not merely presence. The box has to BOUND the thing's
-        // visible extent without much excess; "somewhere in the padded crop"
-        // was how a box drawn beside the thing survived, and "holds its centre"
-        // was how a box drawn across PART of it survived.
-        const cov = coversTheThing(c.box, a, size);
-        if (cov.ok) return { ti, ci, shows: true, prominence: a.prominence };
-
-        // A REDRAW IS PREFERRED TO ACCEPTING A PARTIAL BOX, and the answer that
-        // pays for it has already been bought: `found` is where the model just
-        // said the whole thing is. Verified in its own right before it is
-        // trusted, because a redraw is a new claim and the round is only as
-        // honest as its last check.
-        // The measurement is one question, whether it is SERVABLE is another. A
-        // redraw has to survive the same box gate a model's own box does, and
-        // one that cannot is a failure rather than a licence to keep the box
-        // that just failed.
-        const redrawn = unitBox(cov.found);
-        if (!redrawn) return { ti, ci, shows: false, why: cov.why };
-        console.log(
-          `[convo-image-targets] redraw "${p.t.label}": ${cov.why} ` +
-            `(cover ${(cov.cover * 100).toFixed(0)}%, excess ${cov.excess.toFixed(1)}x)`,
-        );
-        const recrop = await timed("crop.cut", () => cropRegion(imageUrl, redrawn, size));
-        if (!recrop) return { ti, ci, shows: false, why: cov.why };
-        const b = await timed("crop.ask", () => askCrop(openai, check, recrop, p.t.label, langName));
-        if (!b.shows || !coversTheThing(redrawn, b, size).ok) {
-          return { ti, ci, shows: false, why: cov.why };
+        // COVERAGE, not merely presence, and CONVERGED rather than judged once.
+        // The box has to BOUND the thing's visible extent without much excess;
+        // "somewhere in the padded crop" was how a box drawn beside the thing
+        // survived, and "holds its centre" was how a box drawn across PART of it
+        // survived. When it fails, the bounds the model just gave ARE the
+        // thing's place, so the box is redrawn to them and asked again: each
+        // crop is centred better than the last, so a box that started badly
+        // walks onto its object instead of being thrown away.
+        let box = c.box;
+        let ask = a;
+        let last = null;
+        let rescued = false;
+        for (let attempt = 0; attempt < REDRAW_TRIES; attempt++) {
+          if (!ask.shows) {
+            // "NOT VISIBLE HERE" IS USUALLY A CLAIM ABOUT THE BOX, not the
+            // photograph, and on a small feature it is almost always the box.
+            //
+            // The v13 sweep asks one pass to name ninety things AND place all of
+            // them, and the places it draws least carefully are the small ones:
+            // an eye, a nose, lips, an ear, a wedding ring, a cuff. Measured on
+            // the interview scene, nine of fifteen candidates died here and the
+            // reasons were "no wedding ring visible", "nose is cut off", "lips
+            // not visible in this crop", for a picture that plainly contains a
+            // ring, a nose and lips. Dropping those is throwing away exactly the
+            // words this round was built to reach.
+            //
+            // So a target gets ONE look at the whole photograph before it is
+            // given up on, through the same relocalize the rescue pass has used
+            // since v6, and then rejoins the convergence loop like any other
+            // box. Once per target, so a label that really is absent costs one
+            // extra call and not a spiral.
+            if (rescued) return { ti, ci, shows: false, why: ask.why || last?.why };
+            rescued = true;
+            const found = await timed("relocalize", () =>
+              relocalize(openai, check, imageUrl, p.t.label, langName),
+            );
+            if (!found) return { ti, ci, shows: false, why: ask.why || last?.why };
+            console.log(`[convo-image-targets] relocalized "${p.t.label}": ${ask.why}`);
+            box = found;
+            const wider = await timed("crop.cut", () => cropRegion(imageUrl, box, size));
+            if (!wider) return { ti, ci, shows: false, why: ask.why };
+            ask = await timed("crop.ask", () => askCrop(openai, check, wider, p.t.label, langName));
+            continue;
+          }
+          const cov = coversTheThing(box, ask, size);
+          if (process.env.ISPY_COVER_LOG) {
+            console.log(`[cover] ${p.t.label}	try=${attempt}	cover=${cov.cover.toFixed(3)}	excess=${cov.excess.toFixed(2)}	ok=${cov.ok}`);
+          }
+          if (cov.ok) {
+            return box === c.box
+              ? { ti, ci, shows: true, prominence: ask.prominence }
+              : { ti, ci, shows: true, prominence: ask.prominence, box, redrawn: true };
+          }
+          last = cov;
+          // The measurement is one question; whether it is SERVABLE is another.
+          // A redraw faces the same box gate a model's own box does, and one
+          // that cannot pass it is a failure rather than a licence to keep the
+          // box that just failed.
+          const next = unitBox(cov.found);
+          // Converged on a box it will not leave, so more asks would only cost
+          // money. iou is already here for referent dedup and says exactly this.
+          if (!next || iou(next, box) > 0.97) {
+            return { ti, ci, shows: false, why: cov.why };
+          }
+          console.log(
+            `[convo-image-targets] redraw ${attempt + 1} "${p.t.label}": ${cov.why} ` +
+              `(cover ${(cov.cover * 100).toFixed(0)}%, excess ${cov.excess.toFixed(2)}x)`,
+          );
+          box = next;
+          const recrop = await timed("crop.cut", () => cropRegion(imageUrl, box, size));
+          if (!recrop) return { ti, ci, shows: false, why: cov.why };
+          ask = await timed("crop.ask", () => askCrop(openai, check, recrop, p.t.label, langName));
         }
-        return { ti, ci, shows: true, prominence: b.prominence, box: redrawn, redrawn: true };
+        return { ti, ci, shows: false, why: last?.why || "box never settled on the thing" };
       }),
     ),
   );
@@ -3254,6 +3478,16 @@ async function scan(req, res) {
   //     same standard as a fresh one. Held AFTER the tail, and after the early
   //     response, which is the point: a top-up used to be ten seconds the
   //     learner stood through, and is now ten seconds they play through.
+  // The over-ask is trimmed HERE, after verification has taken its half, which
+  // is the whole point of over-asking: cut before this and the surplus would be
+  // discarded while it was still needed.
+  if (targets.length > maxTargetsFor(level, deep)) {
+    console.log(
+      `[convo-image-targets] over-ask kept ${maxTargetsFor(level, deep)} of ${targets.length} verified`,
+    );
+    targets = targets.slice(0, maxTargetsFor(level, deep));
+  }
+
   const beforeTopUp = targets.length;
   targets = await topUpIfThin(openai, MODEL, imageUrl, { sb, imageKey, description, lang, level, targets, exclude, prefer, avoid, misses, deep, inventory, offeredIds: rawTargets.map((t) => t._invId).filter((n) => Number.isInteger(n)) });
   if (targets.length > beforeTopUp) {
