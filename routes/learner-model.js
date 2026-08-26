@@ -45,6 +45,11 @@ const MAX_STRENGTHS_RECENT = 3;   // newest ~3 strengths surfaced
 const IMPROVING_RATIO = 0.6;
 
 const ITEM_CHANNELS = new Set(["grammar", "word_choice"]); // "items"; strengths are separate
+
+// The bucket an item with no category falls into. EXPORTED because the evidence
+// route has to translate it back into "category is null" when the learner opens
+// that row — a second copy of the literal would drift the day either side moved.
+export const UNCATEGORIZED = "(uncategorized)";
 const SEVERITIES = ["blocked", "noticeable", "polish"];    // item severities (positive = strengths)
 
 // ── Provenance: "where did these words actually come from" ───────────────────
@@ -104,7 +109,7 @@ function emptyModel() {
 // The pack is whitelisted against {'es','en'} BEFORE we get here, so the import path
 // is never an unsanitized interpolation. Missing dictionary/code -> fall back to the
 // raw code at the call site.
-async function loadLabelMap(pack) {
+export async function loadLabelMap(pack) {
   const map = new Map();
   try {
     const mod = await import(`../lang/session-analyst/${pack}.js`);
@@ -250,7 +255,7 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
   // ── categories[] (items grouped by category) ──
   const byCat = new Map();
   for (const r of items) {
-    const code = r.category || "(uncategorized)";
+    const code = r.category || UNCATEGORIZED;
     let g = byCat.get(code);
     if (!g) {
       g = { code, channel: r.channel, rows: [] };
