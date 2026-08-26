@@ -168,6 +168,10 @@ const EMPTY_MODEL = {
   crutchWords: [],
   afn: [],
   strengths: { n: 0, recent: [] },
+  // Additive since the Richness Pass: the portrait's other half, read from
+  // lux_attempts rather than speech_events. Empty here because these cases hand
+  // the route no rows at all. See test/learner-model.pronunciation.test.js.
+  pronunciation: { attempts: 0, firstSeen: null, lastSeen: null, sounds: [], words: [] },
 };
 
 describe("aggregateSpeechEvents (pure)", () => {
