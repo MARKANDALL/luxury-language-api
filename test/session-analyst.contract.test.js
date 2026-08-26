@@ -13,15 +13,38 @@
 import request from "supertest";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mkServer } from "./_helpers/mkServer.js";
+import { makeFakeSupabase, LUX_UNIQUE } from "./_helpers/fakeSupabase.js";
 
-const { insertSpy, createSpy } = vi.hoisted(() => ({
-  insertSpy: vi.fn(() => Promise.resolve({ error: null })),
+const { insertSpy, createSpy, sbRef } = vi.hoisted(() => ({
+  insertSpy: vi.fn(),
   createSpy: vi.fn(async () => ({ choices: [{ message: { content: "{}" } }] })),
+  sbRef: { current: null },
 }));
 
 vi.mock("../lib/supabase.js", () => ({
-  getSupabaseAdmin: () => ({ from: () => ({ insert: insertSpy }) }),
+  getSupabaseAdmin: () => sbRef.current,
 }));
+
+// A real in-memory Supabase (rows + a real unique constraint), with the
+// speech_events insert also routed through insertSpy so the existing
+// row-shape assertions keep reading the exact payload the route builds.
+function freshSupabase() {
+  const fake = makeFakeSupabase({ unique: LUX_UNIQUE });
+  return {
+    ...fake,
+    from(table) {
+      const b = fake.from(table);
+      if (table !== "speech_events") return b;
+      return {
+        ...b,
+        insert: (payload) => {
+          insertSpy(payload);
+          return b.insert(payload);
+        },
+      };
+    },
+  };
+}
 
 vi.mock("openai", () => ({
   OpenAI: class {
@@ -35,6 +58,7 @@ beforeEach(() => {
   vi.resetModules();
   insertSpy.mockClear();
   createSpy.mockClear();
+  sbRef.current = freshSupabase();
   process.env.ADMIN_TOKEN = "test_admin_token";
   process.env.OPENAI_API_KEY = "sk-test";
 });
@@ -308,5 +332,48 @@ describe("session-analyst contract", () => {
     const r2 = await send(api, { turns: [] });
     expect(r2.status).toBe(400);
     expect(createSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ── Per-scenario keying (migration 0007) ─────────────────────────────────────
+describe("session-analyst scenario_key", () => {
+  it("writes the stable scenario id onto every row, items and strengths alike", async () => {
+    createSpy.mockResolvedValueOnce(reply(SYNTHETIC_REPORT));
+    const api = await client();
+    const r = await send(api, { turns: SYNTHETIC_TURNS, scenarioKey: "coffee" });
+
+    expect(r.status).toBe(200);
+    const rows = insertSpy.mock.calls[0][0];
+    expect(rows).toHaveLength(3); // 2 items + 1 strength
+    for (const row of rows) expect(row.scenario_key).toBe("coffee");
+    // surface is untouched: the two axes stay orthogonal.
+    for (const row of rows) expect(row.surface).toBe("guided");
+  });
+
+  it("writes null when the client sends no scenario, matching every pre-0007 row", async () => {
+    createSpy.mockResolvedValueOnce(reply(SYNTHETIC_REPORT));
+    const api = await client();
+    await send(api, { turns: SYNTHETIC_TURNS });
+
+    const rows = insertSpy.mock.calls[0][0];
+    for (const row of rows) expect(row.scenario_key).toBeNull();
+  });
+
+  it("treats an empty or whitespace-only scenario id as null, never as a bucket", async () => {
+    createSpy.mockResolvedValueOnce(reply(SYNTHETIC_REPORT));
+    const api = await client();
+    await send(api, { turns: SYNTHETIC_TURNS, scenarioKey: "   " });
+
+    const rows = insertSpy.mock.calls[0][0];
+    for (const row of rows) expect(row.scenario_key).toBeNull();
+  });
+
+  it("accepts the snake_case spelling and clamps an over-long id", async () => {
+    createSpy.mockResolvedValueOnce(reply(SYNTHETIC_REPORT));
+    const api = await client();
+    await send(api, { turns: SYNTHETIC_TURNS, scenario_key: "x".repeat(200) });
+
+    const rows = insertSpy.mock.calls[0][0];
+    expect(rows[0].scenario_key).toHaveLength(80);
   });
 });
