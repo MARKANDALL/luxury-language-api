@@ -20,7 +20,11 @@
 //   - Bound every read: the row scan is capped at MAX_ROWS.
 //
 // Contract:
-//   POST { uid, pack }  ->  { ok: true, pack, model: { totals, categories[], crutchWords[], afn[], strengths } }
+//   POST { uid, pack }  ->  { ok: true, pack, model: { totals, sourceMix,
+//                                categories[], crutchWords[], afn[], strengths } }
+//   `sourceMix` (panel level, and again per category) counts how many events came
+//   from each provenance. It is DESCRIPTIVE ONLY: every event counts one, and no
+//   count, rank or salience in this file consults provenance.
 //   (see the handover §5.1 for the full response shape; empty learners / no Supabase
 //    return the all-zero model at HTTP 200 — the panel's "start talking" state.)
 
@@ -43,12 +47,52 @@ const IMPROVING_RATIO = 0.6;
 const ITEM_CHANNELS = new Set(["grammar", "word_choice"]); // "items"; strengths are separate
 const SEVERITIES = ["blocked", "noticeable", "polish"];    // item severities (positive = strengths)
 
+// ── Provenance: "where did these words actually come from" ───────────────────
+// speech_events has carried a provenance column since migrations/0003, and the
+// write path now populates it for real. routes/session-analyst.js:67 defines
+// FIVE values, but only these FOUR can ever reach a stored row: a 'chip_read'
+// turn is excluded from the judgeable set (session-analyst.js:203-211) and
+// dropped again when items and strengths are validated (:520, :536), so a
+// suggestion the learner merely read back can never produce an event. These
+// four are therefore the whole vocabulary of the mix, in panel order.
+const PROVENANCE_KEYS = ["spontaneous", "chip_modified", "dictated", "composed"];
+
+// Everything else lands here: a null from a row written before the frontend sent
+// a provenance, or any value this route does not recognise. Bucketing beats
+// dropping — a discarded row would break the one property that proves nothing
+// has been weighted (see tallyProvenance).
+const PROVENANCE_UNKNOWN = "unknown";
+
+// A zero-filled mix with a STABLE key order, so the panel never reflows as the
+// counts change and a category with no dictated turns still says so out loud.
+function emptySourceMix() {
+  const mix = {};
+  for (const k of PROVENANCE_KEYS) mix[k] = 0;
+  mix[PROVENANCE_UNKNOWN] = 0;
+  return mix;
+}
+
+// Tally one row into a mix.
+//
+// EVERY EVENT COUNTS EXACTLY ONE, whatever its provenance. This route makes the
+// mix visible and deliberately does not act on it: no source is worth more than
+// another here, and nothing else in this file consults provenance. The invariant
+// that proves it — and that the contract test asserts — is
+//     sum(sourceMix) === n
+// for each category, and === totals.events for the panel. Weighting would break
+// that sum, so the test fails loudly if anyone ever reaches for it.
+function tallyProvenance(mix, row) {
+  const p = String(row?.provenance || "").trim();
+  mix[PROVENANCE_KEYS.includes(p) ? p : PROVENANCE_UNKNOWN] += 1;
+}
+
 // The empty model — also the graceful answer when Supabase is absent, the caller
 // has no uid yet, or the learner has zero rows. Never a 500; an empty portrait is
 // the correct answer, not an error.
 function emptyModel() {
   return {
     totals: { sessions: 0, events: 0, firstSeen: null, lastSeen: null },
+    sourceMix: emptySourceMix(),
     categories: [],
     crutchWords: [],
     afn: [],
@@ -169,6 +213,14 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
     lastSeen,
   };
 
+  // ── sourceMix (panel level) ──
+  // Computed over the item rows — exactly the set totals.events counts — so
+  // sum(sourceMix) === totals.events always holds. Strengths carry a provenance
+  // too, but they are not items, and folding them in here would make the panel
+  // figure disagree with the count printed beside it.
+  const sourceMix = emptySourceMix();
+  for (const r of items) tallyProvenance(sourceMix, r);
+
   // ── recency window (session-based) ──
   // Rank distinct non-null item sessions by their latest created_at; the
   // RECENT_SESSIONS most-recent form the "recent" window. A boundary timestamp lets
@@ -215,6 +267,7 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
     let cFirst = null;
     let cLast = null;
     const severityMix = { blocked: 0, noticeable: 0, polish: 0 };
+    const sourceMix = emptySourceMix();
     let recentCount = 0;
     let priorCount = 0;
     for (const r of rowsSorted) {
@@ -224,6 +277,7 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
         if (!cLast || ts > cLast) cLast = ts;
       }
       if (r.severity && SEVERITIES.includes(r.severity)) severityMix[r.severity] += 1;
+      tallyProvenance(sourceMix, r);
       if (isRecent(r)) recentCount += 1;
       else priorCount += 1;
     }
@@ -258,6 +312,7 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
       recencyDays,
       trend,
       severityMix,
+      sourceMix,
       lastExample,
       _salience: salience,
     });
@@ -305,7 +360,7 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
     })),
   };
 
-  return { totals, categories, crutchWords, afn, strengths };
+  return { totals, sourceMix, categories, crutchWords, afn, strengths };
 }
 
 export default async function handler(req, res) {
@@ -363,7 +418,7 @@ export default async function handler(req, res) {
     const { data, error } = await sb
       .from("speech_events")
       .select(
-        "session_id, channel, category, severity, utterance, suggestion, explanation, created_at"
+        "session_id, channel, category, severity, utterance, suggestion, explanation, created_at, provenance, surface, scenario_key"
       )
       .eq("uid", uid)
       .eq("pack", pack)
