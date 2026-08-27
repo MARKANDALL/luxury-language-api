@@ -441,6 +441,29 @@ const VISIBILITY = new Set(VISIBILITY_ORDER);
 // excludes the head" looks like from the outside.
 const COVER_MIN = 0.75;
 
+// What a box that has STOPPED IMPROVING may still be accepted at.
+//
+// FORENSICS ON A RICH OUTDOOR B2 SCENE THAT YIELDED THREE SERVABLE TARGETS.
+// Every one of fourteen first-pass candidates failed, and every one failed on
+// COVER, never on excess. The redraw then converged most of them, and the
+// survivors clustered just under the cliff: "a face" reached 0.744, one point
+// short; "a plaid shirt" reached 0.695 and was still climbing; "a gesture with
+// the left hand" reached 0.684. Those are honest boxes thrown away for a
+// rounding difference, and on a full-body outdoor scene there is a systematic
+// reason for it: the model's "whole visible extent" of a face takes in hair and
+// jawline that a tight face box rightly leaves out, so cover reads low on
+// exactly the entries a person-rich photograph is made of.
+//
+// So the cliff stays for a FIRST look, where a low score means a bad box, and a
+// box that has been redrawn and has settled is judged here instead. It is not a
+// licence to keep anything: it applies only after the loop has done its work.
+const COVER_SETTLED = 0.62;
+
+// How much better a redraw has to be before it is worth taking. Below this the
+// box is wandering rather than converging, and "a face" wandered from 0.744 to
+// 0.472 while the loop kept the LAST box instead of the BEST one.
+const COVER_PROGRESS = 0.02;
+
 // And how much bigger than the thing the box may be.
 //
 // TIGHT, AND THE NUMBER IS MEASURED RATHER THAN CHOSEN. v12 used 3x on the
@@ -466,7 +489,7 @@ const EXCESS_MAX = 1.5;
 // interview scene and thinned the pool. Iterating converges: each crop is
 // centred better than the last, and two extra asks are far cheaper than a lost
 // target.
-const REDRAW_TRIES = 3;
+const REDRAW_TRIES = 4;
 
 /**
  * Map a box given in CROP fractions back into picture fractions.
@@ -541,6 +564,24 @@ function coversTheThing(box, verdict, dim) {
     return { ok: false, why: "box much bigger than the thing", cover, excess, found };
   }
   return { ok: true, why: "", cover, excess, found };
+}
+
+/**
+ * The verdict for a box that has been redrawn as far as it will go.
+ *
+ * Serve the best look the loop managed if it cleared the settled bar, and drop
+ * it otherwise. Split out so every exit from the convergence loop answers the
+ * same way: three separate `return { shows: false }` lines is how a target that
+ * had already found itself came to be thrown away.
+ */
+function settle(ti, ci, best, why) {
+  if (best && best.cover >= COVER_SETTLED && best.excess <= EXCESS_MAX) {
+    console.log(
+      `[convo-image-targets] settled at cover ${(best.cover * 100).toFixed(0)}%, excess ${best.excess.toFixed(2)}x`,
+    );
+    return { ti, ci, shows: true, prominence: best.prominence, box: best.box, redrawn: true };
+  }
+  return { ti, ci, shows: false, why };
 }
 
 /**
@@ -2579,6 +2620,11 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
         let ask = a;
         let last = null;
         let rescued = false;
+        // THE BEST BOX SEEN, not the most recent. The loop used to carry only
+        // the latest candidate, so a target that reached 0.744 on its second
+        // look and 0.472 on its third was given up on holding the third. That
+        // is a straight bug and the forensics caught it twice in one scan.
+        let best = null;
         for (let attempt = 0; attempt < REDRAW_TRIES; attempt++) {
           if (!ask.shows) {
             // "NOT VISIBLE HERE" IS USUALLY A CLAIM ABOUT THE BOX, not the
@@ -2620,6 +2666,22 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
               ? { ti, ci, shows: true, prominence: ask.prominence }
               : { ti, ci, shows: true, prominence: ask.prominence, box, redrawn: true };
           }
+          // WHEN COVER IS HIGH, THE BOUNDS WE WERE JUST GIVEN ARE THE ANSWER.
+          //
+          // Found in the second forensic run: the loop converges by GROWING the
+          // box until it holds the whole thing, and then overshoots. "a knit
+          // hat" ended at cover 1.00 with excess 2.21, "a puffer jacket" at
+          // cover 1.00 with excess 1.85. Cover 1.00 means our box contains all
+          // of the thing, and `found` is where the model says the thing
+          // actually is, so `found` is a correct TIGHT box and we already have
+          // it. Remembering it costs nothing and rescues exactly the targets
+          // that ran out of tries while oscillating.
+          const tight = cov.cover >= COVER_MIN ? unitBox(cov.found) : null;
+          if (tight) {
+            best = { cover: cov.cover, excess: 1, box: tight, prominence: ask.prominence };
+          } else if (!best || cov.cover > best.cover + COVER_PROGRESS) {
+            best = { cover: cov.cover, excess: cov.excess, box, prominence: ask.prominence };
+          }
           last = cov;
           // The measurement is one question; whether it is SERVABLE is another.
           // A redraw faces the same box gate a model's own box does, and one
@@ -2629,7 +2691,7 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
           // Converged on a box it will not leave, so more asks would only cost
           // money. iou is already here for referent dedup and says exactly this.
           if (!next || iou(next, box) > 0.97) {
-            return { ti, ci, shows: false, why: cov.why };
+            return settle(ti, ci, best, cov.why);
           }
           console.log(
             `[convo-image-targets] redraw ${attempt + 1} "${p.t.label}": ${cov.why} ` +
@@ -2640,7 +2702,7 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
           if (!recrop) return { ti, ci, shows: false, why: cov.why };
           ask = await timed("crop.ask", () => askCrop(openai, check, recrop, p.t.label, langName));
         }
-        return { ti, ci, shows: false, why: last?.why || "box never settled on the thing" };
+        return settle(ti, ci, best, last?.why || "box never settled on the thing");
       }),
     ),
   );
