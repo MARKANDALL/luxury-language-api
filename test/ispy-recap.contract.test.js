@@ -62,7 +62,7 @@ describe("ispy-recap", () => {
       reply({
         sentences: [
           "A mug sits on the counter beside the window.",
-          "Behind it, a chalkboard lists the drinks.",
+          "Behind it, a chalkboard stands by the window.",
         ],
       }),
     );
@@ -73,7 +73,7 @@ describe("ispy-recap", () => {
     expect(res.body.ok).toBe(true);
     expect(res.body.sentences).toHaveLength(2);
     expect(res.body.text).toBe(
-      "A mug sits on the counter beside the window. Behind it, a chalkboard lists the drinks.",
+      "A mug sits on the counter beside the window. Behind it, a chalkboard stands by the window.",
     );
     expect(res.body.missing).toEqual([]);
     expect(res.body.level).toBe("B1");
@@ -219,5 +219,61 @@ describe("ispy-recap", () => {
     const user = createSpy.mock.calls[0][0].messages[1].content;
     expect(user).toContain("word9");
     expect(user).not.toContain("word10");
+  });
+});
+
+
+// ── The truth gate (v15A item 7) ────────────────────────────────────────────
+//
+// Filed live: both recap sentences placed a bus interior in a parking lot with
+// an elevator, a trash can and a faucet. Reproduced unguided here as a
+// passenger waiting on a sidewalk for a bus that "arrives and stops to pick up
+// the passenger", for a photograph taken inside the moving bus.
+//
+// The writer was being asked to describe a photograph it had been told nothing
+// about, because a still carries no description. It now receives the cached
+// scene inventory, and whatever it writes is checked before it is served:
+// better no recap than a confident false one, and the panel already hides the
+// box when there is no text.
+
+describe("ispy-recap truth gate", () => {
+  it("REFUSES a recap that names something nobody can vouch for", async () => {
+    createSpy.mockResolvedValue(
+      reply({
+        sentences: [
+          "A mug sits on the counter.",
+          "The barista walks across the parking lot to the elevator.",
+        ],
+      }),
+    );
+    const r = await post({ words: ["a mug", "a counter"], description: "A cafe counter with a mug on it." });
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(false);
+    expect(r.body.error).toBe("invented_scene");
+  });
+
+  it("serves a recap that stays inside the found words and the scene", async () => {
+    createSpy.mockResolvedValue(
+      reply({ sentences: ["A mug sits on the counter.", "The counter is clean."] }),
+    );
+    const r = await post({ words: ["a mug", "a counter"], description: "A cafe counter with a mug on it." });
+    expect(r.body.ok).toBe(true);
+    expect(r.body.text).toContain("mug");
+  });
+
+  it("judges only what the recap NAMES, not its grammar", async () => {
+    // Determiner-led nouns are the things it names; verbs, adverbs and
+    // participles are grammar. Grading grammar produced refusals for "uses",
+    // "where", "held" and "along" while the real inventions sat beside them.
+    createSpy.mockResolvedValue(
+      reply({
+        sentences: [
+          "A mug sits quietly where the counter has been wiped.",
+          "It stood there beside the counter, held steady.",
+        ],
+      }),
+    );
+    const r = await post({ words: ["a mug", "a counter"], description: "A cafe counter with a mug on it." });
+    expect(r.body.ok).toBe(true);
   });
 });

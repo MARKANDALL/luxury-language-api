@@ -88,6 +88,167 @@ function usedIn(haystack, label) {
   return haystack.includes(parts.join(" "));
 }
 
+// The sentinel row convo-image-targets caches its band-free inventory under.
+// Duplicated deliberately rather than imported: that route is a 3000-line module
+// with an OpenAI client at the top, and a recap should not pull it in to read
+// three columns. Any change to these three must change both.
+const INVENTORY_LANG_KEY = "xx";
+const INVENTORY_LEVEL_KEY = "__inv1";
+const INV_V = 101;
+
+/**
+ * What this photograph actually contains, from the cached inventory.
+ *
+ * THE FIX FOR THE PARKING LOT. The recap was given only the learner's found
+ * words and whatever description the caller happened to have, and a still has
+ * none, so the model was asked to describe a photograph it had been told
+ * nothing about. It did what anyone would do and invented a plausible one:
+ * reproduced here as a passenger waiting on a sidewalk for a bus that "arrives
+ * and stops to pick up the passenger", for a photograph taken inside the bus.
+ *
+ * The inventory is the fullest account of a picture this system holds: sixty to
+ * ninety nameable things, looked at once by a vision pass and stored per image.
+ * One indexed read, and it is the difference between describing THIS photograph
+ * and describing a photograph.
+ */
+async function sceneInventory(imageKey) {
+  if (!imageKey) return null;
+  try {
+    // Imported here, not at the top: this route has no top-level imports by
+    // design, and a caller with no imageKey should not pay for a db client.
+    const { getSupabaseAdmin } = await import("../lib/supabase.js");
+    const sb = getSupabaseAdmin();
+    const { data, error } = await sb
+      .from("image_targets")
+      .select("targets, v")
+      .eq("image_key", imageKey)
+      .eq("lang", INVENTORY_LANG_KEY)
+      .eq("level", INVENTORY_LEVEL_KEY)
+      .maybeSingle();
+    if (error || data?.v !== INV_V || !Array.isArray(data?.targets)) return null;
+    return data.targets;
+  } catch (e) {
+    // No inventory is not a failure: the recap keeps the caution it now carries
+    // in its prompt and stays inside the found words.
+    console.warn("[ispy-recap] inventory read failed:", e?.message || e);
+    return null;
+  }
+}
+
+/**
+ * Words the recap may use that name nothing in the picture.
+ *
+ * Function words, pronouns, the copula, the handful of verbs a two-sentence
+ * description needs, and the qualities anything can have. Deliberately generous:
+ * this list exists to keep the check off GRAMMAR, and the check is only ever
+ * asked about the nouns that are left.
+ */
+const RECAP_FREE = new Set(
+  ("a an the this that these those and or but so as at by for from in into of off on onto out over to " +
+   "under up with without near beside behind between while during after before " +
+   "is are was were be been being has have had do does did will would can could " +
+   "he she it they them his her its their him you your we our i me my one two three " +
+   "there here now then very quite just also both each other another same " +
+   "look looks looking see sees seen watch watches watching hold holds holding " +
+   "wear wears wearing sit sits sitting stand stands standing walk walks walking " +
+   "smile smiles smiling talk talks talking read reads reading carry carries carrying " +
+   "seem seems appear appears wait waits waiting ride rides riding travel travels " +
+   "next close closely together while front back left right side middle " +
+   "small large big little long short tall wide narrow bright dark light heavy " +
+   "old new young warm cold soft hard clean dirty busy quiet calm " +
+   "red orange yellow green blue purple pink brown black white gray grey silver gold " +
+   "person people man woman someone something everything nothing " +
+   "photo photograph picture image scene moment day morning afternoon evening " +
+   "his hers theirs ours mine")
+    .split(/\s+/)
+    .filter(Boolean),
+);
+
+/** Accent- and case-free tokens of a string. */
+function tokens(v) {
+  return String(v || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .split(/[^\p{Letter}]+/u)
+    .filter(Boolean);
+}
+
+/**
+ * Everything the recap is ALLOWED to name, as a token set.
+ *
+ * The learner's found words, the scene description when there is one, and the
+ * cached INVENTORY, which is the fullest and most reliable account of what is
+ * in the photograph that this system has: sixty to ninety nameable things,
+ * looked at once and stored per image.
+ */
+function allowedTokens(words, description, inventory) {
+  const out = new Set(RECAP_FREE);
+  for (const w of words || []) for (const tk of tokens(w)) out.add(tk);
+  for (const tk of tokens(description)) out.add(tk);
+  for (const e of inventory || []) for (const tk of tokens(e?.gloss)) out.add(tk);
+  return out;
+}
+
+/**
+ * Which words in a recap name something nobody can vouch for.
+ *
+ * THE FAILURE THIS CATCHES. Given no scene context the model writes a plausible
+ * stock vignette: Mark's recap of a bus interior placed it in a parking lot with
+ * an elevator, a trash can and a faucet, and an unguided reproduction here had
+ * a passenger waiting on a sidewalk for a bus that "arrives and stops to pick
+ * up the passenger", for a photograph taken inside the moving bus.
+ *
+ * Only plausible NOUNS are judged: short words, adverbs and participles are let
+ * through, because the goal is to catch invented THINGS and not to grade
+ * grammar. A word that survives all of that and is still in nothing the system
+ * knows about the picture is an invention.
+ */
+function untruths(sentences, allow) {
+  const bad = new Set();
+  for (const line of sentences || []) {
+    const tk = tokens(line);
+    for (let i = 1; i < tk.length; i++) {
+      // ONLY WHAT THE RECAP NAMES. A word introduced by a determiner is a thing
+      // being named; everything else is grammar, and grading grammar here
+      // produced refusals for "uses", "where", "held" and "along" while the
+      // actual inventions sat beside them. This asks the narrow question the
+      // law asks: is every setting or object it NAMES either a found word or
+      // really in the picture?
+      if (!DETERMINERS.has(tk[i - 1])) continue;
+      // An adjective can sit between the determiner and the noun ("a busy
+      // street"), so the noun may be one or two words along; both are checked
+      // and either being known clears the phrase, because "a red bus" is about
+      // the bus.
+      const head = tk[i + 1] && !DETERMINERS.has(tk[i + 1]) ? [tk[i], tk[i + 1]] : [tk[i]];
+      if (head.some((w) => known(w, allow))) continue;
+      bad.add(head[head.length - 1]);
+    }
+  }
+  return [...bad];
+}
+
+/** Is this word, or its obvious singular, something we can vouch for? */
+function known(w, allow) {
+  if (!w || w.length <= 2) return true;
+  // Adverbs and participles are grammar wearing a noun's position ("sat
+  // quietly", "the waiting passengers"). They name nothing, so they are never
+  // an invention.
+  if (w.endsWith("ly") || w.endsWith("ing") || w.endsWith("ed")) return true;
+  if (allow.has(w)) return true;
+  if (w.endsWith("s") && allow.has(w.slice(0, -1))) return true;
+  if (w.endsWith("es") && allow.has(w.slice(0, -2))) return true;
+  return false;
+}
+
+/** The words that introduce a named thing. */
+const DETERMINERS = new Set([
+  "a", "an", "the", "this", "that", "these", "those",
+  "his", "her", "its", "their", "our", "your", "my",
+  "another", "each", "every", "some", "one", "two", "three",
+]);
+
+
 function buildPrompt(lang, level, words) {
   const langName = LANG_NAME[lang];
   const guide = SENTENCE_GUIDE[level] || SENTENCE_GUIDE.B1;
@@ -108,8 +269,12 @@ function buildPrompt(lang, level, words) {
     "  drops one has failed even if it reads well.",
     "- Use the words naturally, in the grammar the sentence needs. The article or",
     "  number may change; the word itself must be recognisably there.",
-    "- Describe THIS photograph, from the description given. Do not invent things",
-    "  that are not in it, and do not describe the learner or the game.",
+    "- Describe THIS photograph and NOTHING ELSE. Everything you name must be in",
+    "  the list of found words or in what the photograph shows below. If you are",
+    "  not told where the scene is, DO NOT DECIDE where it is: say what the words",
+    "  let you say and stop. A recap that places the scene somewhere it is not is",
+    "  worse than a short one, and it is the one failure this feature cannot have.",
+    "- Do not describe the learner or the game.",
     "- Warm and plain. No lists, no markdown, no quotation marks around the words,",
     "  and no praise for the learner.",
     "",
@@ -160,10 +325,13 @@ export default async function handler(req, res) {
     .slice(0, MAX_WORDS);
 
   const description = (body.description || "").toString().trim().slice(0, MAX_DESCRIPTION_CHARS);
+  const imageKey = (body.imageKey || "").toString().trim().slice(0, 64);
 
   // One word is not a recap, it is a sentence with a noun in it. Two is the
   // floor at which "using every found word" means anything.
   if (words.length < 2) return res.status(200).json(soft("too_few_words"));
+
+  const inventory = await sceneInventory(imageKey);
 
   let OpenAI;
   let jsonrepair;
@@ -198,7 +366,7 @@ export default async function handler(req, res) {
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: buildPrompt(lang, level, words) },
-        { role: "user", content: buildUser(words, description) },
+        { role: "user", content: buildUser(words, description, inventory) },
       ],
     });
     const raw = resp?.choices?.[0]?.message?.content || "{}";
@@ -218,6 +386,23 @@ export default async function handler(req, res) {
     .slice(0, 2);
 
   if (!sentences.length) return res.status(200).json(soft("no_recap"));
+
+  // THE TRUTH GATE. Everything the recap names has to be a found word or
+  // something the picture actually contains, and this is the last place it can
+  // be stopped. A recap that places a bus interior in a parking lot with an
+  // elevator, a trash can and a faucet is not a flourish that went wrong: it is
+  // the never-lie law broken inside the feature Mark likes most, and it is
+  // better to show no recap than a confident false one. The frontend already
+  // hides the box when there is no text, so refusing costs a nicety and keeps
+  // the promise.
+  const invented = untruths(sentences, allowedTokens(words, description, inventory));
+  if (invented.length) {
+    console.log(
+      `[ispy-recap] REFUSED, ${invented.length} invented word(s) ` +
+        `(lang=${lang} level=${level} scene=${inventory ? inventory.length : 0} entries): ${invented.join(", ")}`,
+    );
+    return res.status(200).json(soft("invented_scene"));
+  }
 
   const text = sentences.join(" ");
   // Which words did not make it. Reported rather than repaired: a second call to

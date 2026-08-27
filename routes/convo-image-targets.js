@@ -421,6 +421,46 @@ const MAX_NOTE_CHARS = 140;
 // The riddle clue, which is only ever a handful of adjectives.
 const MAX_RIDDLE_CHARS = 60;
 
+/**
+ * Labels whose instances a learner will reasonably point at ANY of.
+ *
+ * THE BUS. "Where is a passenger?" was asked of a bus full of passengers and
+ * only the protagonist's box accepted, so a learner tapping a passenger was
+ * told they were wrong about a passenger. The ruling is that in Find It any
+ * true instance accepts; the difficulty is knowing whether we HAVE them all.
+ *
+ * These two classes are where the risk lives, because they are the labels a
+ * photograph repeats: people, and the clothes people wear. A single box on one
+ * of these is a claim we cannot support, so it is marked rather than trusted.
+ */
+const CROWD_WORDS = new Set(
+  ("person people man men woman women boy girl child children kid kids baby " +
+   "passenger passengers traveler travelers commuter commuters customer customers " +
+   "shopper shoppers pedestrian pedestrians rider riders student students worker " +
+   "hiker hikers guest guests visitor visitors " +
+   "shirt tshirt t blouse jacket coat parka sweater jumper hoodie dress skirt " +
+   "trousers pants jeans shorts shoe shoes boot boots sneaker sneakers hat cap " +
+   "beanie scarf glove gloves bag backpack handbag purse mask glasses " +
+   "seat seats chair chairs window windows door doors handrail rail pole")
+    .split(/\s+/)
+    .filter(Boolean),
+);
+
+/**
+ * Can we vouch for having found EVERY instance of this label?
+ *
+ * "one" a thing there is only one of, or a label no photograph repeats.
+ * "many" several were found and boxed, so any of them may be tapped.
+ * "unknown" a crowd-class label with a single box: the picture very probably
+ *   holds more and we did not find them, so Find It must not ask for it.
+ */
+function instanceConfidence(label, boxCount, lang) {
+  const words = new Set(fold(headNoun(label, lang)).split(" "));
+  const crowd = [...words].some((w) => CROWD_WORDS.has(w));
+  if (boxCount > 1) return "many";
+  return crowd ? "unknown" : "one";
+}
+
 // How many instances of one label are worth carrying. Past a few, the label is
 // describing a crowd rather than a thing, and the target should not exist.
 const MAX_INSTANCES = 6;
@@ -1509,6 +1549,11 @@ Return up to ${INVENTORY_MAX} entries. For each:
   * NEVER A PERSON'S BODY. A box over someone's chest, neck, face or arm is only
     acceptable when the thing you named IS what they are wearing or holding, and
     then the box goes around the garment or the item, not the person.
+  * A BOX BOUNDS THE OBJECT, NOT THE OPENING IT REVEALS. A door is the panel,
+    open or shut, and not the doorway it swings out of; a window is the pane and
+    its frame, not the view through it; a gate is the gate. When the thing is
+    open, the box follows where the panel actually IS, which on an open bus door
+    is folded against the side of the bus and not across the entrance.
   * NO VAST SURFACES. Do not target a whole desk, wall, floor, ceiling or
     counter top as an entry: their boxes swallow half the picture and every tap
     lands in them. A DISTINCT surface region (a doormat, a tiled splashback) is
@@ -2784,6 +2829,10 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
       // perfectly good name and find target, because a box that is right is
       // still right even when the view of it is poor.
       cropOk: CROP_GATE.has(kept[0].prominence),
+      // Whether every instance of this label is accounted for. Find It refuses
+      // "unknown", because asking "where is a passenger" on a bus and accepting
+      // only one of them is the game being wrong about its own question.
+      instances: instanceConfidence(t.label, boxes.length, lang),
       // The point follows the box it belongs to, unless the model's own HEART
       // still lands inside that box, in which case it is the better answer: a
       // person's heart is their chest and their box's middle is their hips.
