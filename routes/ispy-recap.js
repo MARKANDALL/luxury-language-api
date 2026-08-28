@@ -242,6 +242,167 @@ function known(w, allow) {
 }
 
 /** The words that introduce a named thing. */
+/**
+ * Prepositions that make a checkable claim about where two things are, and what
+ * the boxes have to show for each to be true.
+ *
+ * DELIBERATELY SHORT. Only relations that 2-D boxes can settle are here.
+ * "behind" and "in front of" are depth claims and boxes hold no depth, so they
+ * are absent and the code abstains on them rather than guessing from area.
+ */
+const RELATIONS = {
+  "on": "overlap",
+  "in": "overlap",
+  "inside": "overlap",
+  "on top of": "overlap",
+  "against": "overlap",
+  "above": "above",
+  "over": "above",
+  "below": "below",
+  "under": "below",
+  "underneath": "below",
+  "beneath": "below",
+};
+
+// How much of the smaller box has to fall inside the other before "on" or "in"
+// is supportable. LOOSE ON PURPOSE. These boxes are drawn by a model and the
+// scan's own prompts plead with it to draw them tightly precisely because it
+// does not always; a gate that fires on a two percent miss would refuse honest
+// recaps, which costs the feature and buys nothing. The case this is for is not
+// a near miss: a poster on the wall and a whiteboard across the room share no
+// pixels at all.
+const RELATION_OVERLAP_MIN = 0.15;
+
+// How far above or below counts, as a fraction of the frame. A thing "above"
+// another may overlap it slightly; what it may not do is sit under it.
+const RELATION_AXIS_SLACK = 0.08;
+
+function boxOf(entry) {
+  if (Array.isArray(entry?.boxes) && entry.boxes.length) return entry.boxes[0];
+  return entry?.box || null;
+}
+
+function overlapFraction(a, b) {
+  const w = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const h = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const area = Math.max(1e-6, Math.min(a.w * a.h, b.w * b.h));
+  return (w * h) / area;
+}
+
+/**
+ * Where each nameable thing in this photograph is, keyed by its head token.
+ *
+ * Head token because that is what a sentence uses: the inventory says "a
+ * colorful poster on the wall" and the recap says "the poster", and those are
+ * the same thing. Only entries with a box are indexed; the rest cannot settle
+ * anything and their absence is what makes the gate abstain rather than refuse.
+ */
+function sceneIndex(inventory) {
+  const byHead = new Map();
+  for (const e of inventory || []) {
+    const box = boxOf(e);
+    if (!box) continue;
+    const raw = tokens(e?.gloss);
+    // A GLOSS THAT CONTAINS A PREPOSITION IS NOT SAFELY INDEXABLE, and this cost
+    // a live recap before it was here. "a glass of water" keys on "water", so a
+    // sentence reading "...next to a woman in a blue shirt" was judged as "water
+    // in shirt" and refused: the head of the gloss was itself the object of the
+    // gloss's own preposition, and the sentence was about neither pair.
+    //
+    // Dropping these narrows what the gate can adjudicate, which is the right
+    // direction. It abstains on more relations and never on the shape Mark
+    // filed, where both sides are plain nouns.
+    if (raw.some((w) => PREPOSITIONS.has(w))) continue;
+    const tk = raw.filter((w) => !RECAP_FREE.has(w));
+    const head = tk[tk.length - 1];
+    if (!head || byHead.has(head)) continue;
+    byHead.set(head, box);
+  }
+  return byHead;
+}
+
+// Any preposition, not only the checkable ones: this is used to DISQUALIFY a
+// gloss from the index, so it wants to be broad.
+const PREPOSITIONS = new Set(
+  ("of in on at by with without from to into onto over under above below beneath " +
+   "behind beside near against through across between among around toward towards")
+    .split(" "),
+);
+
+/**
+ * Relations the recap asserts that the photograph does not support.
+ *
+ * THE SECOND HALF OF THE TRUTH GATE. The first half asks "is this thing in the
+ * picture", and both halves of "a colorful poster on the whiteboard" pass it:
+ * the poster is there and the whiteboard is there. What is not there is the
+ * word between them. The nouns were gated and the sentence was still false.
+ *
+ * ABSTAINS FAR MORE OFTEN THAN IT FIRES, and that is the design. Both sides must
+ * resolve to a boxed inventory entry before anything is judged, so most natural
+ * relations ("the poster on the wall", when the inventory has no "wall") are
+ * simply not this function's business. What CANNOT be checked here is prevented
+ * in the prompt instead, and the list of what that covers is not short: gaze,
+ * who is doing what to whom, emotion, intent, depth, tense and number are all
+ * beyond anything a box can say. Nothing here pretends otherwise.
+ */
+function falseRelations(sentences, index) {
+  const bad = [];
+  if (!index.size) return bad;
+  // Longest first, so "on top of" is matched before "on" and "in".
+  const phrases = Object.keys(RELATIONS).sort((a, b) => b.length - a.length);
+
+  for (const line of sentences || []) {
+    const tk = tokens(line);
+    // Where the LAST relation put its object. A noun that is already the object
+    // of one preposition cannot be the subject of the next.
+    let objectAt = -1;
+    for (let i = 0; i < tk.length; i++) {
+      const phrase = phrases.find((ph) => {
+        const parts = ph.split(" ");
+        return parts.every((w, k) => tk[i + k] === w);
+      });
+      if (!phrase) continue;
+      const span = phrase.split(" ").length;
+
+      // The subject is the nearest indexed noun BEFORE the preposition, the
+      // object the nearest one after. Nearest rather than parsed: this is a
+      // two-sentence description, not arbitrary prose, and a parser here would
+      // be a large amount of machinery to make the gate fire slightly more often
+      // on sentences it should mostly be abstaining on anyway.
+      let subjectAt = -1;
+      for (let k = i - 1; k >= 0 && i - k <= 4; k--) if (index.has(tk[k])) { subjectAt = k; break; }
+      let objectIdx = -1;
+      for (let k = i + span; k < tk.length && k - (i + span) <= 4; k++) if (index.has(tk[k])) { objectIdx = k; break; }
+      const subject = subjectAt >= 0 ? tk[subjectAt] : null;
+      const object = objectIdx >= 0 ? tk[objectIdx] : null;
+      const chained = subjectAt >= 0 && subjectAt === objectAt;
+      objectAt = objectIdx;
+      // CHAINED PREPOSITIONS, and this is the case that made the gate dangerous
+      // rather than merely quiet. "a poster on the wall above the chalkboard"
+      // asserts that the POSTER is above the chalkboard; the nearest noun before
+      // "above" is the wall, which is the object of "on", and judging "wall
+      // above chalkboard" refused a perfectly true recap. It did, on the first
+      // live run of this.
+      //
+      // A false refusal is worse than the invention it prevents: the invention
+      // costs one wrong detail, and refusing costs the whole recap, every time,
+      // for a feature Mark likes. So when the reading is ambiguous this abstains,
+      // which is what it does with most relations anyway.
+      if (chained || !subject || !object || subject === object) continue;
+
+      const a = index.get(subject);
+      const b = index.get(object);
+      const kind = RELATIONS[phrase];
+      let holds = true;
+      if (kind === "overlap") holds = overlapFraction(a, b) >= RELATION_OVERLAP_MIN;
+      else if (kind === "above") holds = a.y + a.h <= b.y + b.h + RELATION_AXIS_SLACK;
+      else if (kind === "below") holds = a.y >= b.y - RELATION_AXIS_SLACK;
+      if (!holds) bad.push(`${subject} ${phrase} ${object}`);
+    }
+  }
+  return bad;
+}
+
 const DETERMINERS = new Set([
   "a", "an", "the", "this", "that", "these", "those",
   "his", "her", "its", "their", "our", "your", "my",
@@ -274,6 +435,20 @@ function buildPrompt(lang, level, words) {
     "  not told where the scene is, DO NOT DECIDE where it is: say what the words",
     "  let you say and stop. A recap that places the scene somewhere it is not is",
     "  worse than a short one, and it is the one failure this feature cannot have.",
+    "- NAMING IS NOT THE ONLY CLAIM YOU CAN MAKE. Beyond naming, assert only what",
+    "  you have been told.",
+    "- A RELATION IS A CLAIM. \"on\", \"in\", \"behind\", \"next to\", \"above\" say where",
+    "  one thing sits in relation to another, and nothing above tells you that. If",
+    "  you were not told, name the things separately and let the sentence stand:",
+    "  \"a poster and a whiteboard\" is true, \"a poster on the whiteboard\" is a",
+    "  guess, and the poster was on the wall.",
+    "- AN ACTION IS A CLAIM AND ITS OBJECT IS A SECOND ONE. You may say someone is",
+    "  doing something only if that is listed. You may say WHAT they are doing it",
+    "  TO only if that is listed too. \"She is looking\" may be supportable;",
+    "  \"she looks at them\" names a target nobody told you about, and she was",
+    "  looking at the parents.",
+    "- OMIT WHAT YOU CANNOT SUPPORT. Omission is never a failure here. Prefer the",
+    "  shorter true sentence to the fuller one you had to guess at, every time.",
     "- Do not describe the learner or the game.",
     "- Warm and plain. No lists, no markdown, no quotation marks around the words,",
     "  and no praise for the learner.",
@@ -282,10 +457,47 @@ function buildPrompt(lang, level, words) {
   ].join("\n");
 }
 
-function buildUser(words, description) {
+/**
+ * How many inventory glosses to show the writer.
+ *
+ * The inventory runs to ninety entries. All of them would be about 450 input
+ * tokens on a call whose output cap is 400, which is affordable but pointless:
+ * past a few dozen the writer is choosing between things nobody found, and two
+ * sentences cannot use them. Enough to describe the scene truthfully, not enough
+ * to turn a flourish into the expensive call.
+ */
+const MAX_SCENE_LINES = 60;
+
+function buildUser(words, description, inventory) {
   const lines = ["Words the learner found, all of which must appear:", ...words.map((w) => `- ${w}`)];
   if (description) {
     lines.push("", "What the photograph shows:", description);
+  }
+  // THE INVENTORY REACHED THE COURTROOM AND NOT THE WRITER.
+  //
+  // sceneInventory has been read on every request since v15A, and this function
+  // took two parameters while the call site passed three, so JavaScript dropped
+  // the third in silence. The gate below could refuse a lie; nothing ever gave
+  // the writer the truth. The prompt's own rule says "everything you name must
+  // be in the list of found words or in what the photograph shows below", and
+  // "below" resolved to `description` alone, which is EMPTY for a still and for
+  // a keepsake, which are exactly the cases the inventory was added for.
+  //
+  // Given five bare nouns and no scene, inventing "on the whiteboard" and
+  // "looks at them" is not a lapse, it is the only thing a writer can do. This
+  // is the half of the fix that removes the reason to guess; the rules in the
+  // system turn and the claim gate below are what handle the rest.
+  const glosses = (inventory || [])
+    .map((e) => String(e?.gloss || "").trim())
+    .filter(Boolean)
+    .slice(0, MAX_SCENE_LINES);
+  if (glosses.length) {
+    lines.push(
+      "",
+      "Everything in this photograph. These are the ONLY things you may name,",
+      "along with the found words above:",
+      ...glosses.map((g) => `- ${g}`),
+    );
   }
   return lines.join("\n");
 }
@@ -400,6 +612,19 @@ export default async function handler(req, res) {
     console.log(
       `[ispy-recap] REFUSED, ${invented.length} invented word(s) ` +
         `(lang=${lang} level=${level} scene=${inventory ? inventory.length : 0} entries): ${invented.join(", ")}`,
+    );
+    return res.status(200).json(soft("invented_scene"));
+  }
+
+  // AND THE CLAIMS, not only the nouns. Logged apart from the noun refusals so a
+  // real round says which half is doing the work: if this line never appears,
+  // the scene the writer is now shown is preventing the guess rather than the
+  // gate catching it, and that is the outcome to want.
+  const wrong = falseRelations(sentences, sceneIndex(inventory));
+  if (wrong.length) {
+    console.log(
+      `[ispy-recap] REFUSED, ${wrong.length} unsupported claim(s) ` +
+        `(lang=${lang} level=${level}): ${wrong.join("; ")}`,
     );
     return res.status(200).json(soft("invented_scene"));
   }

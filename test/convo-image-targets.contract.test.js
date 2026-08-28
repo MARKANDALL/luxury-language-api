@@ -232,7 +232,11 @@ function mockRound(targets, opts = {}) {
       case "relocalize":
         return Promise.resolve(reply(opts.relocalized ?? { box: { x: 0.4, y: 0.4, w: 0.1, h: 0.1 } }));
       case "enumerate":
-        return Promise.resolve(reply({ items: opts.instances ?? [] }));
+        // The heal path shape: one row per LABEL INDEX, each with every instance
+        // found and a crowd flag for "there are more of these than I can point
+        // at". Defaults to nothing found, which leaves the row planning from its
+        // own boxes exactly as it did before enumeration came back.
+        return Promise.resolve(reply({ labels: opts.instances ?? [] }));
       case "topUp":
         // The mine call: inventory entries for the deepen, offset past the base
         // fixture the way the route offsets past the cached inventory.
@@ -487,7 +491,18 @@ describe("convo-image-targets same-referent dedup", () => {
     expect(labels).not.toContain("a ferrule");
   });
 
-  it("keeps the SIMPLER label at a beginner band", async () => {
+  it("keeps the SIMPLER label at a beginner band, and the band rule gets the last word", async () => {
+    // The assertion here used to be `toContain("a blazer")`: of two names for
+    // one garment the deduper prefers the shorter at A1 and A2, and "a blazer"
+    // is shorter than "a suit jacket".
+    //
+    // That is still what the deduper does, and it is no longer what the round
+    // serves. The B1 colour/garment rule runs afterwards, on every target, and
+    // refuses "a blazer" at an everyday band: the question there is not which
+    // label is shorter, it is whether the learner holds the WORD, and "blazer"
+    // is a B2 word for a jacket. So the deduper picks the blazer and ruleFailure
+    // sends it back, which leaves the jacket, which is the right answer by both
+    // rules at once.
     const coat = { x: 0.3, y: 0.2, w: 0.3, h: 0.5 };
     mockRound([
       boxed("a suit jacket", coat),
@@ -495,7 +510,9 @@ describe("convo-image-targets same-referent dedup", () => {
     ]);
     const api = await client();
     const res = await post(api, { level: "A2" });
-    expect(res.body.targets.map((t) => t.label)).toContain("a blazer");
+    const labels = res.body.targets.map((t) => t.label);
+    expect(labels).not.toContain("a blazer");
+    expect(labels).toContain("a suit jacket");
   });
 
   it("leaves two genuinely separate objects alone", async () => {
@@ -982,7 +999,7 @@ describe("convo-image-targets cache", () => {
     // current rules. A set with no boxes has nothing to crop-check, and the
     // stamp is what stops every future read asking the same question again.
     expect(bandUpserts()).toHaveLength(1);
-    expect(bandUpserts()[0].payload.verified).toBe(3);
+    expect(bandUpserts()[0].payload.verified).toBe(4);
     expect(bandUpserts()[0].payload.targets).toEqual(stored);
   });
 
@@ -1427,7 +1444,7 @@ describe("convo-image-targets serve-time verification", () => {
     expect(r.body.cached).toBe(true);
     expect(cropSpy).toHaveBeenCalledTimes(8) // 4 heal checks + 4 tighten pad cuts;
     expect(bandUpserts()).toHaveLength(1);
-    expect(bandUpserts()[0].payload.verified).toBe(3);
+    expect(bandUpserts()[0].payload.verified).toBe(4);
   });
 
   it("re-examines a row stamped by the older audit, then re-stamps it", async () => {
@@ -1440,14 +1457,158 @@ describe("convo-image-targets serve-time verification", () => {
     const r = await post(api);
 
     expect(r.body.cached).toBe(true);
-    // The CROP CHECK is the evidence that the row was re-examined. It used to
-    // be the enumeration call, which v8 removed: the crop is the check that
-    // actually looks at the picture, and enumeration was only ever the step
-    // that decided what to cut.
     expect(callsOf("crop").length).toBeGreaterThan(0);
-    expect(callsOf("enumerate")).toHaveLength(0);
+    // AND IT GOES LOOKING FOR INSTANCES. This assertion used to say the
+    // opposite, on the reasoning that v8 gets instances from the locate call so
+    // a second enumeration would be paying twice. That is true of a FRESH scan
+    // and false of a cached row, which never went through today's locate call:
+    // planning from the boxes the row happens to carry means a heal can lose an
+    // instance and never find one. It is why "Where is a poster?" was asked in a
+    // classroom covered in posters with one poster accepting.
+    expect(callsOf("enumerate")).toHaveLength(1);
     expect(bandUpserts()).toHaveLength(1);
-    expect(bandUpserts()[0].payload.verified).toBe(3);
+    expect(bandUpserts()[0].payload.verified).toBe(4);
+  });
+
+  it("finds an instance the cached row never held, and Find It can use it", async () => {
+    // MARK'S POSTER, end to end. The row holds ONE poster box. The picture holds
+    // three. Before the heal enumerated, boxCount was 1, instanceConfidence read
+    // "one", and ispy-deal.js let Find It ask a question only one tap could
+    // answer.
+    sbState.row = {
+      targets: [
+        ...storedBoxed,
+        {
+          label: "a poster",
+          point: { x: 0.12, y: 0.2 },
+          box: { x: 0.08, y: 0.14, w: 0.08, h: 0.12 },
+          cloze: "On the wall, ___.",
+          choices: ["a poster", "a mirror", "a clock"],
+          answerIndex: 0,
+        },
+      ],
+      v: 1,
+      verified: 2,
+    };
+    mockRound(enTargets(), {
+      instances: [
+        {
+          i: 4,
+          crowd: false,
+          boxes: [
+            { x: 0.08, y: 0.14, w: 0.08, h: 0.12 },
+            { x: 0.4, y: 0.12, w: 0.09, h: 0.13 },
+            { x: 0.72, y: 0.16, w: 0.08, h: 0.11 },
+          ],
+        },
+      ],
+    });
+    const api = await client();
+    const r = await post(api);
+
+    const poster = r.body.targets.find((t) => t.label === "a poster");
+    expect(poster.boxes).toHaveLength(3);
+    expect(poster.instances).toBe("many");
+  });
+
+  it("declines rather than guessing when nothing counted the instances", async () => {
+    // The other half, and the more important one: when the enumeration finds
+    // nothing to say about a label, one box is one box and proves nothing about
+    // how many there are. "unknown" is what ispy-deal.js refuses to deal into
+    // Find It, so the game stops asking a question it cannot score instead of
+    // asking it and being wrong.
+    sbState.row = { targets: storedBoxed, v: 1, verified: 2 };
+    mockRound(enTargets(), { instances: [] });
+    const api = await client();
+    const r = await post(api);
+
+    // Asked of the targets FIND IT COULD DEAL, which is the mode the verdict
+    // governs: a target with no box is already refused by playable() and its
+    // instance count was never a question anyone asked.
+    const boxed = r.body.targets.filter((t) => t.box || t.boxes?.length);
+    expect(boxed.length).toBeGreaterThan(0);
+    expect(boxed.every((t) => t.instances === "unknown")).toBe(true);
+  });
+
+  it("does not count one thing twice when the enumeration redraws its box", async () => {
+    // THE OVER-COUNT, which is this finding pointing the other way. An
+    // under-count makes Find It ask a question only one tap can answer; an
+    // over-count makes it accept a tap on something that is not the thing.
+    //
+    // MEASURED, not imagined. On parents-1 the row's own box for the closed
+    // laptop and the enumeration's box for the same laptop came out at IoU
+    // 0.513, under the 0.6 same-referent threshold, and the target was served
+    // "many" for a picture holding one laptop. Their containment is 0.888, which
+    // is the number that tells the two cases apart: one object drawn twice
+    // scores near 1, two separate posters on a wall score 0.
+    sbState.row = {
+      targets: [{ ...storedBoxed[0], box: { x: 0.38, y: 0.76, w: 0.55, h: 0.14 } }, ...storedBoxed.slice(1)],
+      v: 1,
+      verified: 2,
+    };
+    mockRound(enTargets(), {
+      instances: [
+        // only:true, because the point of this case is the DEDUPE and not the
+        // certainty rule: without it the verdict would be "unknown" for the
+        // right reason and the wrong test would be passing.
+        { i: 0, crowd: false, only: true, boxes: [{ x: 0.405, y: 0.748, w: 0.441, h: 0.108 }] },
+      ],
+    });
+    const api = await client();
+    const r = await post(api);
+
+    const mug = r.body.targets.find((t) => t.label === "a mug");
+    expect(mug.boxes).toBeUndefined();
+    expect(mug.instances).toBe("one");
+  });
+
+  it("refuses a single instance the enumeration is not sure is the only one", async () => {
+    // MARK'S POSTER, and the answer his own photograph gives. Asked outright,
+    // the enumeration returns ONE poster for parents-1 and says only:false,
+    // because the classroom wall carries several and it did not box them. A
+    // count of one taken as proof of singularity is the original bug in a newer
+    // coat; asked whether it is sure, the honest answer is no, and Find It then
+    // declines the label rather than asking a question whose right answers it
+    // would mark wrong.
+    sbState.row = { targets: storedBoxed, v: 1, verified: 2 };
+    mockRound(enTargets(), {
+      instances: [
+        { i: 0, crowd: false, only: false, boxes: [{ x: 0.28, y: 0.55, w: 0.08, h: 0.1 }] },
+        { i: 1, crowd: false, only: true, boxes: [{ x: 0.46, y: 0.45, w: 0.09, h: 0.12 }] },
+      ],
+    });
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.targets.find((t) => t.label === "a mug").instances).toBe("unknown");
+    // And a label it IS sure about is asked normally. Erring toward "unknown"
+    // costs a target; erring toward "one" costs the learner a correct tap, and
+    // this has to be able to tell the two apart or it would refuse everything.
+    expect(r.body.targets.find((t) => t.label === "an apron").instances).toBe("one");
+  });
+
+  it("refuses a label the picture holds a crowd of", async () => {
+    sbState.row = { targets: storedBoxed, v: 1, verified: 2 };
+    mockRound(enTargets(), {
+      instances: [{ i: 0, crowd: true, boxes: [{ x: 0.28, y: 0.55, w: 0.08, h: 0.1 }] }],
+    });
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.targets.find((t) => t.label === "a mug").instances).toBe("unknown");
+  });
+
+  it("re-derives ENRICHMENT on the heal, not only geometry", async () => {
+    // The third of the three, and the one that was silently exempt. A row
+    // written before riddles existed healed into a perfectly audited row with no
+    // clues in it, and left the Riddle chip dark forever.
+    sbState.row = { targets: storedBoxed, v: 1, verified: 2 };
+    const api = await client();
+    await post(api);
+
+    expect(callsOf("enrich")).toHaveLength(1);
+    const written = bandUpserts()[0].payload.targets;
+    expect(written.every((t) => typeof t.cloze === "string" && Array.isArray(t.choices))).toBe(true);
   });
 
   it("checks EVERY instance the locate call listed, not just the clearest", async () => {
@@ -1555,7 +1716,7 @@ describe("convo-image-targets serve-time verification", () => {
   });
 
   it("never re-checks a row already stamped", async () => {
-    sbState.row = { targets: storedBoxed, v: 1, verified: 3 };
+    sbState.row = { targets: storedBoxed, v: 1, verified: 4 };
     const api = await client();
     const r = await post(api);
 
@@ -1563,6 +1724,45 @@ describe("convo-image-targets serve-time verification", () => {
     expect(cropSpy).not.toHaveBeenCalled();
     expect(createSpy).not.toHaveBeenCalled();
     expect(bandUpserts()).toHaveLength(0);
+  });
+
+  it("stamps every answer with its own vintage", async () => {
+    // WHAT MARK'S EYES ARE JUDGING HAS TO NAME ITSELF. A round served from a row
+    // scanned three weeks ago and one generated ten seconds ago came down the
+    // wire identical, so a fix that worked and a cached row that predates it
+    // could not be told apart from outside the code.
+    sbState.row = { targets: storedBoxed, v: 1, verified: 4, updated_at: "2026-08-01T10:00:00.000Z", model: "gpt-4.1-mini" };
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.vintage).toMatchObject({
+      v: 1,
+      verified: 4,
+      at: "2026-08-01T10:00:00.000Z",
+      source: "cache",
+      now: { v: 1, verified: 4 },
+    });
+  });
+
+  it("says HEALED when it healed, not merely CACHE", async () => {
+    sbState.row = { targets: storedBoxed, v: 1, verified: 2, updated_at: "2026-08-01T10:00:00.000Z" };
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.vintage.source).toBe("healed");
+    // Stamped at the audit level it was healed TO, so the badge does not report
+    // a row as stale one serve after it stopped being stale.
+    expect(r.body.vintage.verified).toBe(4);
+  });
+
+  it("says FRESH for a generation, and carries what expects it", async () => {
+    sbState.row = null;
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(false);
+    expect(r.body.vintage.source).toBe("fresh");
+    expect(r.body.vintage.now).toEqual({ v: 1, verified: 4 });
   });
 
   it("regenerates when the crop check guts an old row", async () => {

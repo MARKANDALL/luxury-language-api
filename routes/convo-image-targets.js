@@ -133,7 +133,8 @@ const TARGETS_V = 1;
 //   v2  every box the row already carried was cut out and shown to the model on
 //       its own. It says nothing about boxes the row does NOT carry.
 //   v3  every LABEL was re-examined for instances the row never held, and each
-//       instance found was crop-checked in turn.
+//       instance found was crop-checked in turn. THIS WAS NOT TRUE. See v4.
+//   v4  what v3 claimed, actually done, plus enrichment re-derived.
 //
 // The distinction is the whole point of bumping it. The sixth playtest's row was
 // written by current v6 code, was stamped v2, and every one of its targets was
@@ -143,7 +144,33 @@ const TARGETS_V = 1;
 // says so, which is what makes the healing on next serve decidable rather than
 // guessed. Distinct from TARGETS_V, which discards the row and re-bills a full
 // generation; this re-examines it in place.
-const VERIFIED_V = 3;
+//
+// WHY v4 EXISTS, AND WHY IT IS A CORRECTION RATHER THAN A STEP FORWARD.
+//
+// v3 above describes a pass this file did not have. v8 deleted the enumeration
+// call on the reasoning that the locate prompt carries the count check, so a
+// fresh scan already knows its instances by the time verification runs. True,
+// and irrelevant to a CACHED row, which never went through today's locate call:
+// verifyTargets planned its candidates from the boxes the row arrived with, so a
+// heal could only ever lose an instance and never find one. A v3 row is
+// therefore a row that was STAMPED as instance-audited without being one.
+//
+// Mark met it as "Where is a poster?" in a classroom covered in posters, with
+// one small poster accepting. Three separate things had to be wrong at once and
+// all three are fixed under this number:
+//
+//   THE HEAL DID NOT LOOK. enumerateInstances is restored, on the heal path only.
+//   THE VERDICT GUESSED. instanceConfidence took a single box as proof there was
+//     only one, on the strength of a hand-written CROWD_WORDS list that names
+//     people and garments and could never enumerate what a photograph repeats.
+//     It now refuses to say "one" unless something actually counted.
+//   ENRICHMENT WAS EXEMPT. A heal re-derived geometry and nothing else, so a row
+//     written before riddles existed healed into an audited row with no clues,
+//     and top-up additions could be written bare and stamped current.
+//
+// Every row at v3 or below re-heals on its next serve, which is the point: what
+// Mark judges by eye has to have been made under the rules he is judging.
+const VERIFIED_V = 4;
 
 const MIN_TARGETS = 5;
 // Asked for twelve, not eight, and the reason is latency rather than variety —
@@ -454,11 +481,35 @@ const CROWD_WORDS = new Set(
  * "unknown" a crowd-class label with a single box: the picture very probably
  *   holds more and we did not find them, so Find It must not ask for it.
  */
-function instanceConfidence(label, boxCount, lang) {
+function instanceConfidence(label, boxCount, lang, { counted = true, crowd = false, sure = true } = {}) {
   const words = new Set(fold(headNoun(label, lang)).split(" "));
-  const crowd = [...words].some((w) => CROWD_WORDS.has(w));
+  const crowdWord = [...words].some((w) => CROWD_WORDS.has(w));
+  // The enumeration looked and said there are more of these than it can point
+  // at. That is the strongest possible evidence and it outranks everything.
+  if (crowd) return "unknown";
   if (boxCount > 1) return "many";
-  return crowd ? "unknown" : "one";
+  // NOBODY COUNTED, so "one" is not a thing we know.
+  //
+  // The word list below is the whole reason this argument exists. CROWD_WORDS
+  // names the two classes a bus playtest happened to expose, people and the
+  // clothes they wear, and it cannot enumerate the nouns a photograph repeats:
+  // "poster" is not in it, and neither is sign, book, plant, bottle or tile. So
+  // a cached row holding ONE poster box in a classroom covered in posters read
+  // as settled, and Find It asked "Where is a poster?" and accepted one of them.
+  //
+  // A single box is evidence of instances only when something actually went
+  // looking for the others. On the fresh path the locate call's count check is
+  // that something; on a cached row nothing was, until the heal started
+  // enumerating. Where neither ran, the honest answer is that we do not know,
+  // and Find It declines rather than asking a question it cannot score.
+  if (!counted) return "unknown";
+  // AND COUNTED IS NOT THE SAME AS CERTAIN. The enumeration is asked outright
+  // whether it found them all, and a "no" is the most useful thing it can say:
+  // Find It then declines the label instead of asking a question whose right
+  // answers it will mark wrong. Erring toward "unknown" costs a target; erring
+  // toward "one" costs the learner a correct tap.
+  if (!sure) return "unknown";
+  return crowdWord ? "unknown" : "one";
 }
 
 // How many instances of one label are worth carrying. Past a few, the label is
@@ -821,6 +872,72 @@ const BASIC_NOUNS = {
   ],
 };
 
+// Words that make a label too hard for the everyday bands, whatever the OBJECT
+// is. Mark's rule, adopted: a B1 target must be a word a B1 learner plausibly
+// knows, and "a beige cardigan" is not, for a native speaker either.
+//
+// TWO CLASSES, because they fail the same test from two directions. An unusual
+// COLOUR is a hard word attached to an easy thing: the sweater is plainly a
+// sweater and "beige" is the part a B1 learner does not hold. A garment named as
+// a TYPE is the same trade the other way round: everyone can see a cardigan, and
+// "cardigan" rather than "sweater" is a B2 word for it.
+//
+// MATCHED ON ANY WORD OF THE LABEL, not on the head. That is the whole
+// difference from BASIC_SETS below, and it is why this could not reuse inSet:
+// the offending word in "a beige cardigan" is the modifier, and a head-word
+// check reads that label as a cardigan and passes the colour without looking.
+//
+// THIS IS A RULE AND NOT A HINT, and the evidence is why. The same recalibration
+// was written into LEVEL_GUIDE.en.B1 first, in the shape the clipboard/apron
+// change used, and a fresh B1 scan of parents-1 under that prompt served "a
+// beige cardigan" anyway. Prompt text moves the odds; ruleFailure is what makes
+// a law hold, and it holds for CACHED rows too, because the cache read runs
+// every stored target through it.
+const HARD_WORDS = {
+  en: [
+    // Colours past the primary set a beginner is taught.
+    "beige", "maroon", "olive", "mustard", "teal", "burgundy", "taupe", "ochre",
+    "mauve", "khaki", "crimson", "turquoise", "lilac", "indigo", "magenta",
+    "charcoal", "scarlet", "amber", "russet", "auburn",
+    // Garments named as a type, where the everyday word names the same thing.
+    "cardigan", "parka", "blazer", "poncho", "tunic", "anorak", "cagoule",
+    "waistcoat", "gilet", "kimono", "kaftan", "dungarees", "bolero", "shawl",
+    "cravat", "gaiters", "espadrilles", "loafers", "brogues",
+  ],
+  es: [
+    "beis", "granate", "oliva", "mostaza", "turquesa", "borgona", "ocre",
+    "malva", "caqui", "carmesi", "lila", "indigo", "magenta", "escarlata",
+    "ambar", "bermellon",
+    "rebeca", "cardigan", "parka", "blazer", "poncho", "tunica", "anorak",
+    "chal", "quimono", "caftan", "alpargatas", "mocasines",
+  ],
+};
+
+const HARD_SETS = {
+  en: new Set(HARD_WORDS.en),
+  es: new Set(HARD_WORDS.es),
+};
+
+// The bands this applies at. B2 and above are exactly where these words belong,
+// so the rule stops at B1 rather than running everywhere.
+const EVERYDAY_BANDS = new Set(["A1", "A2", "B1"]);
+
+/**
+ * Does any word of this label put it above the everyday bands?
+ *
+ * Every word, singular and plural, because the offender is as often a modifier
+ * as a head: "a beige cardigan" fails twice and "a mustard scarf" fails on the
+ * word in front of a noun a beginner owns.
+ */
+function tooHardFor(label, lang, level) {
+  if (!EVERYDAY_BANDS.has(level)) return "";
+  const set = HARD_SETS[lang] || HARD_SETS.en;
+  for (const w of fold(label).split(" ")) {
+    for (const form of wordForms(w)) if (form && set.has(form)) return form;
+  }
+  return "";
+}
+
 const SURFACE_SETS = {
   en: new Set(SURFACE_NOUNS.en),
   es: new Set(SURFACE_NOUNS.es),
@@ -906,6 +1023,14 @@ function ruleFailure(target, lang, level) {
     if (basic) return `too_basic:${basic}`;
   }
 
+  // AND THE OTHER END OF THE SAME QUESTION. too_basic asks whether a word is too
+  // easy for a high band; this asks whether it is too hard for an everyday one,
+  // and until now nothing did. A B1 round could serve any word the model
+  // produced, which is how "a beige cardigan" reached a B1 learner and how it
+  // survived the prompt rule written to stop it.
+  const hard = tooHardFor(target.label, lang, level);
+  if (hard) return `too_hard:${hard}`;
+
   return "";
 }
 
@@ -938,6 +1063,12 @@ NO: workplace, trade or safety equipment. "a clipboard", "an apron", "a life
     jacket", "a first-aid kit" and "a stethoscope" are all B2 or above, however
     ordinary the OBJECT looks: the question is whether a B1 learner holds the
     WORD, and for these they do not.
+NO: unusual COLOR words and garments named as a TYPE. "beige", "maroon", "olive",
+    "mustard", "teal" and "burgundy" are B2 or above; so is "a cardigan",
+    "a parka", "a blazer", "a poncho" or "a tunic". The same test decides both:
+    the color is plainly visible and the object is plainly a sweater or a coat,
+    but the WORD is not one a B1 learner holds. At B1 use a basic color and the
+    everyday garment: "a brown sweater", "a green coat", "a blue shirt".
 NO: parts of things. "a windowsill", "a cuff" and "a hem" are parts, and parts
     belong at C1.`,
     B2: `B2 upper intermediate. The specific name for the thing rather than its category.
@@ -976,6 +1107,10 @@ NO: workplace, trade or safety equipment. "el portapapeles", "el delantal",
     "el chaleco salvavidas" and "el botiquin" are all B2 or above, however
     ordinary the OBJECT looks: the question is whether a B1 learner holds the
     WORD, and for these they do not.
+NO: unusual COLOR words and garments named as a TYPE. "beis", "granate",
+    "verde oliva", "mostaza" and "turquesa" are B2 or above; so is "la rebeca",
+    "la parka", "el blazer" or "el poncho". At B1 use a basic color and the
+    everyday garment: "un sueter marron", "un abrigo verde".
 NO: parts of things, which belong at C1.`,
     B2: `B2 upper intermediate. The specific name for the thing rather than its category.
 YES: "el cortavientos" rather than "la chaqueta"; "el termo" rather than "la botella";
@@ -1016,9 +1151,45 @@ const ARTICLES = {
 // (no_image, model_failed, ...); it is absent when the model simply found
 // nothing nameable, which is a success.
 function empty(imageKey, lang, reason) {
-  const out = { ok: true, cached: false, imageKey, lang, targets: [] };
+  const out = { ok: true, cached: false, imageKey, lang, targets: [], vintage: vintageOf({}) };
   if (reason) out.reason = reason;
   return out;
+}
+
+/**
+ * WHAT THE THING ON SCREEN IS MADE OF.
+ *
+ * Mark judges every fix by eye, against whatever the game happened to serve, and
+ * a served round carried nothing at all about its own provenance: a row scanned
+ * under the rules of three weeks ago and a row generated ten seconds ago came
+ * down the wire identical. So a fix that worked and a cached row that predates
+ * it were indistinguishable, and time has gone on arguing about which one he was
+ * looking at.
+ *
+ * Small on purpose. It is not telemetry, it is a label: which pipeline wrote
+ * this, how far it has been audited, when that last happened, and whether it
+ * came out of the cache, was healed on the way through, or was made just now.
+ * The debug overlay puts it on screen; nothing else reads it.
+ *
+ * `now` rides along so the reader does not have to know today numbers to see
+ * that a row is behind them.
+ *
+ * @param {object} o
+ * @param {number} [o.v]        the row shape it was written under
+ * @param {number} [o.verified] how far it has been audited
+ * @param {string} [o.at]       when it was written or last healed
+ * @param {string} [o.source]   "fresh" | "cache" | "healed"
+ * @param {string} [o.model]
+ */
+function vintageOf({ v, verified, at, source = "fresh", model } = {}) {
+  return {
+    now: { v: TARGETS_V, verified: VERIFIED_V },
+    v: Number.isFinite(v) ? v : TARGETS_V,
+    verified: Number.isFinite(verified) ? verified : VERIFIED_V,
+    at: at || new Date().toISOString(),
+    source,
+    model: model || "",
+  };
 }
 
 /**
@@ -2434,6 +2605,132 @@ or { "absent": true }`,
   }
 }
 
+/**
+ * Are these two boxes the same thing drawn twice?
+ *
+ * CONTAINMENT, NOT IoU, and the difference is not academic. IoU divides by the
+ * UNION, so the same laptop boxed generously once and tightly once scores about
+ * 0.5 and reads as two laptops. Measured on this exact case: the row's own box
+ * for the closed laptop on parents-1 and the enumeration's box for it came out
+ * at IoU 0.51, under the 0.6 same-referent threshold, and the target was served
+ * `instances: "many"` for a picture holding one laptop.
+ *
+ * That is the failure this whole finding is about, pointing the other way. An
+ * under-count makes Find It ask a question only one tap can answer; an
+ * over-count makes it accept a tap on something that is not the thing. Both are
+ * the game being wrong about its own question.
+ *
+ * Dividing by the SMALLER area asks the right question: how much of the smaller
+ * box is inside the larger one. Two genuinely separate posters on a wall share
+ * no pixels at all and score 0; one object drawn twice scores near 1 whatever
+ * the difference in generosity. IoU is kept as well, because two boxes can be
+ * the same referent without either containing the other.
+ */
+function sameInstance(a, b) {
+  if (!a || !b) return false;
+  if (iou(a, b) >= SAME_REFERENT_IOU) return true;
+  const w = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const h = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const smaller = Math.max(1e-6, Math.min(a.w * a.h, b.w * b.h));
+  return (w * h) / smaller >= SAME_REFERENT_IOU;
+}
+
+/**
+ * "How many of each of these are there, and where?" — one call, all labels.
+ *
+ * THIS IS THE PASS THE VERSION COMMENT PROMISED AND THE CODE DID NOT HAVE.
+ * VERIFIED_V 3 said a v3 row had had "every LABEL re-examined for instances the
+ * row never held". It had not: v8 deleted the enumeration call on the reasoning
+ * that the LOCATE prompt now carries the count check, so instances arrive in
+ * `boxes` before verification runs. That reasoning is exactly right for a FRESH
+ * scan and exactly wrong for a CACHED one, which never went through today's
+ * locate call at all. verifyTargets plans its candidates from the boxes the row
+ * arrived with, so a heal could only ever lose instances, never find one.
+ *
+ * The cost of the gap is a question the game cannot answer: Mark was asked
+ * "Where is a poster?" in a classroom covered in posters and one small poster
+ * accepted, because the row held one poster box, instanceConfidence read
+ * `boxCount === 1`, and Find It was told the label was settled.
+ *
+ * Deliberately NOT run on the fresh path. There it would be paying twice for one
+ * answer, which is what v8 removed.
+ *
+ * @returns {Map<number, Array<{x,y,w,h}>>} label index -> every instance found
+ */
+async function enumerateInstances(openai, model, imageUrl, labels, langName) {
+  const found = new Map();
+  if (!labels.length) return found;
+  try {
+    const list = labels.map((l, i) => `${i}. ${l}`).join("\n");
+    const resp = await timed("enumerate", () =>
+      openai.chat.completions.create({
+        model,
+        temperature: 0,
+        max_tokens: 1600,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `For EACH label below (${langName}), find EVERY separate instance of
+it in this photograph and give one tight bounding box per instance.
+
+${list}
+
+COUNT HONESTLY. If the photograph holds seven chairs, return seven boxes for
+"chair", not one. This is the whole question being asked: a game that says "where
+is a poster" in a room full of posters and accepts only one of them is wrong
+about its own question.
+
+Each box must HUG its instance: x and y are the top-left corner as fractions of
+the image from the left and top edges, w and h its width and height as fractions.
+At most ${MAX_INSTANCES} boxes per label; if there are more than that, the label
+describes a crowd rather than a thing, so return ${MAX_INSTANCES} and set
+"crowd": true for it.
+A label that is genuinely not in the photograph gets an empty "boxes" array.
+
+AND SAY WHETHER YOU ARE SURE. For each label set "only" to true ONLY if you are
+confident you have found every instance and there are no others anywhere in the
+frame, including small, blurred, partly hidden or background ones. If there might
+be another you did not box, set "only": false. Being unsure is a useful answer
+here and guessing is not: the game asks the learner to point at the thing, and it
+would rather not ask about a label than ask about one and mark a right answer
+wrong.
+
+Return JSON only:
+{ "labels": [ { "i": 0, "crowd": false, "only": true, "boxes": [ { "x":0.0,"y":0.0,"w":0.0,"h":0.0 } ] } ] }`,
+              },
+              { type: "image_url", image_url: { url: imageUrl, detail: "high" } },
+            ],
+          },
+        ],
+      }),
+    );
+    const parsed = JSON.parse(resp?.choices?.[0]?.message?.content || "{}");
+    for (const row of Array.isArray(parsed?.labels) ? parsed.labels : []) {
+      const i = Number(row?.i);
+      if (!Number.isInteger(i) || i < 0 || i >= labels.length) continue;
+      const boxes = (Array.isArray(row?.boxes) ? row.boxes : [])
+        .map((b) => unitBox(b))
+        .filter(Boolean)
+        .slice(0, MAX_INSTANCES);
+      // A label the model calls a crowd is recorded even when its boxes are
+      // useless: "there are more of these than I can point at" is the single
+      // most useful thing it can say, and it is what Find It has to refuse on.
+      found.set(i, { boxes, crowd: row?.crowd === true, only: row?.only === true });
+    }
+  } catch (e) {
+    // NOT a failure of the targets. A row whose enumeration could not be run is
+    // a row we still know nothing about, and the caller says so rather than
+    // claiming the single box it holds is the whole story.
+    console.warn("[convo-image-targets] enumerate failed:", e?.message || e);
+    return found;
+  }
+  return found;
+}
+
 /** Run `jobs` with a cap on how many are in flight at once. */
 async function pooled(jobs, limit) {
   const out = new Array(jobs.length);
@@ -2608,7 +2905,7 @@ async function tightenBoxes(openai, model, imageUrl, targets, lang, size) {
   return targets;
 }
 
-async function verifyTargets(openai, model, imageUrl, targets, lang) {
+async function verifyTargets(openai, model, imageUrl, targets, lang, { enumerate = false } = {}) {
   const langName = PACK[lang].langName;
   // Every call below this line is a judgment, not a generation. See
   // pickCheckModel for why they run somewhere cheaper than `model`.
@@ -2632,11 +2929,46 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
   //
   //    This is also the right shape for a row cached before any of this existed:
   //    it comes in with whatever boxes it has, and is judged on those.
-  const plan = targets.map((t) => {
+  //
+  //    EXCEPT ON THE HEAL PATH, where that reasoning inverts. A cached row never
+  //    went through today's locate call, so its boxes are whatever the pipeline
+  //    of the day happened to record, and planning from them alone means the
+  //    heal can only ever LOSE an instance. It could not find the second poster
+  //    if the picture were papered with them, which is the filed bug.
+  const counted = new Map();
+  if (enumerate && targets.length) {
+    const seen = await enumerateInstances(
+      openai,
+      check,
+      imageUrl,
+      targets.map((t) => t.label),
+      langName,
+    );
+    for (const [i, row] of seen) counted.set(i, row);
+    console.log(
+      `[convo-image-targets] enumerated ${counted.size}/${targets.length} labels for instances`,
+    );
+  }
+
+  const plan = targets.map((t, ti) => {
     const original = Array.isArray(t.boxes) && t.boxes.length ? t.boxes : t.box ? [t.box] : [];
+    const seen = counted.get(ti);
+    // The row's own boxes FIRST, so a box that has already survived a crop check
+    // keeps its place at the head of the list, and only genuinely new instances
+    // are added behind it. Same-referent duplicates are dropped on IoU, the same
+    // test dedupeSameReferent uses, so pointing at the same chair twice does not
+    // turn one chair into "many".
+    const merged = [...original];
+    for (const box of seen?.boxes || []) {
+      if (merged.some((b) => sameInstance(b, box))) continue;
+      merged.push(box);
+    }
     return {
       t,
-      cands: original.slice(0, MAX_INSTANCES).map((box) => ({ box, visibility: "partial" })),
+      counted: !!seen,
+      crowd: seen?.crowd === true,
+      only: seen?.only === true,
+      cands: merged.slice(0, MAX_INSTANCES).map((box) => ({ box, visibility: "partial" })),
     };
   });
 
@@ -2793,8 +3125,12 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
   const checked = plan.map((p, ti) => {
     const t = p.t;
     // A target that arrived with nothing to look at keeps its shape exactly, so
-    // a row cached before boxes existed comes back as it went in.
-    if (!p.cands.length && !byTarget[ti].length) return t;
+    // a row cached before boxes existed comes back as it went in. It gains one
+    // fact on the heal path: nobody has counted it, so its instance claim (if it
+    // even has one, from a pipeline that predates the question) is not evidence.
+    if (!p.cands.length && !byTarget[ti].length) {
+      return enumerate ? { ...t, instances: "unknown" } : t;
+    }
     const kept = byTarget[ti];
     if (!kept.length) {
       return { ...t, boxOk: false, boxWhy: notes[ti][0] || "not in crop" };
@@ -2809,7 +3145,19 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
         PROMINENCE_ORDER.indexOf(a.prominence) - PROMINENCE_ORDER.indexOf(b.prominence) ||
         VISIBILITY_ORDER.indexOf(a.visibility) - VISIBILITY_ORDER.indexOf(b.visibility),
     );
-    const boxes = kept.map((k) => k.box);
+    // AND DEDUPED AGAIN, HERE, WHERE THE BOXES ARE FINAL.
+    //
+    // The merge before the crop pool cannot be the last word, because the REDRAW
+    // loop moves boxes after it: two candidates that were far enough apart to
+    // look like two instances are each walked onto the object they belong to,
+    // and on parents-1 that turned one closed laptop into "many" with the row's
+    // own box and a redrawn copy of it sitting on top of each other. Converging
+    // is what the redraw is FOR; noticing that it converged is this line.
+    const boxes = [];
+    for (const k of kept) {
+      if (boxes.some((b) => sameInstance(b, k.box))) continue;
+      boxes.push(k.box);
+    }
     const first = boxes[0];
     // `boxes` is stripped off before the spread, not overwritten after it.
     // Spreading the original first and then conditionally re-adding meant a
@@ -2823,7 +3171,9 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
       box: first,
       ...(boxes.length > 1 ? { boxes } : null),
       // How well each kept instance can be seen, in the same order as `boxes`.
-      vis: kept.map((k) => k.visibility),
+      // Mapped from `boxes` rather than from `kept`, or the two arrays fall out
+      // of step the moment the dedupe above drops one.
+      vis: boxes.map((b) => (kept.find((k) => k.box === b) || {}).visibility || "partial"),
       // Whether ANY instance is worth cutting out and showing. False excludes
       // this target from the crop-based modes for this picture; it stays a
       // perfectly good name and find target, because a box that is right is
@@ -2832,7 +3182,21 @@ async function verifyTargets(openai, model, imageUrl, targets, lang) {
       // Whether every instance of this label is accounted for. Find It refuses
       // "unknown", because asking "where is a passenger" on a bus and accepting
       // only one of them is the game being wrong about its own question.
-      instances: instanceConfidence(t.label, boxes.length, lang),
+      //
+      // `counted` is the fact that decides it on a cached row: without an
+      // enumeration behind it, one box is one box and says nothing at all about
+      // how many there are.
+      instances: instanceConfidence(t.label, boxes.length, lang, {
+        counted: enumerate ? p.counted : true,
+        // Whether the pass that counted was SURE it had found them all. A single
+        // box is not evidence of singularity on its own: asked of Mark's
+        // classroom, the enumeration returned one poster for a wall carrying
+        // several, and a count of one taken as proof is the original bug in a
+        // newer coat. Under enumeration, "one" now requires the model to have
+        // said so.
+        sure: enumerate ? p.only : true,
+        crowd: p.crowd,
+      }),
       // The point follows the box it belongs to, unless the model's own HEART
       // still lands inside that box, in which case it is the better answer: a
       // person's heart is their chest and their box's middle is their hips.
@@ -3350,7 +3714,10 @@ async function scan(req, res) {
       const { data, error } = await timed("db.read", () =>
         sb
           .from("image_targets")
-          .select("targets, v, verified")
+          // model and updated_at are read for the VINTAGE STAMP, not for any
+          // decision here: what Mark eyes judge has to be able to name its own
+          // age, and a row that cannot say when it was written cannot.
+          .select("targets, v, verified, model, updated_at")
           .eq("image_key", imageKey)
           .eq("lang", lang)
           .eq("level", level)
@@ -3398,14 +3765,23 @@ async function scan(req, res) {
           // and is not wrong for that.
           await writeRow(sb, { imageKey, lang, level, targets: kept, model: pickModel() });
           if (!(deep && kept.length < DEEP_MIN_TARGETS)) {
-            return res.status(200).json({ ok: true, cached: true, imageKey, lang, targets: kept });
+            return res.status(200).json({
+              ok: true, cached: true, imageKey, lang, targets: kept,
+              vintage: vintageOf({ v: data.v, verified: VERIFIED_V, source: "healed", model: data.model }),
+            });
           }
         }
         if (servable && data.verified !== VERIFIED_V && imageUrl) {
           const openaiForCheck = await tryOpenAI();
           if (openaiForCheck) {
             const model = pickModel();
-            let checked = await verifyTargets(openaiForCheck, model, imageUrl, kept, lang);
+            // GEOMETRY AND INSTANCES. `enumerate` is the half a heal never had:
+            // without it this pass judges only the boxes the row already carried,
+            // so it could confirm one poster and never discover the other eleven.
+            // See enumerateInstances.
+            let checked = await verifyTargets(openaiForCheck, model, imageUrl, kept, lang, {
+              enumerate: true,
+            });
             // Held to the same floor as a fresh scan. Re-examination drops
             // targets exactly the way generation does, so a row that heals from
             // five down to four is thin for the same reason and gets the same
@@ -3413,11 +3789,49 @@ async function scan(req, res) {
             checked = await topUpIfThin(openaiForCheck, model, imageUrl, {
               sb, imageKey, description, lang, level, targets: checked, exclude, prefer, avoid, misses, deep,
             });
+            // AND ENRICHMENT, the third of the three and the one that was
+            // silently exempt. Cloze, choices, aliases, the usage note and the
+            // riddle all rode through a heal untouched, so a row written before
+            // riddles existed healed into a perfectly audited row with no clues
+            // in it and left the Riddle chip dark forever.
+            //
+            // The top-up additions were worse than untouched: sanitizeLocated
+            // returns a bare target, the fresh path enriches those immediately
+            // afterwards and this path did not, so a heal could WRITE targets
+            // with no cloze and no choices and stamp them current.
+            //
+            // Fails toward what the row already had. Enrichment drops a target it
+            // cannot write for, so a bad run could gut a good row; if it comes
+            // back short, the old material stands and the row keeps its geometry
+            // and instance fixes anyway.
+            const enriched = await enrichTargets(openaiForCheck, model, imageUrl, checked, {
+              lang, level, seed: imageKey,
+            });
+            const rewritten = new Map(enriched.map((t) => [fold(t.label), t]));
+            checked = checked
+              // PER TARGET, not all-or-nothing. Enrichment DROPS a target it
+              // cannot write for, which is right on a fresh scan where the
+              // alternative is shipping a broken target, and wrong here: this
+              // target already has a cloze and choices that worked, and losing
+              // it costs the learner a word to pay for a model's silence.
+              .map((t) => rewritten.get(fold(t.label)) || t)
+              // Except when it has nothing either way. A top-up addition arrives
+              // bare from sanitizeLocated, so an addition the enrich declined is
+              // genuinely unplayable rather than merely un-refreshed, and every
+              // mode reads these fields.
+              .filter((t) => typeof t.cloze === "string" && Array.isArray(t.choices) && t.choices.length);
+            if (enriched.length < checked.length) {
+              console.log(
+                `[convo-image-targets] heal enrich rewrote ${enriched.length}/${checked.length}; ` +
+                  `the rest kept their own material (key=${imageKey} level=${level || "-"})`,
+              );
+            }
             if (checked.length >= MIN_SERVED_TARGETS || checked.length === kept.length) {
               await writeRow(sb, { imageKey, lang, level, targets: checked, model });
-              return res
-                .status(200)
-                .json({ ok: true, cached: true, imageKey, lang, targets: checked });
+              return res.status(200).json({
+                ok: true, cached: true, imageKey, lang, targets: checked,
+                vintage: vintageOf({ v: data.v, verified: VERIFIED_V, source: "healed", model }),
+              });
             }
             // Verification gutted the row. Fall through and regenerate: the
             // boxes were wrong, so re-serving them would be re-serving the bug.
@@ -3427,7 +3841,13 @@ async function scan(req, res) {
             );
           }
         } else if (servable && !(deep && kept.length < DEEP_MIN_TARGETS)) {
-          return res.status(200).json({ ok: true, cached: true, imageKey, lang, targets: kept });
+          return res.status(200).json({
+            ok: true, cached: true, imageKey, lang, targets: kept,
+            vintage: vintageOf({
+              v: data.v, verified: data.verified, at: data.updated_at,
+              source: "cache", model: data.model,
+            }),
+          });
         }
         if (imageUrl) {
           console.log(
@@ -3437,7 +3857,13 @@ async function scan(req, res) {
         } else if (kept.length) {
           // A key-only probe has no bytes to regenerate from. A thin round beats
           // pretending the picture has nothing in it.
-          return res.status(200).json({ ok: true, cached: true, imageKey, lang, targets: kept });
+          return res.status(200).json({
+            ok: true, cached: true, imageKey, lang, targets: kept,
+            vintage: vintageOf({
+              v: data.v, verified: data.verified, at: data.updated_at,
+              source: "cache", model: data.model,
+            }),
+          });
         }
       }
     } catch (e) {
@@ -3567,6 +3993,7 @@ async function scan(req, res) {
       targets: early,
       partial: true,
       scanId: makeScanId(imageKey, lang, level),
+      vintage: vintageOf({ model: MODEL }),
     });
     servedEarly = true;
     console.log(
@@ -3666,5 +4093,5 @@ async function scan(req, res) {
     targets.length < MIN_SERVED_TARGETS
       ? { bandShort: true, ...(nearestBand(level, counts) ? { nearest: nearestBand(level, counts) } : null), counts }
       : null;
-  return sendOnce(res, { ok: true, cached: false, imageKey, lang, targets, ...shortInfo });
+  return sendOnce(res, { ok: true, cached: false, imageKey, lang, targets, ...shortInfo, vintage: vintageOf({ model: MODEL }) });
 }
