@@ -36,6 +36,7 @@ vi.mock("../lib/supabase.js", () => ({
 }));
 
 const SERVICE_KEYS = [
+  "SUPABASE_SECRET_KEY",
   "SUPABASE_SERVICE_ROLE",
   "SUPABASE_SERVICE_ROLE_KEY",
   "SUPABASE_SERVICE_ROLE_KEY_JWT",
