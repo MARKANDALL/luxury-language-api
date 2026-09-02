@@ -18,10 +18,41 @@ function scrutinyDirective(scrutinyDelta, pointsPerNotch) {
 
   if (d < 0) {
     return `
-SCRUTINY: The learner chose to be scored ${notches} SOFTER than this scene's default — the scoring bar is ${pts} points more forgiving, and every score you see has ALREADY been adjusted for it (do not re-judge or re-scale any number). Make your judgment match that softer bar: celebrate close approximations as wins, and correct only errors that genuinely block being understood.${n >= 3 ? " Be maximally forgiving: lead with praise, offer at most ONE gentle correction, and let subtle deviations pass without comment." : " Keep corrections light, brief, and encouraging."} Express all of this in your persona's own voice and tone.`;
+SCRUTINY: The learner chose to be scored ${notches} SOFTER than this scene's default — the scoring bar is ${pts} points more forgiving, and every score you see has ALREADY been adjusted for it (do not re-judge or re-scale any number). Make your judgment match that softer bar: celebrate close approximations as wins, and correct only errors that genuinely block being understood.${n >= 3 ? " Be maximally forgiving: offer at most ONE gentle correction, and let subtle deviations pass without comment." : " Keep corrections light, brief, and encouraging."} Express all of this in your persona's own voice and tone.`;
   }
   return `
 SCRUTINY: The learner chose to be scored ${notches} STRICTER than this scene's default — the scoring bar is ${pts} points more demanding, and every score you see has ALREADY been adjusted for it (do not re-judge or re-scale any number). Make your judgment match that stricter bar: hold the learner to near-native precision, name subtle deviations (vowel reductions, aspiration, linking, stress) even where the scores look acceptable, and do not inflate praise.${n >= 3 ? " Be maximally exacting: lead with the most important refinement and give concrete articulatory detail." : " Be noticeably more demanding than usual."} Express all of this in your persona's own voice and tone.`;
+}
+
+// ── OPENER CALIBRATION: the first sentence must match the score earned ───────
+// The QuickTip prompt used to hard-code "1 quick praise + 1 correction", so a
+// turn scored 52 opened with "Great job forming the sentence!". Praise the
+// learner did not earn is not kindness; it tells them a bad attempt was good.
+//
+// The bands are the app's canonical tiers, NOT new thresholds: overallTier comes
+// from scoreTier() in ./scoring.js (>=80 "good", >=60 "warn", else "bad"), the
+// same 80/60 split the frontend colors by. "unknown" (no score in the payload)
+// keeps a neutral, observation-first opener rather than inventing praise.
+// Each string sets the STANCE of the first sentence. It must never be quoted or
+// paraphrased back: a directive the model repeats verbatim turns every tip into
+// the same stock phrase, which is its own kind of hollow.
+const OPENER_BY_TIER = {
+  good:
+    "OPENER STANCE: this attempt was strong. Open by affirming what SPECIFICALLY worked — name the actual sound, word, or pattern the learner got right. Earned, concrete praise only; no generic cheerleading.",
+  warn:
+    "OPENER STANCE: this attempt was understood but is not good yet. Open neutrally and specifically — say what actually held up, without celebrating it. No praise words, no exclamation of congratulation.",
+  bad:
+    "OPENER STANCE: this attempt did not land. Open by naming the specific thing that went wrong — the sound, word, or pattern that failed. Do NOT open with praise, and do NOT soften it with a compliment first. Honest and adult, never mocking, never cruel.",
+  unknown:
+    "OPENER STANCE: open with what you actually heard in this attempt, not with praise.",
+};
+
+const OPENER_VOICE =
+  "Write that opener in your persona's own voice. Never quote or paraphrase this instruction, never announce a band, tier, or \"bar\" — just say the thing itself.";
+
+function openerDirective(overallTier) {
+  const tier = String(overallTier || "unknown");
+  return `${OPENER_BY_TIER[tier] || OPENER_BY_TIER.unknown}\n${OPENER_VOICE}`;
 }
 
 export function buildCoachPrompt({
@@ -38,6 +69,10 @@ export function buildCoachPrompt({
   isEs = false,
   scrutinyDelta = 0,
   pointsPerNotch = 2.2,
+  // The tier of THIS attempt's overall score, from scoring.js scoreTier().
+  // Defaults to "unknown" so a caller that does not pass it gets the neutral
+  // opener rather than the old unconditional praise.
+  overallTier = "unknown",
 }) {
   // es-MX flip: when isEs, write coaching content in Spanish and address the
   // learner as "tú". Added once here so it applies to every persona/section.
@@ -81,12 +116,14 @@ ${pCasing}${esDirective}${rigor}
 
 Write exactly 2 to 4 sentences in ONE paragraph.
 No bullets. No markdown. No headings.
-Structure: 1 quick praise + 1 correction + 1 micro-drill.
+Structure: 1 opener (see OPENER STANCE below) + 1 correction + 1 micro-drill.
 Stay under ~75 words.
+
+${openerDirective(overallTier)}
 
 You are generating tip variant ${qIndex + 1}/${qCount} (kind: ${variantKind}).
 
-If overallScore is present, mention it ONCE in a compact way like: "${praiseExample} (82% · B2) ..." (do not over-explain CEFR).
+If overallScore is present, mention it ONCE in a compact way like: "(82% · B2)" (do not over-explain CEFR).
 Do not label individual words/phonemes with CEFR; keep CEFR macro (overall only).
 
 Return pure JSON ONLY:
