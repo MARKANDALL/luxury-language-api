@@ -64,6 +64,133 @@ function toSummaryFromAzure(result) {
   return { pron, acc, flu, comp, lows, words: wordsLow };
 }
 
+// ---------- Full Azure detail (additive capture) ----------
+//
+// toSummaryFromAzure above keeps the ten lowest words and six lowest phonemes
+// and throws the rest away, so nothing downstream can say what the learner
+// actually said, in what order, or when. This builds the record that can:
+// the recognition fields, whether the attempt was scripted, and every word in
+// SPOKEN ORDER with its timings, ErrorType, syllables and phonemes.
+//
+// It is a pure function of the Azure payload the client already posts as
+// azureResult, and it does not read or write `summary`.
+
+// Serialized ceiling for one attempt's azure_detail. Past this the phoneme
+// layer is dropped rather than writing an unbounded row or failing the attempt.
+const AZURE_DETAIL_MAX_BYTES = 64 * 1024;
+
+// Azure puts per-item scores either flat on the item or nested under
+// PronunciationAssessment, depending on granularity and API version, and both
+// shapes are already handled by frontend readers (features/convo/word-feedback/
+// align-plan.js:15, features/progress/rollups/rollupsAccumulate.js:30). Read
+// both, and return undefined rather than null when neither is present:
+// safeNum(null) is 0, so a null here would turn a missing score into a real
+// zero, which reads downstream as a total failure rather than as "not scored".
+function azField(item, name) {
+  return item?.[name] ?? item?.PronunciationAssessment?.[name];
+}
+
+// SNR arrives at the TOP LEVEL of the result, a sibling of DisplayText and
+// NBest, not inside the pronunciation assessment: a live en-US capture on
+// 3 September returned {RecognitionStatus, Offset, Duration, DisplayText, SNR,
+// NBest}. Azure has carried it elsewhere across versions, so the other two
+// positions are probed as a fallback and null is stored when it is genuinely
+// absent, rather than inventing a number.
+function azSnr(result, nb) {
+  return (
+    azField(nb, "SNR") ??
+    result?.SNR ??
+    result?.AudioSourceInfo?.SNR
+  );
+}
+
+function trimAzureWord(w, withPhonemes) {
+  const errorType = azField(w, "ErrorType");
+  const syllables = Array.isArray(w?.Syllables) ? w.Syllables : [];
+  const phonemes = Array.isArray(w?.Phonemes) ? w.Phonemes : [];
+
+  return {
+    word: String(w?.Word ?? w?.word ?? ""),
+    offset: safeNum(w?.Offset),
+    duration: safeNum(w?.Duration),
+    accuracy: safeNum(azField(w, "AccuracyScore")),
+    error_type: typeof errorType === "string" && errorType ? errorType : null,
+    syllables: syllables.map((s) => ({
+      syllable: String(s?.Syllable ?? ""),
+      grapheme: typeof s?.Grapheme === "string" ? s.Grapheme : null,
+      offset: safeNum(s?.Offset),
+      duration: safeNum(s?.Duration),
+      accuracy: safeNum(azField(s, "AccuracyScore")),
+    })),
+    // NBestPhonemes (Azure's per-phoneme alternative candidate lists) and the
+    // per-word prosody Feedback blocks are dropped on purpose: together they
+    // are the bulk of the payload and nothing in scope reads either.
+    phonemes: withPhonemes
+      ? phonemes.map((p) => ({
+          phoneme: String(p?.Phoneme ?? ""),
+          offset: safeNum(p?.Offset),
+          duration: safeNum(p?.Duration),
+          accuracy: safeNum(azField(p, "AccuracyScore")),
+        }))
+      : [],
+  };
+}
+
+function azureDetailBytes(detail) {
+  return Buffer.byteLength(JSON.stringify(detail), "utf8");
+}
+
+function toAzureDetail(result, sentReference) {
+  if (!result || typeof result !== "object") return null;
+
+  const nb = result?.NBest?.[0] || {};
+  const words = Array.isArray(nb?.Words) ? nb.Words : [];
+  const reference = typeof sentReference === "string" ? sentReference.trim() : "";
+
+  const base = {
+    lexical: typeof nb?.Lexical === "string" ? nb.Lexical : null,
+    display:
+      (typeof nb?.Display === "string" && nb.Display) ||
+      (typeof result?.DisplayText === "string" ? result.DisplayText : null),
+    confidence: safeNum(nb?.Confidence),
+    snr: safeNum(azSnr(result, nb)),
+    // Offset and Duration of the whole utterance, in Azure's 100-nanosecond
+    // ticks, same unit as every per-word offset below.
+    offset: safeNum(result?.Offset ?? nb?.Offset),
+    duration: safeNum(result?.Duration ?? nb?.Duration),
+    // Scripted means a ReferenceText was sent, so Azure ALIGNED against a
+    // script rather than transcribing freely. That is what makes phantom
+    // Insertion words possible, so a transcript reader needs to know it, and
+    // needs the script itself to show what was asked against what was said.
+    scripted: reference.length > 0,
+    reference_text: reference || null,
+  };
+
+  const full = { ...base, words: words.map((w) => trimAzureWord(w, true)) };
+  if (azureDetailBytes(full) <= AZURE_DETAIL_MAX_BYTES) return full;
+
+  // Over the ceiling: keep every word and every timing, drop the phoneme layer.
+  const lean = words.map((w) => trimAzureWord(w, false));
+  const trimmed = { ...base, truncated: true, words: lean };
+  if (azureDetailBytes(trimmed) <= AZURE_DETAIL_MAX_BYTES) return trimmed;
+
+  // Still over with no phonemes at all. A recorder-length attempt cannot reach
+  // here, but the row must be bounded whatever arrives, so clamp the word list
+  // and say how many words were lost rather than write without a ceiling.
+  let keep = lean.length;
+  while (keep > 0) {
+    keep = Math.floor(keep * 0.8);
+    const clamped = {
+      ...base,
+      truncated: true,
+      words_dropped: lean.length - keep,
+      words: lean.slice(0, keep),
+    };
+    if (azureDetailBytes(clamped) <= AZURE_DETAIL_MAX_BYTES) return clamped;
+  }
+  return { ...base, truncated: true, words_dropped: lean.length, words: [] };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method Not Allowed" });
@@ -137,6 +264,21 @@ export default async function handler(req, res) {
 
     if (!uid) return res.status(400).json({ ok: false, error: "missing_uid" });
 
+    // The full record of this attempt, trimmed here on the server so a client
+    // cannot post an unbounded blob. Derived from the same azureResult the
+    // summary above is derived from; `summary` itself is not touched.
+    //
+    // The reference text is read from the raw body rather than from the `text`
+    // variable built above, because that one falls back to Azure's own
+    // DisplayText when the client sent nothing, which would label an unscripted
+    // attempt as scripted against a script it was never given.
+    const sentReference =
+      (typeof body.referenceText === "string" && body.referenceText) ||
+      (typeof body.text === "string" && body.text) ||
+      "";
+    const azureDetail = toAzureDetail(azureObj, sentReference);
+    const recognizedText = azureDetail?.display || null;
+
     const row = {
       uid,
       ts,
@@ -145,14 +287,16 @@ export default async function handler(req, res) {
       text,
       summary: summary || {},
       session_id: sessionId,
+      recognized_text: recognizedText,
+      azure_detail: azureDetail,
     };
 
     // Insert
     const sql = `
       INSERT INTO public.lux_attempts
-        (uid, ts, passage_key, part_index, text, summary, session_id)
+        (uid, ts, passage_key, part_index, text, summary, session_id, recognized_text, azure_detail)
       VALUES
-        ($1, $2::timestamptz, $3, $4, $5, $6::jsonb, $7)
+        ($1, $2::timestamptz, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb)
       RETURNING id
     `;
     const params = [
@@ -163,6 +307,8 @@ export default async function handler(req, res) {
       row.text,
       JSON.stringify(row.summary),
       row.session_id,
+      row.recognized_text,
+      row.azure_detail ? JSON.stringify(row.azure_detail) : null,
     ];
 
     const { rows } = await pool.query(sql, params);
