@@ -3,6 +3,7 @@
 
 import { pool } from "../lib/pool.js";
 import { safeNum } from "./pronunciation-gpt/scoring.js";
+import { recordTrackEnabled } from "../lib/record-track.js";
 
 // ---------- Helpers ----------
 function toIso(x) {
@@ -13,8 +14,32 @@ function toIso(x) {
   }
 }
 
+// Words that must never be graded as if the learner meant to say them.
+// Lowercased, matched exactly.
+const FILLER_WORDS = new Set([
+  "um", "umm", "uh", "uhh", "hum", "hmm", "hm", "mhm", "mm", "er", "erm", "ah",
+]);
+
+// True when a word should be kept out of the trouble lists.
+//
+// TWO KINDS, ONE RULE. A PHANTOM is a word Azure invented while aligning
+// speech to a script it did not match: ErrorType 'Insertion'. The learner
+// never said it, so scoring it is scoring nothing. A FILLER is a real
+// hesitation sound; the learner did say it, but it is not a word they were
+// practising and its schwa should not become a trouble sound.
+//
+// This decides trouble-list membership only. The word stays in
+// azure_detail.words untouched, Azure's overall scores are not recomputed, and
+// nothing about the attempt's pronunciation, accuracy, fluency or completeness
+// changes. Gated on LUX_RECORD_TRACK; with the flag off it never runs.
+function isUngraded(w) {
+  if (String(azField(w, "ErrorType") ?? "") === "Insertion") return true;
+  const word = String(w?.Word ?? w?.word ?? "").trim().toLowerCase();
+  return FILLER_WORDS.has(word);
+}
+
 // Build a compact summary for admin UI from Azure JSON
-function toSummaryFromAzure(result) {
+function toSummaryFromAzure(result, ungradeFillers = false) {
   // Defensive defaults
   const nb = result?.NBest?.[0] || {};
   const pa = nb?.PronunciationAssessment || result?.PronunciationAssessment || {};
@@ -26,7 +51,13 @@ function toSummaryFromAzure(result) {
   const flu = safeNum(nb?.FluencyScore ?? pa?.FluencyScore) ?? null;
   const comp = safeNum(nb?.CompletenessScore ?? pa?.CompletenessScore) ?? null;
 
-  const words = Array.isArray(nb?.Words) ? nb.Words : [];
+  const allWords = Array.isArray(nb?.Words) ? nb.Words : [];
+
+  // Under the flag, phantoms and fillers drop out of BOTH lists below, and
+  // their phonemes drop out of trouble-sound aggregation with them, because
+  // both lists are built from this one array. Nothing above this line reads
+  // it, so the four scores are untouched either way.
+  const words = ungradeFillers ? allWords.filter((w) => !isUngraded(w)) : allWords;
 
   // trouble phonemes (lowest 6 by score)
   const phScores = [];
@@ -84,10 +115,20 @@ const AZURE_DETAIL_MAX_BYTES = 64 * 1024;
 // shapes are already handled by frontend readers (features/convo/word-feedback/
 // align-plan.js:15, features/progress/rollups/rollupsAccumulate.js:30). Read
 // both, and return undefined rather than null when neither is present:
-// safeNum(null) is 0, so a null here would turn a missing score into a real
-// zero, which reads downstream as a total failure rather than as "not scored".
+// zero. Absent fields are then normalized by numOrNull below.
 function azField(item, name) {
   return item?.[name] ?? item?.PronunciationAssessment?.[name];
+}
+
+// safeNum is the file's existing coercion and Number(null) is 0, so safeNum
+// turns an explicitly null score into a real zero. Every captured number below
+// goes through this instead: a genuine 0 survives (an Omission really does
+// have offset 0), and absent or null becomes null, which reads as "not
+// scored" rather than as "scored zero".
+function numOrNull(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 // SNR arrives at the TOP LEVEL of the result, a sibling of DisplayText and
@@ -111,16 +152,16 @@ function trimAzureWord(w, withPhonemes) {
 
   return {
     word: String(w?.Word ?? w?.word ?? ""),
-    offset: safeNum(w?.Offset),
-    duration: safeNum(w?.Duration),
-    accuracy: safeNum(azField(w, "AccuracyScore")),
+    offset: numOrNull(w?.Offset),
+    duration: numOrNull(w?.Duration),
+    accuracy: numOrNull(azField(w, "AccuracyScore")),
     error_type: typeof errorType === "string" && errorType ? errorType : null,
     syllables: syllables.map((s) => ({
       syllable: String(s?.Syllable ?? ""),
       grapheme: typeof s?.Grapheme === "string" ? s.Grapheme : null,
-      offset: safeNum(s?.Offset),
-      duration: safeNum(s?.Duration),
-      accuracy: safeNum(azField(s, "AccuracyScore")),
+      offset: numOrNull(s?.Offset),
+      duration: numOrNull(s?.Duration),
+      accuracy: numOrNull(azField(s, "AccuracyScore")),
     })),
     // NBestPhonemes (Azure's per-phoneme alternative candidate lists) and the
     // per-word prosody Feedback blocks are dropped on purpose: together they
@@ -128,9 +169,9 @@ function trimAzureWord(w, withPhonemes) {
     phonemes: withPhonemes
       ? phonemes.map((p) => ({
           phoneme: String(p?.Phoneme ?? ""),
-          offset: safeNum(p?.Offset),
-          duration: safeNum(p?.Duration),
-          accuracy: safeNum(azField(p, "AccuracyScore")),
+          offset: numOrNull(p?.Offset),
+          duration: numOrNull(p?.Duration),
+          accuracy: numOrNull(azField(p, "AccuracyScore")),
         }))
       : [],
   };
@@ -152,12 +193,12 @@ function toAzureDetail(result, sentReference) {
     display:
       (typeof nb?.Display === "string" && nb.Display) ||
       (typeof result?.DisplayText === "string" ? result.DisplayText : null),
-    confidence: safeNum(nb?.Confidence),
-    snr: safeNum(azSnr(result, nb)),
+    confidence: numOrNull(nb?.Confidence),
+    snr: numOrNull(azSnr(result, nb)),
     // Offset and Duration of the whole utterance, in Azure's 100-nanosecond
     // ticks, same unit as every per-word offset below.
-    offset: safeNum(result?.Offset ?? nb?.Offset),
-    duration: safeNum(result?.Duration ?? nb?.Duration),
+    offset: numOrNull(result?.Offset ?? nb?.Offset),
+    duration: numOrNull(result?.Duration ?? nb?.Duration),
     // Scripted means a ReferenceText was sent, so Azure ALIGNED against a
     // script rather than transcribing freely. That is what makes phantom
     // Insertion words possible, so a transcript reader needs to know it, and
@@ -165,6 +206,27 @@ function toAzureDetail(result, sentReference) {
     scripted: reference.length > 0,
     reference_text: reference || null,
   };
+
+  // THE RECORD TRACK. When LUX_RECORD_TRACK is on, routes/assess.js attaches
+  // plain STT of the same audio under __luxRecord (lib/record-track.js), and
+  // the client posts the Azure result through untouched, so it arrives here.
+  // This is what the scripted assessment structurally cannot say: what was
+  // actually spoken, including the off-script words alignment turns into
+  // phantoms. Absent when the flag is off, so the key simply does not appear.
+  const rec = result?.__luxRecord;
+  if (rec && typeof rec === "object") {
+    base.record = {
+      source: typeof rec.source === "string" ? rec.source : null,
+      display: typeof rec.display === "string" ? rec.display : null,
+      lexical: typeof rec.lexical === "string" ? rec.lexical : null,
+      confidence: numOrNull(rec.confidence),
+      words: (Array.isArray(rec.words) ? rec.words : []).map((w) => ({
+        word: String(w?.word ?? ""),
+        offset: numOrNull(w?.offset),
+        duration: numOrNull(w?.duration),
+      })),
+    };
+  }
 
   const full = { ...base, words: words.map((w) => trimAzureWord(w, true)) };
   if (azureDetailBytes(full) <= AZURE_DETAIL_MAX_BYTES) return full;
@@ -245,7 +307,11 @@ export default async function handler(req, res) {
       (flatBaseline.words && flatBaseline.words.length);
 
     // Start with the server-derived summary when we have Azure, else fall back to the flat baseline.
-    let summary = azureObj ? toSummaryFromAzure(azureObj) : flatBaseline;
+    // Under LUX_RECORD_TRACK the trouble lists stop counting phantom
+    // Insertions and fillers. Read per request, never cached, so the flag can
+    // be flipped on Vercel without a redeploy of this module's state.
+    const ungradeFillers = recordTrackEnabled();
+    let summary = azureObj ? toSummaryFromAzure(azureObj, ungradeFillers) : flatBaseline;
 
     // Prefer merging client summary (meta/stats/etc) on top of base summary.
     if (body.summary && typeof body.summary === "object") {
