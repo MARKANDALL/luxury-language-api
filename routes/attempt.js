@@ -191,6 +191,21 @@ function toAzureDetail(result, sentReference) {
   return { ...base, truncated: true, words_dropped: lean.length, words: [] };
 }
 
+// Postgres SQLSTATE 42703, undefined_column. The two columns above are added by
+// migrations/0010_attempt_azure_detail.sql, and migrations in this repo are
+// applied by hand, so a deploy can reach a database that does not have them yet.
+const UNDEFINED_COLUMN = "42703";
+
+// The pre-0010 write, kept verbatim. Its parameters are the first seven of the
+// full insert's, in the same order, so both statements share one params array.
+const LEGACY_ATTEMPT_SQL = `
+  INSERT INTO public.lux_attempts
+    (uid, ts, passage_key, part_index, text, summary, session_id)
+  VALUES
+    ($1, $2::timestamptz, $3, $4, $5, $6::jsonb, $7)
+  RETURNING id
+`;
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method Not Allowed" });
@@ -311,7 +326,34 @@ export default async function handler(req, res) {
       row.azure_detail ? JSON.stringify(row.azure_detail) : null,
     ];
 
-    const { rows } = await pool.query(sql, params);
+    let rows;
+    try {
+      ({ rows } = await pool.query(sql, params));
+    } catch (e) {
+      // Migration 0010 is not applied on this database, so recognized_text and
+      // azure_detail do not exist. 42703 is raised during parse analysis,
+      // before any tuple is formed, and this INSERT is its own implicit
+      // transaction, so nothing was written and there is no partial row.
+      //
+      // The capture is additive, and this file already degrades rather than
+      // fails an attempt when it cannot store everything: AZURE_DETAIL_MAX_BYTES
+      // above drops the phoneme layer instead of dropping the attempt. Losing
+      // the whole attempt because an additive column is absent is that same
+      // trade made the wrong way, so fall back to the pre-0010 write.
+      //
+      // Deliberately unlatched: no flag, no cached probe. The moment 0010 is
+      // applied the first statement succeeds again and capture resumes on its
+      // own, with no redeploy and no stale "the columns are missing" belief
+      // pinned to a warm container. If some other column is genuinely undefined
+      // the fallback raises 42703 too, and that error leaves this block and is
+      // reported by the handler's catch exactly as it is today.
+      if (e?.code !== UNDEFINED_COLUMN) throw e;
+      console.warn(
+        "attempt: recognized_text/azure_detail absent (migration 0010 not applied); " +
+          "wrote the attempt without Azure detail capture"
+      );
+      ({ rows } = await pool.query(LEGACY_ATTEMPT_SQL, params.slice(0, 7)));
+    }
     const insertedId = rows?.[0]?.id || null;
 
     res.status(200).json({ ok: true, id: insertedId });
