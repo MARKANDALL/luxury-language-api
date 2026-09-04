@@ -32,7 +32,12 @@ The router is shaped to handle two transport modes in one entrypoint:
 - **`bodyParser: false`** at the router level, so multipart/form-data audio uploads pass through untouched to routes like `assess`
 - **Manual JSON hydration** for the majority of routes that expect JSON bodies
 
-Admin routes gate on a shared `ADMIN_TOKEN` via the `x-admin-token` header. Most routes are lazy-loaded per-request so a single bad import cannot take down the whole API surface.
+The API has two separate auth gates, and the difference matters:
+
+- **`ADMIN_TOKEN`** (`x-admin-token` header) gates the paid **student-facing** surface — scoring, speech, TTS, conversation, the learner's own model. It is shared with the frontend as `VITE_ADMIN_TOKEN`, which Vite inlines into the client bundle at build time, so it is readable by anyone who views source. Treat it as a **spend gate, not a privacy boundary**.
+- **`ADMIN_KEY_PRIVATE`** (`x-admin-key` header) gates every **admin-only** route — cohort feeds, cross-user attempt lists, CSV export, the expense dashboard, the keepsake reaper. It is backend-only, must never become a `VITE_` variable, and is never accepted from a query string. The shared check lives in `lib/admin-auth.js`; routes gate through `isAdminKeyRequest()` and the router enforces the same set again in `ADMIN_KEY_ONLY`.
+
+Most routes are lazy-loaded per-request so a single bad import cannot take down the whole API surface.
 
 ### Modular coaching pipeline
 
@@ -91,7 +96,9 @@ Browser-based admin pages are served directly from this repo under `admin/`:
 - `admin/user.html` — Attempts
 - `admin/overview.html` — Cohort Overview
 
-These are protected by `ADMIN_TOKEN` and provide operational visibility into learner activity, attempt trends, trouble sounds, and cohort movement.
+These are protected by `ADMIN_KEY_PRIVATE` and provide operational visibility into learner activity, attempt trends, trouble sounds, and cohort movement.
+
+Each page reads the key from its own `sessionStorage` slot, `lux_admin_private_key`, and prompts once if it is absent. That slot is deliberately distinct from `lux_admin_token` (the front-door gate's slot) and there is no fallback between them. The key is never accepted from the URL and never placed in a copied link.
 
 ---
 
@@ -104,7 +111,9 @@ Configured in Vercel → Project → Settings → Environment Variables:
 - `ELEVENLABS_API_KEY` — voice cloning
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE` — Supabase admin client
 - `DATABASE_URL`, `POSTGRES_URL` — Postgres connection strings
-- `ADMIN_TOKEN` — shared secret for admin endpoints
+- `ADMIN_TOKEN` — shared secret for the paid student-facing routes (also shipped to the client as `VITE_ADMIN_TOKEN`; not a privacy boundary)
+- `ADMIN_KEY_PRIVATE` — backend-only secret for admin-only routes. Never expose as a `VITE_` variable
+- `CRON_SECRET` — authorizes the two Vercel crons (`/api/admin/expenses/refresh`, `/api/keepsakes/cleanup`)
 - `CORS_ORIGINS` — allowed origins for cross-origin requests
 - `ENABLE_PROSODY` — feature flag for prosody analysis
 

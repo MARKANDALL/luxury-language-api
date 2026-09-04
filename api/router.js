@@ -14,6 +14,8 @@ export const config = { api: { bodyParser: false, externalResolver: true }, maxD
 
 import crypto from "node:crypto";
 
+import { isAdminKeyRequest } from "../lib/admin-auth.js";
+
 import adminLabelUser from "../routes/admin-label-user.js";
 import adminRecent from "../routes/admin-recent.js";
 import adminUserStats from "../routes/admin-user-stats.js";
@@ -169,6 +171,7 @@ function ping(req, res) {
     },
     env: {
       hasAdminToken: !!process.env.ADMIN_TOKEN,
+      hasAdminKeyPrivate: !!process.env.ADMIN_KEY_PRIVATE,
       hasAzureSpeechKey: !!process.env.AZURE_SPEECH_KEY,
       hasAzureSpeechRegion: !!process.env.AZURE_SPEECH_REGION,
       hasOpenAIKey: !!process.env.OPENAI_API_KEY,
@@ -290,7 +293,7 @@ const u = new URL(req.url, `http://${getHeader(req, "host") || "localhost"}`);
       res.setHeader("Access-Control-Allow-Credentials", "true");
       res.setHeader(
         "Access-Control-Allow-Headers",
-        "content-type, x-admin-token, x-request-id"
+        "content-type, x-admin-token, x-admin-key, x-request-id"
       );
       res.setHeader(
         "Access-Control-Allow-Methods",
@@ -307,7 +310,11 @@ const u = new URL(req.url, `http://${getHeader(req, "host") || "localhost"}`);
       return;
     }
 
-    // Router-level admin gating (cost-control)
+    // Router-level gating for the paid STUDENT-FACING surface (cost control).
+    // This set is authenticated with ADMIN_TOKEN, which is intentionally shared
+    // with the client bundle. It is a spend gate, not a privacy boundary —
+    // anything exposing one learner's data to another belongs in
+    // ADMIN_KEY_ONLY below.
 const ADMIN_ONLY = new Set([
   "tts",
   "pronunciation-gpt",
@@ -342,6 +349,32 @@ const ADMIN_ONLY = new Set([
   "keepsakes/delete",
   "keepsakes/images-delete",
 ]);
+
+    // ADMIN-ONLY routes: cohort data, dashboard feeds and destructive
+    // maintenance. These authenticate against ADMIN_KEY_PRIVATE (x-admin-key)
+    // and MUST NOT be reachable with ADMIN_TOKEN, which ships inside the
+    // client bundle as VITE_ADMIN_TOKEN. Each handler self-gates as well; this
+    // is the belt to that pair of suspenders.
+    //
+    // NOTE the two deliberate absences. "admin/expenses/refresh" and
+    // "keepsakes/cleanup" are reached by Vercel cron, which sends
+    // Authorization: Bearer <CRON_SECRET> and no admin key — listing them here
+    // would 401 the crons. Both self-gate on isVercelCron() || isAdminKeyRequest().
+    const ADMIN_KEY_ONLY = new Set([
+      "admin-label-user",
+      "admin-recent",
+      "admin-user-stats",
+      "admin/expenses/migrate",
+      "admin/expenses/summary",
+      "admin/expenses/manual",
+    ]);
+
+    if (ADMIN_KEY_ONLY.has(route) && !isAdminKeyRequest(req)) {
+      res.statusCode = 401;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.end(JSON.stringify({ ok: false, error: "unauthorized", route, requestId }));
+      return;
+    }
 
     if (ADMIN_ONLY.has(route) && !isAdminRequest(req, u)) {
       res.statusCode = 401;
