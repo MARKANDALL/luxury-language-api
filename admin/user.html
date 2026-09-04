@@ -36,33 +36,35 @@
   </style>
 
   <script>
-    // Ensure the token exists in this tab (accept ?token=/?t=; otherwise prompt)
-    (function ensureAdminToken(){
-      const q = new URLSearchParams(location.search);
-      const t = q.get('token') || q.get('t');
-      if (t) sessionStorage.setItem('lux_admin_token', t);
-      if (!sessionStorage.getItem('lux_admin_token')) {
-        const entered = prompt('Enter admin token');
-        if (entered) sessionStorage.setItem('lux_admin_token', entered.trim());
+    // ADMIN_KEY_PRIVATE lives in its OWN slot, deliberately not the
+    // 'lux_admin_token' slot the front-door gate writes to, and with no
+    // fallback between them.
+    // The key is NOT accepted from ?token=/?t= any more: a secret in a URL
+    // leaks into browser history, Referer headers and access logs. Use the
+    // "Set key" box below to enter or replace it.
+    (function ensureAdminKey(){
+      if (!sessionStorage.getItem('lux_admin_private_key')) {
+        const entered = prompt('Enter admin key');
+        if (entered) sessionStorage.setItem('lux_admin_private_key', entered.trim());
       }
     })();
 
     function authHeaders() {
-      const tok = sessionStorage.getItem('lux_admin_token') || '';
-      return tok ? { 'x-admin-token': tok } : {};
+      const key = sessionStorage.getItem('lux_admin_private_key') || '';
+      return key ? { 'x-admin-key': key } : {};
     }
 
-    function setToken(tok) {
-      if (tok && tok.trim()) sessionStorage.setItem('lux_admin_token', tok.trim());
-      else sessionStorage.removeItem('lux_admin_token');
-      updateTokenBadge();
+    function setAdminKey(key) {
+      if (key && key.trim()) sessionStorage.setItem('lux_admin_private_key', key.trim());
+      else sessionStorage.removeItem('lux_admin_private_key');
+      updateKeyBadge();
     }
 
-    function updateTokenBadge(){
-      const badge = document.getElementById('tokenBadge');
-      const tok = sessionStorage.getItem('lux_admin_token');
-      badge.textContent = tok ? 'Token set ✓' : 'No token';
-      badge.className = 'pill ' + (tok ? 'ok' : 'bad');
+    function updateKeyBadge(){
+      const badge = document.getElementById('keyBadge');
+      const key = sessionStorage.getItem('lux_admin_private_key');
+      badge.textContent = key ? 'Key set ✓' : 'No key';
+      badge.className = 'pill ' + (key ? 'ok' : 'bad');
     }
 
     // --- Helpers -----------------------------------------------------------
@@ -171,13 +173,10 @@
       URL.revokeObjectURL(a.href);
     }
 
-    // --- Copy link (with or without token) --------------------------------
-    function copyLink(includeToken=false) {
+    // --- Copy link --------------------------------------------------------
+    // Filters only. The admin key is never put in a link.
+    function copyLink() {
       const p = paramsFromUI();
-      if (includeToken) {
-        const tok = sessionStorage.getItem('lux_admin_token');
-        if (tok) p.set('token', tok);
-      }
       const url = `${location.origin}${location.pathname}?${p.toString()}`;
       navigator.clipboard.writeText(url).then(()=> alert('Link copied to clipboard.'));
     }
@@ -199,15 +198,14 @@
       // Wire events
       document.getElementById('reloadBtn').onclick = loadAttempts;
       document.getElementById('csvBtn').onclick = downloadCSV;
-      document.getElementById('copyBtn').onclick = () => copyLink(false);
-      document.getElementById('copyWithTokenBtn').onclick = () => copyLink(true);
-      document.getElementById('saveTokBtn').onclick = () => {
-        const v = document.getElementById('tokInput').value;
-        setToken(v);
+      document.getElementById('copyBtn').onclick = () => copyLink();
+      document.getElementById('saveKeyBtn').onclick = () => {
+        const v = document.getElementById('keyInput').value;
+        setAdminKey(v);
         loadAttempts();
       };
 
-      updateTokenBadge();
+      updateKeyBadge();
       loadAttempts(); // safe now because we ensured a token above
     });
   </script>
@@ -217,7 +215,7 @@
     <a href="/admin/overview.html" class="nav-link">Cohort</a>
     <a href="/admin/user.html" class="nav-link active">Attempts</a>
     <a href="/admin/index.html" class="nav-link">User Progress</a>
-    <span class="right note">Token lives in this tab</span>
+    <span class="right note">Admin key lives in this tab</span>
   </nav>
 
   <h1>Attempts (admin)</h1>
@@ -229,9 +227,8 @@
     <button id="reloadBtn">Reload</button>
     <button id="csvBtn" class="secondary">Download CSV</button>
     <button id="copyBtn" class="secondary">Copy link</button>
-    <button id="copyWithTokenBtn" class="secondary">Copy link + token</button>
 
-    <span class="right note">Token is stored in this tab’s session only.</span>
+    <span class="right note">Admin key is stored in this tab’s session only, and never put in a link.</span>
   </div>
 
   <div class="row" style="margin-top:8px">
@@ -250,9 +247,9 @@
   </div>
 
   <div class="row" style="margin-top:6px">
-    <span id="tokenBadge" class="pill">Token set?</span>
-    <input id="tokInput" type="text" placeholder="paste admin token…" style="width:260px" />
-    <button id="saveTokBtn" class="secondary">Set token</button>
+    <span id="keyBadge" class="pill">Key set?</span>
+    <input id="keyInput" type="password" placeholder="paste admin key…" style="width:260px" />
+    <button id="saveKeyBtn" class="secondary">Set key</button>
     <span class="note">Rows: <strong id="count">0</strong></span>
   </div>
 

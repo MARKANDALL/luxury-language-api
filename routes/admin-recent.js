@@ -1,5 +1,6 @@
 // file: /api/admin-recent.js
 import { pool } from "../lib/pool.js";
+import { isAdminKeyRequest } from "../lib/admin-auth.js";
 
 function parseISO(d) {
   if (!d) return null;
@@ -67,13 +68,10 @@ export default async function handler(req, res) {
   try {
     const q = req.method === "GET" ? req.query : req.body;
 
-    // --- Token: header first, then query (URL)
-    const token =
-      (req.headers["x-admin-token"] || "").toString().trim() ||
-      (q.token || "").toString().trim();
-    const expected = (process.env.ADMIN_TOKEN || "").toString().trim();
-
-    if (!expected || token !== expected) {
+    // --- ADMIN-ONLY: cohort-wide attempt rows + CSV export. Gated on
+    // ADMIN_KEY_PRIVATE (x-admin-key header) only; the bundled ADMIN_TOKEN
+    // must not open this. See lib/admin-auth.js.
+    if (!isAdminKeyRequest(req)) {
       return res.status(401).json({ error: "unauthorized" });
     }
 

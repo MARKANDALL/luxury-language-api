@@ -53,14 +53,15 @@
   </style>
 
   <script>
-    // Ensure admin token lives in this tab's session (accept ?token or ?t; otherwise prompt)
-    (function ensureAdminToken(){
-      const qs = new URLSearchParams(location.search);
-      const t = qs.get('token') || qs.get('t');
-      if (t) sessionStorage.setItem('lux_admin_token', t);
-      if (!sessionStorage.getItem('lux_admin_token')) {
-        const entered = prompt('Enter admin token');
-        if (entered) sessionStorage.setItem('lux_admin_token', entered.trim());
+    // ADMIN_KEY_PRIVATE lives in its OWN slot, deliberately not the
+    // 'lux_admin_token' slot the front-door gate writes to, and with no
+    // fallback between them.
+    // The key is NOT accepted from ?token=/?t= any more: a secret in a URL
+    // leaks into browser history, Referer headers and access logs.
+    (function ensureAdminKey(){
+      if (!sessionStorage.getItem('lux_admin_private_key')) {
+        const entered = prompt('Enter admin key');
+        if (entered) sessionStorage.setItem('lux_admin_private_key', entered.trim());
       }
     })();
   </script>
@@ -72,7 +73,7 @@
     <a href="/admin/overview.html" class="nav-link active">Cohort</a>
     <a href="/admin/user.html" class="nav-link">Attempts</a>
     <a href="/admin/index.html" class="nav-link">User Progress</a>
-    <span class="right note">Token lives in this tab</span>
+    <span class="right note">Admin key lives in this tab</span>
   </nav>
 
   <h1>Cohort Overview (admin)</h1>
@@ -164,10 +165,10 @@
 
 <script>
 (function () {
-  // ---------- Token ----------
+  // ---------- Admin key ----------
   function authHeaders() {
-    const tok = sessionStorage.getItem('lux_admin_token') || '';
-    return tok ? { 'x-admin-token': tok } : {};
+    const key = sessionStorage.getItem('lux_admin_private_key') || '';
+    return key ? { 'x-admin-key': key } : {};
   }
 
   // ---------- Elements ----------

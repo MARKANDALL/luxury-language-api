@@ -1,28 +1,16 @@
 // routes/admin-user-stats.js
 // One-line: Admin-only stats endpoint that aggregates lux_attempts by user and window, with safe in-handler Supabase init (no import-time crash).
 import { getSupabaseAdmin } from '../lib/supabase.js';
-
-const ADMIN_TOKEN = String(process.env.ADMIN_TOKEN || "").trim();
-
-function normToken(v) {
-  const s = String(v || "").trim();
-  // strip one pair of surrounding quotes if present
-  return s.replace(/^[\"\'](.*)[\"\']$/, "$1").trim();
-}
-
-function getAdminToken(req) {
-  return (
-    normToken(req?.headers?.["x-admin-token"]) ||
-    normToken(req?.query?.token)
-  );
-}
+import { isAdminKeyRequest } from '../lib/admin-auth.js';
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 
 export default async function handler(req, res) {
   try {
-    const token = getAdminToken(req);
-    if (!ADMIN_TOKEN || !token || token !== ADMIN_TOKEN) {
+    // ADMIN-ONLY: returns one row per user across the whole cohort, with no
+    // per-caller mode. Gated on ADMIN_KEY_PRIVATE only. Read per request (the
+    // old module-scope capture meant an env change needed a redeploy).
+    if (!isAdminKeyRequest(req)) {
       return res.status(401).json({ error: 'unauthorized' });
     }
 

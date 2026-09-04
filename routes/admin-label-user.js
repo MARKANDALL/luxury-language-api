@@ -2,6 +2,7 @@
 // One-line: Admin-only endpoint to upsert a user's label/note in lux_users using a centralized Supabase admin client.
 
 import { getSupabaseAdmin } from '../lib/supabase.js';
+import { isAdminKeyRequest } from '../lib/admin-auth.js';
 
 async function readJson(req) {
   if (req.body && typeof req.body === 'object') return req.body;
@@ -17,28 +18,22 @@ async function readJson(req) {
 
 export default async function handler(req, res) {
   try {
-    // Support token in header or query
-    let qsToken = null, uid = null, label = null, note = null;
+    // ADMIN-ONLY: upserts a label/note onto ANY caller-supplied uid via the
+    // service-role client. Gated on ADMIN_KEY_PRIVATE only (x-admin-key
+    // header); an unset key fails closed rather than returning a 500 that
+    // advertises the deployment's configuration.
+    if (!isAdminKeyRequest(req)) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    let uid = null, label = null, note = null;
     try {
       const u = new URL(req.url, 'http://localhost');
-      qsToken = u.searchParams.get('token');
       uid     = u.searchParams.get('uid');
       label   = u.searchParams.get('label');
       note    = u.searchParams.get('note');
     } catch (err) {
       console.warn("[admin/admin-label-user] failed to parse query params", err);
-    }
-
-    const token =
-      req.headers['x-admin-token'] ||
-      req.headers['x-admin-token'.toLowerCase()] ||
-      qsToken;
-
-    if (!process.env.ADMIN_TOKEN) {
-      return res.status(500).json({ error: 'missing ADMIN_TOKEN' });
-    }
-    if (token !== process.env.ADMIN_TOKEN) {
-      return res.status(401).json({ error: 'unauthorized' });
     }
 
     // Allow POST body too

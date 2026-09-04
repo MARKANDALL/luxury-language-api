@@ -1,7 +1,8 @@
 // routes/expenses-summary.js
 // One-line: GET /api/admin/expenses/summary — latest snapshot per source, MTD total, run/build split, events.
 
-import { isAdmin, sendJson } from "../lib/expenses/http.js";
+import { sendJson } from "../lib/expenses/http.js";
+import { isAdminKeyRequest } from "../lib/admin-auth.js";
 import {
   getSources,
   latestSnapshotPerSource,
@@ -17,7 +18,7 @@ export default async function handler(req, res) {
   const method = String(req.method || "GET").toUpperCase();
   if (method === "OPTIONS") return sendJson(res, 204, {});
   if (method !== "GET") return sendJson(res, 405, { ok: false, error: "method_not_allowed" });
-  if (!isAdmin(req)) return sendJson(res, 401, { ok: false, error: "unauthorized" });
+  if (!isAdminKeyRequest(req)) return sendJson(res, 401, { ok: false, error: "unauthorized" });
 
   try {
     const [sources, latestMap, events] = await Promise.all([

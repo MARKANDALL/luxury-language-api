@@ -1,11 +1,12 @@
 // routes/expenses-refresh.js
 // One-line: /api/admin/expenses/refresh — run every auto fetcher, write snapshots, return per-source results.
 //
-// POST: backs the "REFRESH ALL" button (admin token).
-// GET:  the Vercel daily cron (authorized by CRON_SECRET, or the admin token).
+// POST: backs the "REFRESH ALL" button (ADMIN_KEY_PRIVATE via x-admin-key).
+// GET:  the Vercel daily cron (authorized by CRON_SECRET, or the admin key).
 // Each source is isolated: one fetcher throwing never aborts the others.
 
-import { isAdmin, isVercelCron, sendJson } from "../lib/expenses/http.js";
+import { isVercelCron, sendJson } from "../lib/expenses/http.js";
+import { isAdminKeyRequest } from "../lib/admin-auth.js";
 import { getSources, insertSnapshot } from "../lib/expenses/db.js";
 import { getFetcher } from "../lib/expenses/fetchers/index.js";
 
@@ -16,7 +17,7 @@ export default async function handler(req, res) {
     return sendJson(res, 405, { ok: false, error: "method_not_allowed" });
   }
 
-  const admin = isAdmin(req);
+  const admin = isAdminKeyRequest(req);
   const cron = isVercelCron(req);
   if (!admin && !cron) return sendJson(res, 401, { ok: false, error: "unauthorized" });
   const triggeredBy = admin ? "admin" : "cron";

@@ -17,14 +17,15 @@
 
 import { purgeSets } from "../lib/keepsakes.js";
 import { getSupabaseAdmin } from "../lib/supabase.js";
-import { sendJson, isAdmin, isVercelCron } from "../lib/expenses/http.js";
+import { sendJson, isVercelCron } from "../lib/expenses/http.js";
+import { isAdminKeyRequest } from "../lib/admin-auth.js";
 
 const MAX_SETS_PER_RUN = 200;
 
 export default async function handler(req, res) {
   if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "GET only" });
 
-  if (!isVercelCron(req) && !isAdmin(req)) {
+  if (!isVercelCron(req) && !isAdminKeyRequest(req)) {
     return sendJson(res, 401, { ok: false, error: "unauthorized" });
   }
 
