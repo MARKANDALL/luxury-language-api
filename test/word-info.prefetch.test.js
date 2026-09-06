@@ -32,7 +32,7 @@ vi.mock("../lib/supabase.js", () => ({
   }),
 }));
 
-const V2_CARD = {
+const CACHED_CARD = {
   word: "pastry",
   unit: "pastry",
   pos: "noun",
@@ -43,13 +43,15 @@ const V2_CARD = {
   tag: { cefr: "B1", freq: "very common" },
   collocations: ["fresh pastry"],
   trap: "",
-  v: 2,
+  // Card v4 (adds pronunciation + cognate). A cached card at any other version
+  // is a MISS, so this stamp must track CARD_VERSION in routes/word-info.js.
+  v: 5,
 };
 
 beforeEach(() => {
   vi.resetModules();
   insertSpy.mockClear();
-  cacheState.card = { ...V2_CARD };
+  cacheState.card = { ...CACHED_CARD };
   process.env.ADMIN_TOKEN = "test_admin_token";
   // Deliberately NO OPENAI_API_KEY: a cached hit must never reach the model.
 });
@@ -69,7 +71,7 @@ describe("word-info prefetch no-log flag", () => {
       .send({ word: "pastry", sentence: "a fresh pastry", lang: "en", surface: "convo-ai", prefetch: true });
 
     expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({ ok: true, cached: true, card: { v: 2, unit: "pastry" } });
+    expect(r.body).toMatchObject({ ok: true, cached: true, card: { v: 5, unit: "pastry" } });
     // The whole point: a prefetch logs NOTHING.
     expect(insertSpy).not.toHaveBeenCalled();
   });
