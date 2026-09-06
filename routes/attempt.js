@@ -13,6 +13,54 @@ function toIso(x) {
   }
 }
 
+// A phoneme occurrence counts as "low" below 80. This is NOT a new threshold:
+// it is the exact test the only reader of the field below already applies to
+// the field it stands beside (features/progress/rollups/rollupsAccumulate.js:265,
+// and :161 on the full-Azure path), copied here so the preferred branch counts
+// lows the same way the fallback branch does and the Progress explainer's
+// "N of M scored below 80%" keeps meaning what it has always meant.
+const PHONEME_LOW_BELOW = 80;
+
+// A real utterance cannot contain this many DISTINCT phonemes in any language
+// Lux serves — English has about 44, Spanish about 25. The ceiling exists only
+// so a malformed or hostile payload cannot write an unbounded object into a
+// column with no size guard of its own. Past it the field is dropped WHOLE
+// rather than sampled, because a partial sample is the exact defect this field
+// exists to remove; readers then fall back to `lows`, which is today's
+// behaviour, so nothing breaks and nothing is quietly biased.
+const SUMMARY_PHONEME_MAX_KEYS = 256;
+
+// { phoneme: { occ, avg, low } } over every scored phoneme, or null.
+// occ is how many times the phoneme was scored in this attempt, avg its mean
+// across those occurrences to one decimal, low how many fell below
+// PHONEME_LOW_BELOW. Storing occ + avg rather than the raw list is exact for
+// averaging — a reader's sum += avg * occ recovers the true mean — and bounds
+// the field by the language's phoneme inventory instead of by how long the
+// learner spoke.
+function toPhonemeStats(phScores) {
+  if (!phScores.length) return null;
+
+  const agg = new Map();
+  for (const { p, s } of phScores) {
+    const cur = agg.get(p) || { occ: 0, sum: 0, low: 0 };
+    cur.occ += 1;
+    cur.sum += s;
+    if (s < PHONEME_LOW_BELOW) cur.low += 1;
+    agg.set(p, cur);
+  }
+  if (agg.size > SUMMARY_PHONEME_MAX_KEYS) return null;
+
+  const phonemes = {};
+  for (const [p, v] of agg) {
+    phonemes[p] = {
+      occ: v.occ,
+      avg: Math.round((v.sum / v.occ) * 10) / 10,
+      low: v.low,
+    };
+  }
+  return { phonemes };
+}
+
 // Build a compact summary for admin UI from Azure JSON
 function toSummaryFromAzure(result) {
   // Defensive defaults
@@ -42,6 +90,23 @@ function toSummaryFromAzure(result) {
   phScores.sort((a, b) => a.s - b.s);
   const lows = phScores.slice(0, 6).map((x) => [x.p, x.s]);
 
+  // Every scored phoneme of the attempt, beside the six above.
+  //
+  // `lows` is the SIX LOWEST phonemes, and it is the only phoneme record the
+  // Progress page can reach: routes/user-recent.js selects `summary` and no
+  // Azure column, so every rollup downstream averages a deliberately
+  // worst-picked sample. A learner who says /eɪ/ three times at 95, 92 and 78
+  // has 78 stored, attempt after attempt, and is told /eɪ/ is a trouble sound
+  // when its real average is 88.
+  //
+  // This writes the true distribution in the shape the rollups ALREADY prefer:
+  // features/progress/rollups/rollupsAccumulate.js:206-241 reads
+  // summary.stats.phonemes as { ipa: {occ, avg, low} } and only falls back to
+  // `lows` when it is absent. So `lows` stays exactly as it was for its other
+  // readers, rows written before today keep working on the fallback branch, and
+  // new rows get the real average with no frontend change.
+  const stats = toPhonemeStats(phScores);
+
   // trouble words (aggregate avg by word, lowest 10)
   const wordAgg = new Map();
   for (const w of words) {
@@ -61,7 +126,17 @@ function toSummaryFromAzure(result) {
   wordRows.sort((a, b) => a.s - b.s);
   const wordsLow = wordRows.slice(0, 10).map((r) => [r.w, r.s, r.n]);
 
-  return { pron, acc, flu, comp, lows, words: wordsLow };
+  // `stats` is omitted rather than written empty, so a reader's "is it there"
+  // test keeps meaning "this row carries the real distribution".
+  return {
+    pron,
+    acc,
+    flu,
+    comp,
+    lows,
+    words: wordsLow,
+    ...(stats ? { stats } : {}),
+  };
 }
 
 // ---------- Full Azure detail (additive capture) ----------

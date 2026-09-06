@@ -2,6 +2,7 @@
 // One-line: Admin-only stats endpoint that aggregates lux_attempts by user and window, with safe in-handler Supabase init (no import-time crash).
 import { getSupabaseAdmin } from '../lib/supabase.js';
 import { isAdminKeyRequest } from '../lib/admin-auth.js';
+import { metricNum } from '../lib/metrics.js';
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 
@@ -65,7 +66,14 @@ export default async function handler(req, res) {
     for (const r of data) {
       const uid = r.uid;
       const tsMs = new Date(r.ts).getTime();
-      const pron = Number(r?.summary?.pron);
+      // An attempt Azure never scored is stored with pron null, and it must not
+      // be averaged in. Number(null) is 0, and 0 passes every Number.isFinite
+      // guard below, so a single typed conversation turn used to drag a
+      // learner's cohort average, recent average and delta down by a whole
+      // attempt's worth of zero. metricNum returns null for "not scored" and
+      // keeps a genuine 0 — see lib/metrics.js. s.attempts below deliberately
+      // still counts the attempt: it happened, it just was not scored.
+      const pron = metricNum(r?.summary?.pron);
 
       if (!stats.has(uid)) {
         stats.set(uid, {
