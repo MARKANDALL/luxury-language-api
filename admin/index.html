@@ -6,11 +6,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <script>
-    // Mirrors K_ADMIN_TOKEN from app-core/lux-storage.js
-    (function ensureToken() {
-      if (!sessionStorage.getItem('lux_admin_token')) {
-        const entered = prompt('Enter admin token');
-        if (entered) sessionStorage.setItem('lux_admin_token', entered.trim());
+    // ADMIN_KEY_PRIVATE lives in its OWN slot, deliberately not the
+    // 'lux_admin_token' slot the front-door gate writes to. There is no
+    // fallback between them: the bundled token cannot open these endpoints,
+    // so silently reusing it would only produce a confusing 401.
+    // The key is never accepted from the URL — that would leak it into
+    // browser history, Referer headers and access logs.
+    (function ensureAdminKey() {
+      if (!sessionStorage.getItem('lux_admin_private_key')) {
+        const entered = prompt('Enter admin key');
+        if (entered) sessionStorage.setItem('lux_admin_private_key', entered.trim());
       }
     })();
   </script>
@@ -52,7 +57,7 @@
     <a href="/admin/overview.html" class="nav-link">Cohort</a>
     <a href="/admin/user.html" class="nav-link">Attempts</a>
     <a href="/admin/index.html" class="nav-link active">User Progress</a>
-    <span class="right note">Token lives in this tab</span>
+    <span class="right note">Admin key lives in this tab</span>
   </nav>
 
   <h1>User Progress (admin)</h1>
@@ -61,7 +66,7 @@
     <label>UID <input id="uid" type="text" placeholder="user id" style="width:380px"></label>
     <label>Limit <input id="limit" type="number" value="500" min="1" max="20000" style="width:96px"></label>
     <button id="loadBtn">Load</button>
-    <a id="csvBtn" class="btn" target="_blank" rel="noopener">Download CSV</a>
+    <button id="csvBtn" type="button">Download CSV</button>
     <button id="troubleCsvBtn">Download trouble CSV</button>
     <button id="copyBtn">Copy link</button>
   </div>
@@ -137,9 +142,9 @@
 <script>
 (function () {
   const API_BASE = "";
-  // Mirrors K_ADMIN_TOKEN from app-core/lux-storage.js
-  const TOKEN = sessionStorage.getItem('lux_admin_token') || '';
-  const headers = TOKEN ? { 'x-admin-token': TOKEN } : {};
+  // Dedicated admin-key slot — see ensureAdminKey() in <head>.
+  const ADMIN_KEY = sessionStorage.getItem('lux_admin_private_key') || '';
+  const headers = ADMIN_KEY ? { 'x-admin-key': ADMIN_KEY } : {};
 
   const uidEl    = document.getElementById('uid');
   const limitEl  = document.getElementById('limit');
@@ -223,7 +228,7 @@
       cb.value = pk;
       // Pre-check: if URL had specific passages, use those; otherwise check all
       cb.checked = preselectedPassages ? preselectedPassages.has(pk) : true;
-      cb.addEventListener('change', () => { applyClientFilter(); updateCsvHref(); });
+      cb.addEventListener('change', () => { applyClientFilter(); });
       label.appendChild(cb);
 
       // Friendly label: shorten convo: prefix, capitalize passage names
@@ -274,19 +279,37 @@
     renderTable(currentRows);
   }
 
-  function updateCsvHref() {
+  function csvUrl() {
     const uid = uidEl.value.trim();
     const limit = Number(limitEl.value || 500);
     const passages = buildPassagesParam();
     const from = fromEl.value;
     const to = toEl.value;
-    // Token sent via request header — never in the URL
+    // Key travels in the x-admin-key request header — never in the URL.
     let url = `${API_BASE}/api/admin-recent?format=csv&limit=${encodeURIComponent(limit)}`;
     if (uid)      url += `&uid=${encodeURIComponent(uid)}`;
     if (from)     url += `&from=${encodeURIComponent(from)}`;
     if (to)       url += `&to=${encodeURIComponent(to)}`;
     if (passages) url += `&passages=${encodeURIComponent(passages)}`;
-    csvBtn.href = url;
+    return url;
+  }
+
+  // A plain <a href> navigation cannot carry the x-admin-key header, so fetch
+  // the CSV and hand the browser a blob instead.
+  async function downloadCsv(ev) {
+    if (ev) ev.preventDefault();
+    try {
+      const r = await fetch(csvUrl(), { cache: 'no-store', headers });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const blob = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'lux_attempts.csv';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      alert('CSV download failed: ' + e.message);
+    }
   }
 
   function copyLinkToClipboard() {
@@ -425,7 +448,6 @@
 
       // Apply client-side filter (respects checkbox state)
       applyClientFilter();
-      updateCsvHref();
     } catch (e) {
       alert('Load failed: ' + e.message);
     } finally {
@@ -453,9 +475,8 @@
   clearBtn.onclick = () => { fromEl.value = ''; loadData(); };
   saveBtn.onclick = saveLabel;
   copyBtn.onclick = copyLinkToClipboard;
-  [uidEl, limitEl, fromEl, toEl, smoothEl].forEach(el => el.addEventListener('change', updateCsvHref));
+  csvBtn.onclick = downloadCsv;
 
-  updateCsvHref();
   if (uidEl.value) loadData();
 })();
 </script>

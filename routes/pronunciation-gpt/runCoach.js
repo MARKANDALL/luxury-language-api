@@ -134,6 +134,11 @@ export async function runPronunciationCoach({
     // prompt to pre-scrutiny behavior).
     scrutinyDelta: effectiveScrutinyDelta,
     pointsPerNotch: POINTS_PER_NOTCH,
+    // The opener has to match the score the learner just earned, so the tier
+    // must be in scope when the prompt is BUILT, not only in the user payload.
+    // Scrutiny-adjusted on purpose: the coach's words track the same numbers
+    // the learner's colors do.
+    overallTier,
   });
 
   const targetSections = built.targetSections;

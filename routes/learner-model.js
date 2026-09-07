@@ -20,7 +20,12 @@
 //   - Bound every read: the row scan is capped at MAX_ROWS.
 //
 // Contract:
-//   POST { uid, pack }  ->  { ok: true, pack, model: { totals, categories[], crutchWords[], afn[], strengths } }
+//   POST { uid, pack }  ->  { ok: true, pack, model: { totals, sourceMix,
+//                                categories[], crutchWords[], afn[], strengths,
+//                                pronunciation } }
+//   `sourceMix` (panel level, and again per category) counts how many events came
+//   from each provenance. It is DESCRIPTIVE ONLY: every event counts one, and no
+//   count, rank or salience in this file consults provenance.
 //   (see the handover §5.1 for the full response shape; empty learners / no Supabase
 //    return the all-zero model at HTTP 200 — the panel's "start talking" state.)
 
@@ -37,11 +42,60 @@ const RECENT_SESSIONS = 5;        // trend window: the N most recent distinct se
 const MAX_CRUTCH = 8;             // keep the top ~8 crutch words
 const MAX_AFN = 3;                // areas-for-next-focus: at most 3
 const MAX_STRENGTHS_RECENT = 3;   // newest ~3 strengths surfaced
+// Pronunciation scan bound. Deliberately larger than the coach's 40
+// (pronunciation-gpt/historySummary.js:44) because this is a longitudinal
+// portrait rather than one prompt's worth of context, and smaller than MAX_ROWS
+// because each lux_attempts row carries a jsonb summary, not a flat event.
+const PRON_MAX_ATTEMPTS = 200;
 // "improving" = the recent per-session rate has fallen to <= 60% of the prior rate.
 const IMPROVING_RATIO = 0.6;
 
 const ITEM_CHANNELS = new Set(["grammar", "word_choice"]); // "items"; strengths are separate
+
+// The bucket an item with no category falls into. EXPORTED because the evidence
+// route has to translate it back into "category is null" when the learner opens
+// that row — a second copy of the literal would drift the day either side moved.
+export const UNCATEGORIZED = "(uncategorized)";
 const SEVERITIES = ["blocked", "noticeable", "polish"];    // item severities (positive = strengths)
+
+// ── Provenance: "where did these words actually come from" ───────────────────
+// speech_events has carried a provenance column since migrations/0003, and the
+// write path now populates it for real. routes/session-analyst.js:67 defines
+// FIVE values, but only these FOUR can ever reach a stored row: a 'chip_read'
+// turn is excluded from the judgeable set (session-analyst.js:203-211) and
+// dropped again when items and strengths are validated (:520, :536), so a
+// suggestion the learner merely read back can never produce an event. These
+// four are therefore the whole vocabulary of the mix, in panel order.
+const PROVENANCE_KEYS = ["spontaneous", "chip_modified", "dictated", "composed"];
+
+// Everything else lands here: a null from a row written before the frontend sent
+// a provenance, or any value this route does not recognise. Bucketing beats
+// dropping — a discarded row would break the one property that proves nothing
+// has been weighted (see tallyProvenance).
+const PROVENANCE_UNKNOWN = "unknown";
+
+// A zero-filled mix with a STABLE key order, so the panel never reflows as the
+// counts change and a category with no dictated turns still says so out loud.
+function emptySourceMix() {
+  const mix = {};
+  for (const k of PROVENANCE_KEYS) mix[k] = 0;
+  mix[PROVENANCE_UNKNOWN] = 0;
+  return mix;
+}
+
+// Tally one row into a mix.
+//
+// EVERY EVENT COUNTS EXACTLY ONE, whatever its provenance. This route makes the
+// mix visible and deliberately does not act on it: no source is worth more than
+// another here, and nothing else in this file consults provenance. The invariant
+// that proves it — and that the contract test asserts — is
+//     sum(sourceMix) === n
+// for each category, and === totals.events for the panel. Weighting would break
+// that sum, so the test fails loudly if anyone ever reaches for it.
+function tallyProvenance(mix, row) {
+  const p = String(row?.provenance || "").trim();
+  mix[PROVENANCE_KEYS.includes(p) ? p : PROVENANCE_UNKNOWN] += 1;
+}
 
 // The empty model — also the graceful answer when Supabase is absent, the caller
 // has no uid yet, or the learner has zero rows. Never a 500; an empty portrait is
@@ -49,18 +103,107 @@ const SEVERITIES = ["blocked", "noticeable", "polish"];    // item severities (p
 function emptyModel() {
   return {
     totals: { sessions: 0, events: 0, firstSeen: null, lastSeen: null },
+    sourceMix: emptySourceMix(),
     categories: [],
     crutchWords: [],
     afn: [],
     strengths: { n: 0, recent: [] },
+    pronunciation: emptyPronunciation(),
   };
+}
+
+// ── Pronunciation ───────────────────────────────────────────────────────────
+// The portrait's other half. Trouble Sounds and Trouble Words are the oldest
+// signal this app has, and until now the speaking portrait could not see them.
+//
+// WHAT WE ARE READING, AND WHY IT IS NOT A ROLLUP TABLE. There is no phoneme or
+// word rollup table anywhere in the schema, and no endpoint that serves one. The
+// Progress page's Trouble Sounds / Trouble Words panels compute their lists in
+// the BROWSER: features/dashboard/index.js calls fetchHistory(uid) ->
+// GET /api/user-recent (last 50 lux_attempts rows) and hands them to
+// computeRollups() in features/progress/rollups.js. The rollups exist only for
+// the lifetime of that page.
+//
+// So there is nothing to "read" in the sense of a stored aggregate, and nothing
+// to migrate. What is durable is the SOURCE both views draw from:
+// lux_attempts.summary, written by routes/attempt.js toSummaryFromAzure —
+//   summary.lows  = [[phoneme, score], ...]      the 6 worst phonemes per attempt
+//   summary.words = [[word, avgScore, count], ...] the 10 worst words per attempt
+// This function reads that, through the SAME service-role client the speech
+// events come through, and runs it through the SAME two aggregators that already
+// draw the end-of-conversation report (routes/convo-report.js). No new table, no
+// new query pattern, no second copy of the arithmetic, and the existing panels
+// are untouched.
+//
+// TWO HONEST CAVEATS, both inherited from the source rather than introduced here.
+//   1. NOT PACK-SCOPED. No writer in this repo ever sets a pack or lang on a
+//      lux_attempts row — the INSERT at routes/attempt.js:152 names exactly
+//      (uid, ts, passage_key, part_index, text, summary, session_id) — and no
+//      reader anywhere names such a column either. (lux_attempts predates
+//      migrations/, so there is no checked-in schema to confirm the column is
+//      absent rather than merely unused; either way there is nothing populated
+//      to filter on.) Every other part of this response is scoped by pack. This
+//      part is not, and the UI says so rather than pretending otherwise.
+//   2. PESSIMISTIC BY CONSTRUCTION. summary keeps only each attempt's worst 6
+//      phonemes and worst 10 words, so a sound the learner says well is simply
+//      absent and any average built from it skews low. routes/word-history.js:27
+//      documents the same caveat. The Progress page lives with exactly this bias,
+//      which is the point: this section is as accurate as what the learner
+//      already sees, drawn from the same column.
+function emptyPronunciation() {
+  return { attempts: 0, firstSeen: null, lastSeen: null, sounds: [], words: [] };
+}
+
+// Never throws, never blocks the portrait. Pronunciation is additive richness:
+// if this read fails for any reason, the speaking portrait must still render
+// exactly as it did before this section existed.
+async function readPronunciation(sb, uid) {
+  try {
+    const { data, error } = await sb
+      .from("lux_attempts")
+      .select("summary, ts")
+      .eq("uid", uid)
+      .order("ts", { ascending: false })
+      .limit(PRON_MAX_ATTEMPTS);
+
+    if (error) {
+      console.warn("[learner-model] pronunciation read failed", error?.message || error);
+      return emptyPronunciation();
+    }
+
+    const rows = Array.isArray(data) ? data : [];
+    if (!rows.length) return emptyPronunciation();
+
+    // ts is an ISO timestamptz, compared lexically for the same reason
+    // byCreatedDesc does it: Postgres serializes the column uniformly.
+    let firstSeen = null;
+    let lastSeen = null;
+    for (const r of rows) {
+      const ts = r?.ts;
+      if (!ts) continue;
+      if (!firstSeen || ts < firstSeen) firstSeen = ts;
+      if (!lastSeen || ts > lastSeen) lastSeen = ts;
+    }
+
+    const { aggregateLowsPhonemes, aggregateLowsWords } = await import("./convo-report.js");
+    return {
+      attempts: rows.length,
+      firstSeen,
+      lastSeen,
+      sounds: aggregateLowsPhonemes(rows), // [{ phoneme, score, n }], worst first, <=8
+      words: aggregateLowsWords(rows),     // [{ word, score, n }],    worst first, <=10
+    };
+  } catch (e) {
+    console.warn("[learner-model] pronunciation unavailable", e?.message || e);
+    return emptyPronunciation();
+  }
 }
 
 // Resolve code -> label from the pack dictionary the same way the writer loads it.
 // The pack is whitelisted against {'es','en'} BEFORE we get here, so the import path
 // is never an unsanitized interpolation. Missing dictionary/code -> fall back to the
 // raw code at the call site.
-async function loadLabelMap(pack) {
+export async function loadLabelMap(pack) {
   const map = new Map();
   try {
     const mod = await import(`../lang/session-analyst/${pack}.js`);
@@ -169,6 +312,14 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
     lastSeen,
   };
 
+  // ── sourceMix (panel level) ──
+  // Computed over the item rows — exactly the set totals.events counts — so
+  // sum(sourceMix) === totals.events always holds. Strengths carry a provenance
+  // too, but they are not items, and folding them in here would make the panel
+  // figure disagree with the count printed beside it.
+  const sourceMix = emptySourceMix();
+  for (const r of items) tallyProvenance(sourceMix, r);
+
   // ── recency window (session-based) ──
   // Rank distinct non-null item sessions by their latest created_at; the
   // RECENT_SESSIONS most-recent form the "recent" window. A boundary timestamp lets
@@ -198,7 +349,7 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
   // ── categories[] (items grouped by category) ──
   const byCat = new Map();
   for (const r of items) {
-    const code = r.category || "(uncategorized)";
+    const code = r.category || UNCATEGORIZED;
     let g = byCat.get(code);
     if (!g) {
       g = { code, channel: r.channel, rows: [] };
@@ -215,6 +366,7 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
     let cFirst = null;
     let cLast = null;
     const severityMix = { blocked: 0, noticeable: 0, polish: 0 };
+    const sourceMix = emptySourceMix();
     let recentCount = 0;
     let priorCount = 0;
     for (const r of rowsSorted) {
@@ -224,6 +376,7 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
         if (!cLast || ts > cLast) cLast = ts;
       }
       if (r.severity && SEVERITIES.includes(r.severity)) severityMix[r.severity] += 1;
+      tallyProvenance(sourceMix, r);
       if (isRecent(r)) recentCount += 1;
       else priorCount += 1;
     }
@@ -258,6 +411,7 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
       recencyDays,
       trend,
       severityMix,
+      sourceMix,
       lastExample,
       _salience: salience,
     });
@@ -305,7 +459,7 @@ export function aggregateSpeechEvents(rows, labels = new Map(), nowMs = Date.now
     })),
   };
 
-  return { totals, categories, crutchWords, afn, strengths };
+  return { totals, sourceMix, categories, crutchWords, afn, strengths };
 }
 
 export default async function handler(req, res) {
@@ -359,30 +513,48 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, pack, model: emptyModel() });
     }
 
-    // Read (bounded).
-    const { data, error } = await sb
-      .from("speech_events")
-      .select(
-        "session_id, channel, category, severity, utterance, suggestion, explanation, created_at"
-      )
-      .eq("uid", uid)
-      .eq("pack", pack)
-      .order("created_at", { ascending: false })
-      .limit(MAX_ROWS);
+    // Read (bounded). Two independent reads against two different tables, run
+    // together: the pronunciation scan must not add its latency to the
+    // portrait's, and readPronunciation swallows its own failures so a settled
+    // Promise.all can never turn a pronunciation problem into a missing
+    // portrait.
+    const [eventsRead, pronunciation] = await Promise.all([
+      sb
+        .from("speech_events")
+        .select(
+          "session_id, channel, category, severity, utterance, suggestion, explanation, created_at, provenance, surface, scenario_key"
+        )
+        .eq("uid", uid)
+        .eq("pack", pack)
+        .order("created_at", { ascending: false })
+        .limit(MAX_ROWS),
+      readPronunciation(sb, uid),
+    ]);
+    const { data, error } = eventsRead || {};
+
+    // Pronunciation rides on EVERY exit below, including the empty ones. A
+    // learner who has practised sounds but never held a conversation has a real
+    // portrait — it just isn't made of speech events — and answering them with
+    // an all-zero model would throw away the half we do have.
+    const withPronunciation = (model) => ({ ...model, pronunciation });
 
     if (error) {
       console.warn("[learner-model] read failed", error?.message || error);
-      return res.status(200).json({ ok: true, pack, model: emptyModel() });
+      return res
+        .status(200)
+        .json({ ok: true, pack, model: withPronunciation(emptyModel()) });
     }
 
     const rows = Array.isArray(data) ? data : [];
     if (!rows.length) {
-      return res.status(200).json({ ok: true, pack, model: emptyModel() });
+      return res
+        .status(200)
+        .json({ ok: true, pack, model: withPronunciation(emptyModel()) });
     }
 
     const labels = await loadLabelMap(pack);
     const model = aggregateSpeechEvents(rows, labels, Date.now());
-    return res.status(200).json({ ok: true, pack, model });
+    return res.status(200).json({ ok: true, pack, model: withPronunciation(model) });
   } catch (e) {
     // The single place a throw could previously have escaped to the router's
     // internal_error handler — now contained on this surface, and logged loudly

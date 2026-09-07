@@ -175,8 +175,15 @@ Reglas de juicio (obligatorias):
   (pedir, confirmar, agradecer), la evidencia es "insufficient"; di qué NO se
   pudo evaluar, no un puntaje fabricado.
 - Explicaciones dirigidas al aprendiz, una sola oración, en español.
-- El campo evidenceNote y cada explanation deben ir en español.
+- El campo evidenceNote, cada explanation y cada note de strengths deben ir en
+  español.
 `.trim();
+
+// The language every learner-facing string this pack produces must be written
+// in, named for the model. REQUIRED of every pack: the engine refuses to build
+// a prompt without it (routes/session-analyst.js). The rules above already say
+// it in Spanish; this says it once more in the place the engine can read.
+export const outputLanguage = "español mexicano";
 
 // Calm line returned when the local pre-gate trips (session under the word
 // threshold): no LLM call is made, so this string is authored here rather than
@@ -189,5 +196,6 @@ export default {
   wordChoiceRubric,
   severityDefinitions,
   promptPreamble,
+  outputLanguage,
   insufficientNote,
 };

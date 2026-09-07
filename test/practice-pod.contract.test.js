@@ -26,6 +26,19 @@ function modelReply(obj) {
   return { choices: [{ message: { content: JSON.stringify(obj) } }] };
 }
 
+// The exact shape the drawer degrades to. The two off-language fields ride along
+// on every failure as well, so the frontend reads them unconditionally on EVERY
+// response: nothing was translated, so `offLanguage` is false and the practice
+// word is whatever the learner sent. Default "bring" matches post()'s default body.
+const emptyShape = (reason, practiceWord = "bring") => ({
+  ok: true,
+  wordType: "other",
+  offLanguage: false,
+  practiceWord,
+  lines: [],
+  reason,
+});
+
 // Default: a verb classified as such, with a full 5-rung ladder.
 const { createSpy } = vi.hoisted(() => ({
   createSpy: vi.fn(),
@@ -200,7 +213,7 @@ describe("practice-pod contract", () => {
     const r = await post(api);
 
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ ok: true, wordType: "other", lines: [], reason: "bad_model_json" });
+    expect(r.body).toEqual(emptyShape("bad_model_json"));
   });
 
   it("lines that are not an array degrade to the empty shape", async () => {
@@ -209,7 +222,7 @@ describe("practice-pod contract", () => {
     const r = await post(api);
 
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ ok: true, wordType: "other", lines: [], reason: "bad_model_json" });
+    expect(r.body).toEqual(emptyShape("bad_model_json"));
   });
 
   it("an unknown wordType normalises to other without losing the ladder", async () => {
@@ -251,7 +264,7 @@ describe("practice-pod contract", () => {
     const r = await post(api);
 
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ ok: true, wordType: "other", lines: [], reason: "bad_model_json" });
+    expect(r.body).toEqual(emptyShape("bad_model_json"));
   });
 
   it("repairs slightly-broken model JSON (jsonrepair) and still returns a ladder", async () => {
@@ -279,7 +292,9 @@ describe("practice-pod contract", () => {
     const r = await post(api, { word: "" });
 
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ ok: true, wordType: "other", lines: [], reason: "no_word" });
+    // No word came in, so there is no practice word to echo back — an empty
+    // string, never undefined and never a stray default.
+    expect(r.body).toEqual(emptyShape("no_word", ""));
     expect(createSpy).not.toHaveBeenCalled();
   });
 
@@ -288,7 +303,7 @@ describe("practice-pod contract", () => {
     const r = await post(api, { word: "   " });
 
     expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({ ok: true, wordType: "other", lines: [], reason: "no_word" });
+    expect(r.body).toMatchObject(emptyShape("no_word", ""));
     expect(createSpy).not.toHaveBeenCalled();
   });
 
@@ -301,7 +316,7 @@ describe("practice-pod contract", () => {
 
     expect(r.status).toBe(200);
     expect(r.status).not.toBe(500);
-    expect(r.body).toEqual({ ok: true, wordType: "other", lines: [], reason: "init_error" });
+    expect(r.body).toEqual(emptyShape("init_error"));
     expect(createSpy).not.toHaveBeenCalled();
   });
 
@@ -311,19 +326,22 @@ describe("practice-pod contract", () => {
     const r = await post(api);
 
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ ok: true, wordType: "other", lines: [], reason: "model_failed" });
+    expect(r.body).toEqual(emptyShape("model_failed"));
   });
 
   it("every degradation path returns the same empty shape", async () => {
     const api = await client();
 
+    // [reason, the practice word the failure should echo back, how to trigger it]
     const cases = [
       [
         "no_word",
+        "",
         async () => post(api, { word: "" }),
       ],
       [
         "model_failed",
+        "bring",
         async () => {
           createSpy.mockRejectedValueOnce(new Error("boom"));
           return post(api);
@@ -331,6 +349,7 @@ describe("practice-pod contract", () => {
       ],
       [
         "bad_model_json",
+        "bring",
         async () => {
           createSpy.mockResolvedValueOnce({ choices: [{ message: { content: "nope {" } }] });
           return post(api);
@@ -338,10 +357,15 @@ describe("practice-pod contract", () => {
       ],
     ];
 
-    for (const [reason, run] of cases) {
+    for (const [reason, practiceWord, run] of cases) {
       const r = await run();
       expect(r.status).toBe(200);
-      expect(r.body).toEqual({ ok: true, wordType: "other", lines: [], reason });
+      expect(r.body).toEqual(emptyShape(reason, practiceWord));
+      // The frontend reads these two on every response, so neither may be missing
+      // from a failure — and a failure translated nothing, so the flag is false.
+      expect(r.body.offLanguage).toBe(false);
+      expect(r.body.offLanguage).not.toBeUndefined();
+      expect(typeof r.body.practiceWord).toBe("string");
     }
   });
 
@@ -426,7 +450,7 @@ describe("practice-pod depth contract", () => {
     const r = await post(api, { depth: 2 });
 
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ ok: true, wordType: "other", lines: [], reason: "bad_model_json" });
+    expect(r.body).toEqual(emptyShape("bad_model_json"));
   });
 });
 
@@ -506,5 +530,433 @@ describe("practice-pod prompt contract", () => {
     // tú-register for verbs, gender/number agreement for adjectives.
     expect(sys).toContain("tú, not usted");
     expect(sys).toContain("gender and number agreement");
+  });
+});
+
+// Off-language saves. Found in production 2026-07-26: a Spanish speaker learning
+// English (lang "en", l1 "es") saved the Spanish adjective "redondeada" and got a
+// structurally perfect ladder in English frames with the Spanish word jammed
+// inside — "The table is redondeada." — which is neither English practice nor
+// Spanish practice. The route now asks whether the saved word is actually in the
+// target language and, when it is not, practises the translation instead. The two
+// fields the frontend reads for this (`offLanguage`, `practiceWord`) are on EVERY
+// response, success or degradation, so it never has to branch on their presence.
+describe("practice-pod off-language contract", () => {
+  // A ladder whose rungs are built around `w`, so a test can prove which word the
+  // lines actually practise.
+  function ladderOn(w, n = 5) {
+    const lines = [];
+    for (let i = 1; i <= n; i++) {
+      lines.push({ text: `The table is ${w} ${i}.`, focus: `foco ${i}` });
+    }
+    return lines;
+  }
+
+  it("an in-language word is not flagged and practises itself", async () => {
+    createSpy.mockResolvedValueOnce(
+      modelReply({ offLanguage: false, practiceWord: "bring", wordType: "verb", lines: ladder(5) })
+    );
+    const api = await client();
+    const r = await post(api, { word: "bring", lang: "en", l1: "es" });
+
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect(r.body.offLanguage).toBe(false);
+    // The normal case: practiceWord IS the input word, so the frontend can read
+    // one field unconditionally instead of falling back to `word` itself.
+    expect(r.body.practiceWord).toBe("bring");
+    expect(r.body.wordType).toBe("verb");
+    expect(r.body.lines.length).toBe(5);
+  });
+
+  it("the production case: a Spanish word on the English side is translated and the ladder practises the translation", async () => {
+    createSpy.mockResolvedValueOnce(
+      modelReply({
+        offLanguage: true,
+        practiceWord: "rounded",
+        wordType: "adjective",
+        lines: ladderOn("rounded"),
+      })
+    );
+    const api = await client();
+    const r = await post(api, { word: "redondeada", lang: "en", l1: "es" });
+
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect(r.body.offLanguage).toBe(true);
+    expect(r.body.practiceWord).toBe("rounded");
+    // Classification follows the translation: "redondeada" and "rounded" are both
+    // adjectives here, but it is the English word's part of speech the ladder needs.
+    expect(r.body.wordType).toBe("adjective");
+
+    // The whole point of the fix: the lines practise the ENGLISH word, and the
+    // Spanish original appears in none of them. "The table is redondeada." was the
+    // production bug verbatim.
+    expect(r.body.lines.length).toBe(5);
+    for (const line of r.body.lines) {
+      expect(line.text).toContain("rounded");
+      expect(line.text).not.toContain("redondeada");
+    }
+  });
+
+  it("a cognate is treated as in-language, not translated", async () => {
+    // hospital / animal / real / natural are valid in both languages. Flagging one
+    // off-language would translate a word that needed no translating.
+    for (const w of ["hospital", "animal", "real", "natural"]) {
+      createSpy.mockResolvedValueOnce(
+        modelReply({ offLanguage: false, practiceWord: w, wordType: "noun", lines: ladderOn(w) })
+      );
+      const api = await client();
+      const r = await post(api, { word: w, lang: "en", l1: "es" });
+
+      expect(r.body.offLanguage).toBe(false);
+      expect(r.body.practiceWord).toBe(w);
+      expect(r.body.lines.length).toBe(5);
+    }
+  });
+
+  it("a proper noun passes through unchanged", async () => {
+    createSpy.mockResolvedValueOnce(
+      modelReply({
+        offLanguage: false,
+        practiceWord: "Barcelona",
+        wordType: "noun",
+        lines: ladderOn("Barcelona"),
+      })
+    );
+    const api = await client();
+    const r = await post(api, { word: "Barcelona", lang: "en", l1: "es" });
+
+    expect(r.body.offLanguage).toBe(false);
+    expect(r.body.practiceWord).toBe("Barcelona");
+  });
+
+  it("works in the other direction too: an English word saved on the Spanish side", async () => {
+    createSpy.mockResolvedValueOnce(
+      modelReply({
+        offLanguage: true,
+        practiceWord: "estante",
+        wordType: "noun",
+        lines: ladderOn("estante"),
+      })
+    );
+    const api = await client();
+    const r = await post(api, { word: "shelf", lang: "es", l1: "en" });
+
+    expect(r.body.offLanguage).toBe(true);
+    expect(r.body.practiceWord).toBe("estante");
+    for (const line of r.body.lines) expect(line.text).not.toContain("shelf");
+  });
+
+  it("both fields are present on every successful response, and lines keep their exact shape", async () => {
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body).toHaveProperty("offLanguage");
+    expect(r.body).toHaveProperty("practiceWord");
+    // The rung shape is untouched by this change — still exactly { text, focus }.
+    for (const line of r.body.lines) {
+      expect(Object.keys(line).sort()).toEqual(["focus", "text"]);
+    }
+  });
+
+  it("the degradation shape carries both new fields, echoing the input word", async () => {
+    createSpy.mockRejectedValueOnce(new Error("openai exploded"));
+    const api = await client();
+    const r = await post(api, { word: "redondeada", lang: "en", l1: "es" });
+
+    // A failed request translated nothing, so the flag is false and the practice
+    // word is the word the learner actually sent — not a stray "" or undefined.
+    expect(r.body).toEqual(emptyShape("model_failed", "redondeada"));
+    expect(r.body.offLanguage).toBe(false);
+    expect(r.body.practiceWord).toBe("redondeada");
+  });
+
+  it("offLanguage is never undefined in ANY returned shape", async () => {
+    const api = await client();
+
+    const shapes = [
+      // Success, in-language.
+      async () => post(api),
+      // Success, off-language.
+      async () => {
+        createSpy.mockResolvedValueOnce(
+          modelReply({ offLanguage: true, practiceWord: "rounded", wordType: "adjective", lines: ladder(5) })
+        );
+        return post(api, { word: "redondeada" });
+      },
+      // Success, but the model never mentioned offLanguage at all.
+      async () => {
+        createSpy.mockResolvedValueOnce(modelReply({ wordType: "verb", lines: ladder(5) }));
+        return post(api);
+      },
+      // Degradation: no word.
+      async () => post(api, { word: "" }),
+      // Degradation: model call failed.
+      async () => {
+        createSpy.mockRejectedValueOnce(new Error("boom"));
+        return post(api);
+      },
+      // Degradation: unparseable JSON.
+      async () => {
+        createSpy.mockResolvedValueOnce({ choices: [{ message: { content: "nope {" } }] });
+        return post(api);
+      },
+      // Degradation: a ladder too thin to climb.
+      async () => {
+        createSpy.mockResolvedValueOnce(modelReply({ wordType: "verb", lines: ladder(1) }));
+        return post(api);
+      },
+    ];
+
+    for (const run of shapes) {
+      const r = await run();
+      expect(r.status).toBe(200);
+      expect(r.body.offLanguage).not.toBeUndefined();
+      expect(typeof r.body.offLanguage).toBe("boolean");
+      expect(r.body.practiceWord).not.toBeUndefined();
+      expect(typeof r.body.practiceWord).toBe("string");
+    }
+  });
+
+  it("a missing or unusable practiceWord falls back to the input word, never an empty chip", async () => {
+    const api = await client();
+
+    const junk = [
+      undefined, // the model never returned the key
+      null,
+      "", // empty string
+      "   ", // whitespace only
+      42, // not a string
+      { word: "rounded" }, // an object
+      ["rounded"], // an array
+    ];
+
+    for (const bad of junk) {
+      createSpy.mockResolvedValueOnce(
+        modelReply({ offLanguage: false, practiceWord: bad, wordType: "verb", lines: ladder(5) })
+      );
+      const r = await post(api, { word: "bring" });
+
+      expect(r.body.practiceWord).toBe("bring");
+      expect(r.body.lines.length).toBe(5); // a bad practiceWord never costs the ladder
+    }
+  });
+
+  it("a practiceWord with surrounding whitespace is trimmed", async () => {
+    createSpy.mockResolvedValueOnce(
+      modelReply({ offLanguage: true, practiceWord: "  rounded \n", wordType: "adjective", lines: ladder(5) })
+    );
+    const api = await client();
+    const r = await post(api, { word: "redondeada" });
+
+    expect(r.body.practiceWord).toBe("rounded");
+    expect(r.body.offLanguage).toBe(true);
+  });
+
+  it("an over-long practiceWord is capped at the same 60 chars as the input word", async () => {
+    createSpy.mockResolvedValueOnce(
+      modelReply({
+        offLanguage: true,
+        practiceWord: "x".repeat(200),
+        wordType: "other",
+        lines: ladder(5),
+      })
+    );
+    const api = await client();
+    const r = await post(api, { word: "redondeada" });
+
+    expect(r.body.practiceWord.length).toBe(60);
+  });
+
+  it("a loosely-typed offLanguage is coerced, and a missing one never reads as true", async () => {
+    const api = await client();
+
+    // [what the model returned, what the route must report]
+    const cases = [
+      [true, true],
+      ["true", true],
+      ["TRUE", true],
+      ["yes", true],
+      ["1", true],
+      [1, true],
+      [false, false],
+      // The trap: Boolean("false") is TRUE. A model that answers with the string
+      // "false" must not flip the flag on.
+      ["false", false],
+      ["no", false],
+      ["0", false],
+      [0, false],
+      [undefined, false], // the model never returned the key
+      [null, false],
+      ["", false],
+      ["banana", false],
+      [{}, false],
+      [[], false],
+    ];
+
+    for (const [given, expected] of cases) {
+      createSpy.mockResolvedValueOnce(
+        modelReply({ offLanguage: given, practiceWord: "rounded", wordType: "verb", lines: ladder(5) })
+      );
+      const r = await post(api, { word: "redondeada" });
+
+      expect(r.body.offLanguage).toBe(expected);
+      expect(typeof r.body.offLanguage).toBe("boolean");
+    }
+  });
+
+  it("offLanguage cannot be true unless a translation actually happened", async () => {
+    const api = await client();
+
+    // The flag promises the word WAS translated. A model that raises it while
+    // handing back the original word (or nothing usable, or a bare change of case)
+    // has translated nothing — reporting true would put "we translated this"
+    // chrome above the untouched word.
+    const liars = [
+      "bring", // the original, unchanged
+      "  bring  ", // the original with whitespace
+      "BRING", // a bare change of case is not a translation
+      undefined, // no practice word at all -> falls back to the original
+      "", // ditto
+    ];
+
+    for (const claimed of liars) {
+      createSpy.mockResolvedValueOnce(
+        modelReply({ offLanguage: true, practiceWord: claimed, wordType: "verb", lines: ladder(5) })
+      );
+      const r = await post(api, { word: "bring" });
+
+      expect(r.body.offLanguage).toBe(false);
+      // The ladder still ships — a bad flag is not worth failing a good ladder over.
+      expect(r.body.lines.length).toBe(5);
+    }
+
+    // ...and the flag DOES survive when the words genuinely differ.
+    createSpy.mockResolvedValueOnce(
+      modelReply({ offLanguage: true, practiceWord: "rounded", wordType: "verb", lines: ladder(5) })
+    );
+    const good = await post(api, { word: "redondeada" });
+    expect(good.body.offLanguage).toBe(true);
+  });
+
+  it("an off-language word still degrades to the empty shape when the ladder is unusable", async () => {
+    createSpy.mockResolvedValueOnce(
+      modelReply({ offLanguage: true, practiceWord: "rounded", wordType: "adjective", lines: ladder(1) })
+    );
+    const api = await client();
+    const r = await post(api, { word: "redondeada" });
+
+    // Degradation always reports the INPUT word and a false flag, even when the
+    // model had already decided the word was off-language: nothing shipped, so
+    // there is no translation to advertise.
+    expect(r.body).toEqual(emptyShape("bad_model_json", "redondeada"));
+  });
+
+  it("depth 2 carries both fields through unchanged", async () => {
+    createSpy.mockResolvedValueOnce(
+      modelReply({
+        offLanguage: true,
+        practiceWord: "rounded",
+        wordType: "adjective",
+        lines: ladderOn("rounded"),
+      })
+    );
+    const api = await client();
+    const r = await post(api, { word: "redondeada", depth: 2 });
+
+    expect(r.body.offLanguage).toBe(true);
+    expect(r.body.practiceWord).toBe("rounded");
+    expect(r.body.lines.length).toBe(5);
+    // Still ONE model call — the off-language check rides along in the same call.
+    expect(createSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("detecting the off-language word costs no extra model call", async () => {
+    createSpy.mockResolvedValueOnce(
+      modelReply({ offLanguage: true, practiceWord: "rounded", wordType: "adjective", lines: ladder(5) })
+    );
+    const api = await client();
+    await post(api, { word: "redondeada" });
+
+    // Classification, translation and generation are ONE judgement, not three.
+    expect(createSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The off-language judgement is made by the model, so the rules that govern it
+// have to actually reach the prompt: what counts as off-language, what does not
+// (cognates, proper nouns), and which language the learner's own words come from.
+describe("practice-pod off-language prompt contract", () => {
+  it("the off-language rules and the new output keys are all in the prompt", async () => {
+    const api = await client();
+    await post(api, { word: "redondeada", lang: "en", l1: "es" });
+
+    const sys = systemPromptOf(0);
+    // The route asks for the flag and the practice word by name...
+    expect(sys).toContain("offLanguage");
+    expect(sys).toContain("practiceWord");
+    // ...as part of the SAME response, not a second call.
+    expect(sys).toContain('"offLanguage": false, "practiceWord": "..."');
+    // Translate into the target language, one natural everyday equivalent.
+    expect(sys).toContain("single most natural everyday equivalent");
+    // The two judgement rules that keep it from over-firing.
+    expect(sys).toContain("COGNATES AND SHARED SPELLINGS ARE NOT OFF-LANGUAGE");
+    expect(sys).toContain("PROPER NOUNS ARE NOT OFF-LANGUAGE");
+    // The ladder is built on the practice word, and the original is kept out of it.
+    expect(sys).toContain("PRACTICE WORD itself or an inflected form of it");
+    expect(sys).toContain("the saved word must not appear in the lines");
+    // wordType follows the translation.
+    expect(sys).toContain("Classify practiceWord, NOT the word as saved");
+  });
+
+  it("the learner's own language is named in the prompt and the payload", async () => {
+    const api = await client();
+    await post(api, { word: "redondeada", lang: "en", l1: "es" });
+
+    expect(userPayloadOf(0).learnerLanguage).toBe("Spanish");
+    expect(systemPromptOf(0)).toContain("The learner's own language is Spanish");
+  });
+
+  it("with no usable l1 the prompt says the source language is unknown rather than guessing", async () => {
+    const api = await client();
+    await post(api, { word: "redondeada", lang: "en", l1: "" }); // call 0: no l1
+    await post(api, { word: "redondeada", lang: "en", l1: "universal" }); // call 1
+    await post(api, { word: "bring", lang: "en", l1: "en" }); // call 2: l1 === lang
+
+    for (const n of [0, 1, 2]) {
+      expect(userPayloadOf(n).learnerLanguage).toBe(null);
+      expect(systemPromptOf(n)).toContain("own language is not known here");
+      // The off-language check still runs — it just cannot name a likely source.
+      expect(systemPromptOf(n)).toContain("COGNATES AND SHARED SPELLINGS ARE NOT OFF-LANGUAGE");
+    }
+  });
+
+  it("an unlisted l1 code is named in the prompt as given", async () => {
+    const api = await client();
+    await post(api, { word: "hon", lang: "en", l1: "ja" });
+
+    expect(userPayloadOf(0).learnerLanguage).toBe("ja");
+    expect(systemPromptOf(0)).toContain("The learner's own language is ja");
+  });
+
+  it("the target language is what the word is judged against, in both directions", async () => {
+    const api = await client();
+    await post(api, { word: "shelf", lang: "es", l1: "en" }); // call 0
+    await post(api, { word: "redondeada", lang: "en", l1: "es" }); // call 1
+
+    expect(systemPromptOf(0)).toContain("The learner is learning Spanish.");
+    expect(systemPromptOf(0)).toContain("Is the WORD a word in Spanish?");
+    expect(systemPromptOf(1)).toContain("The learner is learning English.");
+    expect(systemPromptOf(1)).toContain("Is the WORD a word in English?");
+  });
+
+  it("depth 2 pins the off-language judgement to the depth-1 one", async () => {
+    const api = await client();
+    await post(api, { word: "redondeada", depth: 2 });
+
+    // A harder ladder must be a harder ladder for the SAME practice word, or the
+    // learner's second pull would silently swap the word under them.
+    expect(systemPromptOf(0)).toContain("same offLanguage, same practiceWord");
   });
 });

@@ -4,6 +4,7 @@ export const config = {
 };
 
 import { pool } from "../lib/pool.js";
+import { metricNum } from "../lib/metrics.js";
 
 function mean(nums) {
   const xs = (nums || []).filter((n) => Number.isFinite(n));
@@ -12,7 +13,31 @@ function mean(nums) {
   return Math.round((sum / xs.length) * 10) / 10;
 }
 
-function aggregateLowsPhonemes(rows) {
+// One session metric, averaged across the session's attempt rows.
+//
+// A turn nobody spoke is stored with that metric null (routes/attempt.js), and
+// it must be left OUT of the average, not folded in as a zero. This read used
+// to be Number(r?.summary?.pron), and Number(null) is 0, which is finite, so
+// the filter in mean() above waved it through as a real total failure: a
+// four-turn conversation scored 88, 90 and 86 with one typed turn reported
+// Pronunciation 66 instead of 88. metricNum returns null for "not scored" and
+// mean() then drops it, the same way the frontend's own session Overall skips
+// a metric it does not have.
+//
+// Every metric goes through this one helper so that all of them are read the
+// same way, including any added later. A session in which no turn scored a
+// metric averages to null, which is what the reader already expects for an
+// absent metric — not 0.
+function meanMetric(rows, key) {
+  return mean(rows.map((r) => metricNum(r?.summary?.[key])));
+}
+
+// EXPORTED (behaviour unchanged) so routes/learner-model.js can build its
+// pronunciation section from the same arithmetic that draws the end-of-
+// conversation report, instead of a second copy of it. Both take rows shaped
+// { summary: { lows, words } } straight out of lux_attempts, so neither knows
+// or cares which query fetched them.
+export function aggregateLowsPhonemes(rows) {
   const agg = new Map(); // phoneme -> {sum,n}
   for (const r of rows) {
     const lows = r?.summary?.lows;
@@ -36,7 +61,8 @@ function aggregateLowsPhonemes(rows) {
   return out.slice(0, 8);
 }
 
-function aggregateLowsWords(rows) {
+// EXPORTED for the same reason as aggregateLowsPhonemes above.
+export function aggregateLowsWords(rows) {
   const agg = new Map(); // word -> {sum, n}
   for (const r of rows) {
     const words = r?.summary?.words;
@@ -162,10 +188,10 @@ export default async function handler(req, res) {
     }
 
     const scores = {
-      pron: mean(rows.map((r) => Number(r?.summary?.pron))),
-      acc: mean(rows.map((r) => Number(r?.summary?.acc))),
-      flu: mean(rows.map((r) => Number(r?.summary?.flu))),
-      comp: mean(rows.map((r) => Number(r?.summary?.comp))),
+      pron: meanMetric(rows, "pron"),
+      acc: meanMetric(rows, "acc"),
+      flu: meanMetric(rows, "flu"),
+      comp: meanMetric(rows, "comp"),
     };
 
     const lows_phonemes = aggregateLowsPhonemes(rows);

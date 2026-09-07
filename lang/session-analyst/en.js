@@ -53,8 +53,17 @@ Judging rules (mandatory):
 - "spontaneous" turns: judge the whole turn.
 - Log genuine strengths only; do not inflate.
 - If the turns are short transactional responses, evidence is "insufficient".
-- Explanations are learner-facing, one sentence.
+- Explanations are learner-facing, one sentence, in English.
+- The evidenceNote field, every explanation and every strength note must be
+  written in English.
 `.trim();
+
+// The language every learner-facing string this pack produces must be written
+// in, named for the model. REQUIRED of every pack: the engine refuses to build
+// a prompt without it (routes/session-analyst.js), because a pack that does not
+// declare its language leaves the model free to choose one, and it once chose
+// German for an English session.
+export const outputLanguage = "English";
 
 export const insufficientNote =
   "This session did not have enough free speech to evaluate grammar and vocabulary. Longer spontaneous answers give better feedback.";
@@ -64,5 +73,6 @@ export default {
   wordChoiceRubric,
   severityDefinitions,
   promptPreamble,
+  outputLanguage,
   insufficientNote,
 };
