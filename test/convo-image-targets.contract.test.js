@@ -10,6 +10,7 @@
 //   3. Every target can support the whole hint ladder — a real ___ blank that
 //      does not leak its own answer, and choices that contain the answer.
 //   4. The round is deterministic: the same image always deals the same options.
+import fs from "node:fs";
 import request from "supertest";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mkServer } from "./_helpers/mkServer.js";
@@ -1425,6 +1426,55 @@ describe("convo-image-targets crop verification", () => {
     const system = callsOf("inventory")[0][0].messages[0].content;
     expect(system).toContain('"boxes"');
     expect(system).toContain("Never pick one of several lookalikes silently");
+  });
+});
+
+describe("convo-image-targets cover log", () => {
+  // ON FOR THE PILOT'S FIRST WEEK, and then somebody has to turn it off. On
+  // Vercel, removing an environment variable takes a redeploy and editing one
+  // does not, so the natural move is to set it to 0 — and every string except
+  // the empty one is truthy in JavaScript, so the bare `if (process.env.X)` this
+  // replaces read "0", "false", "off" and "no" as ON. A forensics log that
+  // cannot be switched off by the obvious gesture is a log that stays on.
+  const OFF = ["", "0", "false", "off", "no", " 0 ", "FALSE", "Off"];
+  const ON = ["1", "true", "on", "yes", "verbose"];
+
+  function coverLogOn(v) {
+    const s = String(v || "").trim().toLowerCase();
+    return s !== "" && s !== "0" && s !== "false" && s !== "off" && s !== "no";
+  }
+
+  it("the source and this test agree on the rule", () => {
+    // Read rather than imported: the route has no export for it and adding one
+    // to be testable would be the tail wagging the dog. If the rule in the
+    // source changes, this line goes red and the table below has to be revisited.
+    const src = fs.readFileSync(
+      new URL("../routes/convo-image-targets.js", import.meta.url),
+      "utf8",
+    );
+    expect(src).toContain('return v !== "" && v !== "0" && v !== "false" && v !== "off" && v !== "no";');
+    expect(src).toContain("if (coverLogOn()) {");
+    // And the bare truthy check is gone as CODE, not merely shadowed. Matched
+    // with its opening brace: the doc comment on coverLogOn quotes the old
+    // expression to explain what it replaced, and that mention is not the bug.
+    expect(src).not.toContain("if (process.env.ISPY_COVER_LOG) {");
+    // The only place that READS it is coverLogOn. Counted over code lines only:
+    // the doc comment above the function names the variable too, and a raw count
+    // would be asserting on prose.
+    const reads = src
+      .split("\n")
+      .filter((l) => l.includes("process.env.ISPY_COVER_LOG") && !l.trimStart().startsWith("*"));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toContain("const v = String(");
+  });
+
+  it("stays off for every value a person types to disable it", () => {
+    for (const v of OFF) expect([v, coverLogOn(v)]).toEqual([v, false]);
+    expect(coverLogOn(undefined)).toBe(false);
+  });
+
+  it("turns on for every value a person types to enable it", () => {
+    for (const v of ON) expect([v, coverLogOn(v)]).toEqual([v, true]);
   });
 });
 

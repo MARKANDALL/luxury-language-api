@@ -609,6 +609,30 @@ function boundsToPicture(box, bounds, dim) {
 }
 
 /** Area of the overlap of two normalized boxes. */
+/**
+ * Is the cover forensics log on?
+ *
+ * A FLAG THAT WILL BE TURNED OFF BY HAND, which is the whole reason this is a
+ * function and not `if (process.env.ISPY_COVER_LOG)`. It is on for the pilot's
+ * first week and then somebody has to switch it off, and on Vercel removing an
+ * environment variable takes a redeploy while editing one does not: the natural
+ * move is to set it to 0. Every string except the empty one is truthy in
+ * JavaScript, so the bare check read "0", "false", "off" and "no" as ON, and the
+ * log would have stayed on for exactly as long as nobody checked.
+ *
+ * Everything this prints is derived from a GENERATED illustration (convo-image
+ * draws the scene through Gemini; nothing here is a photograph a learner
+ * supplied) and carries no identifier of any kind: a label, an attempt number,
+ * two ratios and a boolean. It is bounded by maxTargets x MAX_INSTANCES x
+ * REDRAW_TRIES lines per scan, and it cannot throw, because coversTheThing
+ * returns numeric cover and excess on every one of its return paths and toFixed
+ * on NaN yields "NaN" rather than raising.
+ */
+function coverLogOn() {
+  const v = String(process.env.ISPY_COVER_LOG || "").trim().toLowerCase();
+  return v !== "" && v !== "0" && v !== "false" && v !== "off" && v !== "no";
+}
+
 function overlapArea(a, b) {
   const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
   const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
@@ -3035,7 +3059,7 @@ async function verifyTargets(openai, model, imageUrl, targets, lang, { enumerate
             continue;
           }
           const cov = coversTheThing(box, ask, size);
-          if (process.env.ISPY_COVER_LOG) {
+          if (coverLogOn()) {
             console.log(`[cover] ${p.t.label}	try=${attempt}	cover=${cov.cover.toFixed(3)}	excess=${cov.excess.toFixed(2)}	ok=${cov.ok}`);
           }
           if (cov.ok) {
