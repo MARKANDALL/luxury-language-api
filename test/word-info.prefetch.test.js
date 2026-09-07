@@ -43,9 +43,9 @@ const CACHED_CARD = {
   tag: { cefr: "B1", freq: "very common" },
   collocations: ["fresh pastry"],
   trap: "",
-  // Card v4 (adds pronunciation + cognate). A cached card at any other version
+  // Card v6 (the L1 gate lift + trapPhoneme). A cached card at any other version
   // is a MISS, so this stamp must track CARD_VERSION in routes/word-info.js.
-  v: 5,
+  v: 6,
 };
 
 beforeEach(() => {
@@ -71,7 +71,7 @@ describe("word-info prefetch no-log flag", () => {
       .send({ word: "pastry", sentence: "a fresh pastry", lang: "en", surface: "convo-ai", prefetch: true });
 
     expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({ ok: true, cached: true, card: { v: 5, unit: "pastry" } });
+    expect(r.body).toMatchObject({ ok: true, cached: true, card: { v: 6, unit: "pastry" } });
     // The whole point: a prefetch logs NOTHING.
     expect(insertSpy).not.toHaveBeenCalled();
   });

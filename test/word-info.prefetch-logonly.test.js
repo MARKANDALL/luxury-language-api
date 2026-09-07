@@ -46,9 +46,9 @@ const CACHED_CARD = {
   tag: { cefr: "B1", freq: "common" },
   collocations: ["alveolar ridge"],
   trap: "",
-  // Card v4 (adds pronunciation + cognate). A cached card at any other version
+  // Card v6 (the L1 gate lift + trapPhoneme). A cached card at any other version
   // is a MISS, so this stamp must track CARD_VERSION in routes/word-info.js.
-  v: 5,
+  v: 6,
 };
 
 beforeEach(() => {
@@ -100,7 +100,7 @@ describe("word-info prefetch + logOnly (backend-hygiene item 4)", () => {
       .send({ word: "ridge", sentence: "on the alveolar ridge", lang: "en", surface: "ph-hover", prefetch: true });
 
     expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({ ok: true, cached: true, card: { v: 5, unit: "ridge" } });
+    expect(r.body).toMatchObject({ ok: true, cached: true, card: { v: 6, unit: "ridge" } });
     expect(insertSpy).not.toHaveBeenCalled();
   });
 });

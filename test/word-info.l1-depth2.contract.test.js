@@ -82,6 +82,7 @@ const FULL_CARD = {
   definitionL1: "Unirse para formar una sola cosa.",
   sentenceL1: "Los dos ríos se fusionan cerca del puente.",
   syllables: "MERGE",
+  trapPhoneme: "ɜ",
   l1Tip: "The final ge is a soft j sound, not a hard g.",
   cognate: false,
 };
@@ -94,6 +95,10 @@ const FULL_MORE = {
   // Synonyms of the SPANISH equivalent, not translations of the English list.
   synonymsL1: ["unir", "juntar", "fusionar"],
   example: { en: "The two lanes merge ahead.", l1: "Los dos carriles se fusionan más adelante." },
+  pronunciationMore: {
+    minimalPair: { a: "stall", b: "stole", contrast: "la vocal larga" },
+    inSentence: "Aquí se enlaza con la palabra siguiente.",
+  },
 };
 
 beforeEach(() => {
@@ -141,7 +146,7 @@ describe("word-info depth 1 — the first-paint L1 block", () => {
       unit: "merge",
       def: "to join together into one thing",
       l1Translation: "fusionarse",
-      v: 5,
+      v: 6,
       l1: {
         translation: "fusionarse",
         definitionL1: "Unirse para formar una sola cosa.",
@@ -150,10 +155,10 @@ describe("word-info depth 1 — the first-paint L1 block", () => {
     });
   });
 
-  it("bumps the card version to 5 so stale v4 cache rows cannot serve the old shape", async () => {
+  it("bumps the card version to 6 so stale v5 cache rows cannot serve the old shape", async () => {
     const api = await client();
     const r = await post(api);
-    expect(r.body.card.v).toBe(5);
+    expect(r.body.card.v).toBe(6);
   });
 
   it("translates the REAL sentence the client sent, and invents nothing", async () => {
@@ -187,17 +192,33 @@ describe("word-info depth 1 — the first-paint L1 block", () => {
     expect(r.body.card.l1).not.toBeNull();
   });
 
-  it("gives an L1 the route cannot write in the translation ALONE (card.l1 is null)", async () => {
+  // Round 4 item 5: the en|es gate is GONE. Every language the picker offers
+  // gets the full L1 side; a Hindi learner is not served a thinner card than a
+  // Spanish one.
+  it("gives every offered L1 the full block, not just en and es", async () => {
     const api = await client();
-    const r = await post(api, { l1: "fr" });
+    for (const l1 of ["fr", "hi", "ar", "zh", "ru", "pt", "de", "ja", "ko", "mr"]) {
+      const r = await post(api, { l1 });
+      expect(r.status).toBe(200);
+      expect(r.body.card.l1, l1).not.toBeNull();
+      expect(r.body.card.l1.definitionL1, l1).toBeTruthy();
+      expect(r.body.card.l1.sentenceL1, l1).toBeTruthy();
+      expect(r.body.card.pronunciation.l1Tip, l1).toBeTruthy();
+    }
+  });
 
-    expect(r.status).toBe(200);
-    expect(r.body.card.l1).toBeNull();
-    // The single-word translation it has always had is untouched.
-    expect(r.body.card.l1Translation).toBe("fusionarse");
-    // And the model is told to leave the two new fields empty rather than
-    // answering them in the wrong language.
-    expect(systemPromptOf(0)).toContain('- "definitionL1": empty string ""');
+  it("names the language, and its script where the script is not Latin", async () => {
+    const api = await client();
+    await post(api, { l1: "hi" });
+    expect(systemPromptOf(0)).toContain("written in Hindi");
+    // Without this the model answers Hindi in transliterated Latin.
+    expect(systemPromptOf(0)).toContain("the Devanagari script");
+
+    createSpy.mockClear();
+    await post(api, { l1: "fr" });
+    // French is Latin-script, so it gets the language name and no script note.
+    expect(systemPromptOf(0)).toContain("written in French");
+    expect(systemPromptOf(0)).not.toContain("not transliterated");
   });
 
   it("gives a universal L1 no block and no translation", async () => {
@@ -260,6 +281,7 @@ describe("word-info depth 1 — pronunciation and cognate (v4)", () => {
     const r = await post(api);
     expect(r.body.card.pronunciation).toEqual({
       syllables: "MERGE",
+  trapPhoneme: "ɜ",
       l1Tip: "The final ge is a soft j sound, not a hard g.",
     });
   });
@@ -283,8 +305,32 @@ describe("word-info depth 1 — pronunciation and cognate (v4)", () => {
     // …and the syllable split still stands, because that is not L1-specific.
     expect(uni.body.card.pronunciation.syllables).toBe("MERGE");
 
-    const fr = await post(api, { l1: "fr" });
-    expect(fr.body.card.pronunciation.l1Tip).toBeNull();
+    // The other null case is an L1 that IS the language being taught: there is
+    // nothing to contrast against.
+    const same = await post(api, { lang: "en", l1: "en" });
+    expect(same.body.card.pronunciation.l1Tip).toBeNull();
+  });
+
+  it("returns trapPhoneme, the one sound the tip is about", async () => {
+    const api = await client();
+    const r = await post(api);
+    expect(r.body.card.pronunciation.trapPhoneme).toBe("ɜ");
+    expect(systemPromptOf(0)).toContain('"trapPhoneme"');
+    expect(systemPromptOf(0)).toMatch(/SINGLE IPA symbol/);
+  });
+
+  it("rejects a trapPhoneme that is a whole transcription, not one sound", async () => {
+    const api = await client();
+    createSpy.mockResolvedValueOnce(modelReply({ ...FULL_CARD, trapPhoneme: "mɜːrdʒ" }));
+    const r = await post(api);
+    expect(r.body.card.pronunciation.trapPhoneme).toBeNull();
+  });
+
+  it("strips slashes and brackets from trapPhoneme", async () => {
+    const api = await client();
+    createSpy.mockResolvedValueOnce(modelReply({ ...FULL_CARD, trapPhoneme: "/æ/" }));
+    const r = await post(api);
+    expect(r.body.card.pronunciation.trapPhoneme).toBe("æ");
   });
 
   it("falls back to the unit when the model returns no syllable split", async () => {
@@ -313,12 +359,14 @@ describe("word-info depth 1 — pronunciation and cognate (v4)", () => {
     expect(systemPromptOf(0)).toMatch(/false for false\s+friends/);
   });
 
-  it("is always false for an L1 the route cannot compare against", async () => {
+  it("is false only where there is no other language to compare against", async () => {
     const api = await client();
     createSpy.mockResolvedValue(modelReply({ ...FULL_CARD, cognate: true }));
+    // The two genuine null cases.
     expect((await post(api, { l1: "universal" })).body.card.cognate).toBe(false);
-    expect((await post(api, { l1: "fr" })).body.card.cognate).toBe(false);
     expect((await post(api, { lang: "en", l1: "en" })).body.card.cognate).toBe(false);
+    // Round 4: French is a real comparison now, so the flag passes through.
+    expect((await post(api, { l1: "fr" })).body.card.cognate).toBe(true);
   });
 
   it("coerces a non-boolean cognate to false rather than passing it on", async () => {
@@ -410,14 +458,62 @@ describe("word-info depth 2 — more examples", () => {
     expect(r.body.example).toEqual({ en: "", l1: "" });
   });
 
-  it("blanks the whole L1 column when there is no L1 the route can write in", async () => {
+  it("blanks the whole L1 column only for universal or same-language", async () => {
     const api = await client();
-    const r = await post(api, { depth: 2, l1: "fr" });
+    const r = await post(api, { depth: 2, l1: "universal" });
     expect(r.body.example.l1).toBe("");
     expect(r.body.definitionFullL1).toBe("");
     expect(r.body.synonymsL1).toEqual([]);
-    // …and the prompt asked for it that way rather than for French.
+    expect(r.body.pronunciationMore).toEqual({ minimalPair: null, inSentence: null });
     expect(systemPromptOf(0)).toContain('"l1": ""');
+  });
+
+  it("fills the L1 column for any offered language (round 4 gate lift)", async () => {
+    const api = await client();
+    for (const l1 of ["fr", "hi", "ru"]) {
+      createSpy.mockClear();
+      const r = await post(api, { depth: 2, l1 });
+      expect(r.body.definitionFullL1, l1).toBeTruthy();
+      expect(r.body.synonymsL1.length, l1).toBeGreaterThan(0);
+      expect(r.body.example.l1, l1).toBeTruthy();
+    }
+  });
+
+  it("returns the pronunciation coach pair and in-sentence line", async () => {
+    const api = await client();
+    const r = await post(api, { depth: 2 });
+    expect(r.body.pronunciationMore).toEqual({
+      minimalPair: { a: "stall", b: "stole", contrast: "la vocal larga" },
+      inSentence: "Aquí se enlaza con la palabra siguiente.",
+    });
+  });
+
+  it("asks for a minimal pair on the TRAP sound the client names", async () => {
+    const api = await client();
+    await post(api, { depth: 2, trapPhoneme: "ɔ" });
+    const prompt = systemPromptOf(0);
+    expect(prompt).toContain('that one sound MUST be "ɔ"');
+    // The worked negative example is what stops it picking a neat pair that
+    // changes a different sound.
+    expect(prompt).toContain('{"a":"stall","b":"small"} is WRONG');
+  });
+
+  it("drops an invented minimal pair whose two words are the same", async () => {
+    const api = await client();
+    createSpy.mockResolvedValueOnce(
+      modelReply({ ...FULL_MORE, pronunciationMore: { minimalPair: { a: "stall", b: "Stall" }, inSentence: null } })
+    );
+    const r = await post(api, { depth: 2 });
+    expect(r.body.pronunciationMore.minimalPair).toBeNull();
+  });
+
+  it("drops a half-written minimal pair rather than showing one word", async () => {
+    const api = await client();
+    createSpy.mockResolvedValueOnce(
+      modelReply({ ...FULL_MORE, pronunciationMore: { minimalPair: { a: "stall", b: "" }, inSentence: null } })
+    );
+    const r = await post(api, { depth: 2 });
+    expect(r.body.pronunciationMore.minimalPair).toBeNull();
   });
 
   it("asks for the pairs in the learner's language when it can write in it", async () => {
@@ -440,6 +536,7 @@ describe("word-info depth 2 — more examples", () => {
       synonyms: [],
       synonymsL1: [],
       example: { en: "", l1: "" },
+      pronunciationMore: { minimalPair: null, inSentence: null },
       reason: "model_failed",
     });
   });

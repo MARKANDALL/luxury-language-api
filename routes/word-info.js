@@ -12,14 +12,19 @@
 //           word, unit, pos, ipa, def, l1Translation,
 //           tag: { cefr, freq }, collocations, trap,
 //           l1: { translation, definitionL1, sentenceL1 } | null,
-//           pronunciation: { syllables, l1Tip|null }, cognate: boolean } }
+//           pronunciation: { syllables, l1Tip|null, trapPhoneme|null },
+//           cognate: boolean } }
+//   The l1 side is produced for EVERY L1 the picker offers, in that language's
+//   own script; the only null cases are "universal" and l1 === lang.
 //   `sentenceL1` translates the sentence the CLIENT sent (the one the word was
 //   tapped in). Depth 1 no longer invents an example of its own — the card shows
 //   the real sentence, which the client already has, and depth 2 owns examples.
 //
 //   POST { word, sentence, lang, l1, level, depth: 2 }
 //   ->   { ok: true, depth: 2, definitionFull, definitionFullL1,
-//          synonyms[], synonymsL1[], example: { en, l1 }, reason? }
+//          synonyms[], synonymsL1[], example: { en, l1 },
+//          pronunciationMore: { minimalPair:{a,b,contrast}|null, inSentence|null },
+//          reason? }
 //   The depth-2 fields are PAIRS because the card renders them as two columns,
 //   target language beside the learner's. synonymsL1 are synonyms of the L1
 //   EQUIVALENT, not translations of the synonyms list.
@@ -103,8 +108,41 @@ function sanitizeTrap(raw, l1) {
 // their L1 is one of those two AND differs from the language being taught. Every
 // other L1 keeps the single-word l1Translation it has always had, rather than an
 // English "definition" mislabelled as theirs.
-const L1_BLOCK_LANGS = new Set(["en", "es"]);
-const L1_NAMES = { en: "English", es: "Spanish" };
+// Round 4 item 5: the gate is LIFTED. This used to be en|es only, inherited from
+// the route's origin as an English/Spanish card, and the effect was that a Hindi
+// learner got a visibly thinner card than a Spanish one for no reason the model
+// could not handle. Every language the picker offers now gets the full L1 side.
+// The only cases with no L1 content left are "universal" (there is no language
+// to write in) and l1 === lang (it would be the same language twice).
+const L1_NAMES = {
+  ar: "Arabic",
+  de: "German",
+  en: "English",
+  es: "Spanish",
+  fr: "French",
+  hi: "Hindi",
+  it: "Italian",
+  ja: "Japanese",
+  ko: "Korean",
+  mr: "Marathi",
+  pt: "Portuguese",
+  ru: "Russian",
+  zh: "Chinese (Mandarin)",
+};
+
+// The script each L1 must be WRITTEN IN. Naming it explicitly stops the model
+// answering Hindi in transliterated Latin ("khush") instead of Devanagari
+// ("खुश"), which is the failure this list exists to prevent. Languages that use
+// the Latin alphabet need no instruction and are absent on purpose.
+const L1_SCRIPTS = {
+  ar: "the Arabic script",
+  hi: "the Devanagari script",
+  ja: "Japanese script (kanji and kana as normal written Japanese)",
+  ko: "Hangul",
+  mr: "the Devanagari script",
+  ru: "the Cyrillic script",
+  zh: "Simplified Chinese characters",
+};
 
 // Card schema version. A cached card at any other version is treated as a miss
 // (see the cache read), so bumping this is what retires stale rows in place.
@@ -114,10 +152,26 @@ const L1_NAMES = { en: "English", es: "Spanish" };
 // v5 = the l1 block's `exampleL1` becomes `sentenceL1`, a translation of the
 //      REAL sentence the client sent, and depth 1 stops generating an `example`
 //      at all (depth 2 still has one).
-const CARD_VERSION = 5;
+// v6 = the en|es gate on L1 content is lifted (every language the picker offers
+//      gets the full L1 side, in its own script), and depth 1 gains
+//      pronunciation.trapPhoneme so the card can point the tip at one chip.
+const CARD_VERSION = 6;
 
 function wantsL1Block(l1, lang) {
-  return L1_BLOCK_LANGS.has(l1) && l1 !== lang;
+  return !!l1 && l1 !== "universal" && l1 !== lang;
+}
+
+/** The model-facing name of an L1, falling back to the raw code. */
+function l1NameOf(l1) {
+  return L1_NAMES[l1] || String(l1 || "");
+}
+
+/** "…, written in X." plus a script instruction where one is needed. */
+function l1ScriptClause(l1) {
+  const script = L1_SCRIPTS[l1];
+  return script
+    ? ` Write it in ${script}, not transliterated into the Latin alphabet.`
+    : "";
 }
 
 function oneLine(raw, cap) {
@@ -147,8 +201,27 @@ function emptyMore(reason) {
     synonyms: [],
     synonymsL1: [],
     example: { en: "", l1: "" },
+    pronunciationMore: { minimalPair: null, inSentence: null },
     reason,
   };
+}
+
+// v6 / round 4 item 7: the two model-written halves of the pronunciation coach.
+// Both are nullable on purpose — an invented minimal pair or a made-up remark
+// about a sentence is worse than an absent one, so the prompt is told to return
+// null and this keeps that null rather than coercing it to a string.
+function sanitizeMinimalPair(raw, wantL1) {
+  if (!wantL1 || !raw || typeof raw !== "object") return null;
+  const a = oneLine(raw.a, 40);
+  const b = oneLine(raw.b, 40);
+  if (!a || !b || a.toLowerCase() === b.toLowerCase()) return null;
+  return { a, b, contrast: oneLine(raw.contrast, 80) };
+}
+
+function sanitizeInSentence(raw, wantL1) {
+  if (!wantL1) return null;
+  const s = oneLine(raw, 220);
+  return s || null;
 }
 
 // synonyms: up to 4 short alternatives, each at most 3 words. Used for BOTH
@@ -202,6 +275,16 @@ function sanitizeL1Tip(raw, wantL1) {
   return s || null;
 }
 
+// v6: ONE IPA symbol, the one the tip is about. Capped at 3 code points so an
+// affricate or a diphthong ("tʃ", "aɪ") survives while a whole transcription
+// does not — the card colours exactly one chip with this.
+function sanitizeTrapPhoneme(raw, wantL1) {
+  if (!wantL1) return null;
+  const s = oneLine(raw, 12).replace(/[/[\]]/g, "");
+  if (!s) return null;
+  return [...s].length <= 3 ? s : null;
+}
+
 function quickModel() {
   return (
     (process.env.LUX_AI_QUICK_MODEL || "").toString().trim() ||
@@ -210,7 +293,7 @@ function quickModel() {
   );
 }
 
-async function handleMoreExamples(res, { word, sentence, lang, l1, level }) {
+async function handleMoreExamples(res, { word, sentence, lang, l1, level, trapPhoneme }) {
   let OpenAI, jsonrepair;
   try {
     const modAI = await import("openai");
@@ -234,7 +317,7 @@ async function handleMoreExamples(res, { word, sentence, lang, l1, level }) {
 
   const targetLangName = lang === "es" ? "Spanish" : "English";
   const wantL1 = wantsL1Block(l1, lang);
-  const l1Name = L1_NAMES[l1] || "";
+  const l1Name = l1NameOf(l1);
 
   const system = `
 You expand a tiny word card for ${targetLangName} learners at CEFR level ${level}.
@@ -254,7 +337,8 @@ Rules:
 - "example": ONE new, natural ${targetLangName} sentence using the word, max 14
   words, different from the given sentence.
 ${wantL1
-    ? `- "definitionFullL1": the SAME definition as "definitionFull", written in
+    ? `EVERY ${l1Name} field below must be written in ${l1Name}.${l1ScriptClause(l1)}
+- "definitionFullL1": the SAME definition as "definitionFull", written in
   ${l1Name}. Same meaning, same length limit.
 - "synonymsL1": up to 4 ${l1Name} synonyms OF THE ${l1Name.toUpperCase()} EQUIVALENT of the word.
   These are NOT translations of the "synonyms" list. Translate the word into
@@ -262,12 +346,34 @@ ${wantL1
   English "plan" into Spanish that is "plan" -> ["proyecto", "programa"], NOT the
   Spanish for "scheme" or "intend".
 - "example": the object { "en": "<the ${targetLangName} sentence>", "l1": "<that SAME sentence in ${l1Name}>" }.
-  The "l1" side is a translation of the "en" side, never a different sentence.`
+  The "l1" side is a translation of the "en" side, never a different sentence.
+- "pronunciationMore": an object with these two keys, for the pronunciation
+  coach the card shows under "How to say it":
+    · "minimalPair": { "a", "b", "contrast" } — two real ${targetLangName} words
+      that differ in exactly ONE sound${trapPhoneme
+        ? `, and that one sound MUST be "${trapPhoneme}" — the sound this learner
+      gets wrong. "a" contains "${trapPhoneme}"; "b" is identical except that one
+      sound is a different one. A pair that differs somewhere else (a different
+      consonant cluster, an extra syllable) is WRONG here, however neat it looks`
+        : `, the sound a ${l1Name} speaker is most likely to get wrong in this word`}.
+      Worked example: for "stall" with the trap sound "ɔ", {"a":"stall","b":"stole"}
+      is RIGHT (only the vowel moves). {"a":"stall","b":"small"} is WRONG — it
+      changes the consonants and leaves the trap sound untouched.
+      "a" is the word with the target sound, "b" its near-miss, and "contrast" is
+      a short phrase in ${l1Name} naming the difference, max 8 words. Use null if
+      no honest minimal pair exists — do NOT invent one.
+    · "inSentence": ONE sentence in ${l1Name}, max 25 words, about how this word
+      BEHAVES INSIDE the given sentence — linking into the next word, a reduced
+      or dropped sound, or where the sentence stress falls. It must be about this
+      word in THIS sentence, not general advice. Use null if there is nothing
+      worth saying or no sentence was given.`
     : `- "definitionFullL1": empty string "".
 - "synonymsL1": [].
-- "example": the object { "en": "<the ${targetLangName} sentence>", "l1": "" }.`}
+- "example": the object { "en": "<the ${targetLangName} sentence>", "l1": "" }.
+- "pronunciationMore": { "minimalPair": null, "inSentence": null }.`}
 Output MUST be valid JSON only, with exactly these keys:
-{ "definitionFull", "definitionFullL1", "synonyms", "synonymsL1", "example" }
+{ "definitionFull", "definitionFullL1", "synonyms", "synonymsL1", "example",
+  "pronunciationMore" }
 `.trim();
 
   let raw;
@@ -305,6 +411,10 @@ Output MUST be valid JSON only, with exactly these keys:
   const synonyms = sanitizeSynonyms(parsed?.synonyms);
   const synonymsL1 = wantL1 ? sanitizeSynonyms(parsed?.synonymsL1) : [];
   const example = sanitizeExample(parsed?.example, wantL1);
+  const pronunciationMore = {
+    minimalPair: sanitizeMinimalPair(parsed?.pronunciationMore?.minimalPair, wantL1),
+    inSentence: sanitizeInSentence(parsed?.pronunciationMore?.inSentence, wantL1),
+  };
 
   if (!definitionFull && !synonyms.length && !example.en) {
     return res.status(200).json(emptyMore("empty_more"));
@@ -318,6 +428,7 @@ Output MUST be valid JSON only, with exactly these keys:
     synonyms,
     synonymsL1,
     example,
+    pronunciationMore,
   });
 }
 
@@ -362,7 +473,12 @@ export default async function handler(req, res) {
   // log and the cache: this is a second read of a word whose tap was already
   // counted, and it is answered by the model every time (see handleMoreExamples).
   if (Number(body.depth) === 2) {
-    return handleMoreExamples(res, { word, sentence, lang, l1, level });
+    return handleMoreExamples(res, {
+      word, sentence, lang, l1, level,
+      // The card hands back the trap phoneme depth 1 identified, so the minimal
+      // pair is chosen for the sound this learner actually struggles with.
+      trapPhoneme: oneLine(body.trapPhoneme, 12),
+    });
   }
 
   const sHash = sentenceHash(sentence);
@@ -454,7 +570,7 @@ export default async function handler(req, res) {
   // Whether this card also composes its whole "In this sentence" zone in the
   // learner's language on FIRST paint (card v3) — see wantsL1Block.
   const wantL1 = wantsL1Block(l1, lang);
-  const l1Name = L1_NAMES[l1] || "";
+  const l1Name = l1NameOf(l1);
 
   // 6) Prompt — context definition, learner register, MWE-aware
   const system = `
@@ -495,12 +611,18 @@ Rules:
   one-syllable unit is just the word as written, with no dot. Letters, dots,
   hyphens, apostrophes and spaces only.
 ${wantL1
-    ? `- "definitionL1": the SAME meaning as "def", written in ${l1Name}. Max 18 words.
+    ? `EVERY ${l1Name} field below must be written in ${l1Name}.${l1ScriptClause(l1)}
+- "definitionL1": the SAME meaning as "def", written in ${l1Name}. Max 18 words.
 - "sentenceL1": the GIVEN sentence — the one the learner tapped the word in,
   exactly as supplied — translated faithfully into ${l1Name}. Translate WHAT IS
   THERE: same meaning, same tense, same register. Do NOT write a new or better
   sentence, do NOT shorten it to a phrase, and do NOT gloss only the word. If the
   given sentence is empty, use empty string "".
+- "trapPhoneme": the SINGLE IPA symbol your "l1Tip" is about — the one sound in
+  this unit a ${l1Name} speaker is most likely to get wrong. One symbol only
+  (e.g. "æ", "θ", "ɪ"), taken from the "ipa" you gave above, with no slashes. Use
+  empty string "" when the tip is not about one specific sound, or when there is
+  no tip.
 - "l1Tip": ONE sentence, max 20 words, naming the SINGLE most likely
   pronunciation trap for a ${l1Name} speaker saying THIS unit. Be specific to the
   sounds in this word, not generic advice. Good ${l1Name} examples: the vowel in
@@ -512,12 +634,13 @@ ${wantL1
   friends and for anything that merely looks similar — those belong in "trap".`
     : `- "definitionL1": empty string "".
 - "sentenceL1": empty string "".
+- "trapPhoneme": empty string "".
 - "l1Tip": empty string "".
 - "cognate": false.`}
 Output MUST be valid JSON only, with exactly these keys:
 { "unit", "pos", "ipa", "def", "l1Translation", "cefr", "freq",
   "collocations", "trap", "definitionL1", "sentenceL1", "syllables", "l1Tip",
-  "cognate" }
+  "trapPhoneme", "cognate" }
 `.trim();
 
   const user = { word, sentence };
@@ -593,6 +716,10 @@ Output MUST be valid JSON only, with exactly these keys:
       pronunciation: {
         syllables: sanitizeSyllables(parsed.syllables, parsed.unit || word),
         l1Tip: sanitizeL1Tip(parsed.l1Tip, wantL1),
+        // v6: the one IPA symbol the tip is about, so the card can colour that
+        // phoneme chip and the advice visibly points at a sound rather than
+        // floating beside the whole word.
+        trapPhoneme: sanitizeTrapPhoneme(parsed.trapPhoneme, wantL1),
       },
       // v4: shares BOTH form and meaning with the L1 equivalent. A false friend
       // is deliberately NOT a cognate — that case is what `trap` above is for.
