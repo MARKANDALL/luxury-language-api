@@ -146,7 +146,7 @@ describe("word-info depth 1 — the first-paint L1 block", () => {
       unit: "merge",
       def: "to join together into one thing",
       l1Translation: "fusionarse",
-      v: 6,
+      v: 8,
       l1: {
         translation: "fusionarse",
         definitionL1: "Unirse para formar una sola cosa.",
@@ -155,10 +155,10 @@ describe("word-info depth 1 — the first-paint L1 block", () => {
     });
   });
 
-  it("bumps the card version to 6 so stale v5 cache rows cannot serve the old shape", async () => {
+  it("bumps the card version to 8 so stale v7 cache rows cannot serve the old shape", async () => {
     const api = await client();
     const r = await post(api);
-    expect(r.body.card.v).toBe(6);
+    expect(r.body.card.v).toBe(8);
   });
 
   it("translates the REAL sentence the client sent, and invents nothing", async () => {
@@ -279,9 +279,10 @@ describe("word-info depth 1 — pronunciation and cognate (v4)", () => {
   it("returns the syllable split and the L1-specific tip", async () => {
     const api = await client();
     const r = await post(api);
-    expect(r.body.card.pronunciation).toEqual({
+    // toMatchObject, not toEqual: v7 added traps and trapsSource beside these
+    // three, and this test is about the syllables and the tip.
+    expect(r.body.card.pronunciation).toMatchObject({
       syllables: "MERGE",
-  trapPhoneme: "ɜ",
       l1Tip: "The final ge is a soft j sound, not a hard g.",
     });
   });
@@ -311,26 +312,37 @@ describe("word-info depth 1 — pronunciation and cognate (v4)", () => {
     expect(same.body.card.pronunciation.l1Tip).toBeNull();
   });
 
-  it("returns trapPhoneme, the one sound the tip is about", async () => {
+  it("derives trapPhoneme from the TABLE, not from the model's guess", async () => {
     const api = await client();
     const r = await post(api);
-    expect(r.body.card.pronunciation.trapPhoneme).toBe("ɜ");
+    // The model said "ɜ"; the Spanish table says the r-coloured vowel in
+    // /mɜːrdʒ/ is the first very-difficult sound, and the table wins. The value
+    // therefore carries its length mark, because that is the symbol the card's
+    // own phoneme strip renders.
+    expect(r.body.card.pronunciation.trapPhoneme).toBe("ɜː");
     expect(systemPromptOf(0)).toContain('"trapPhoneme"');
     expect(systemPromptOf(0)).toMatch(/SINGLE IPA symbol/);
   });
 
-  it("rejects a trapPhoneme that is a whole transcription, not one sound", async () => {
+  it("ignores a model trapPhoneme entirely when a table decided", async () => {
     const api = await client();
     createSpy.mockResolvedValueOnce(modelReply({ ...FULL_CARD, trapPhoneme: "mɜːrdʒ" }));
     const r = await post(api);
-    expect(r.body.card.pronunciation.trapPhoneme).toBeNull();
+    // A whole transcription used to be sanitised to null. It is now simply not
+    // consulted: the table answered, so the model's field never gets a vote.
+    expect(r.body.card.pronunciation.trapPhoneme).toBe("ɜː");
+    expect(r.body.card.pronunciation.trapsSource).toBe("table");
   });
 
-  it("strips slashes and brackets from trapPhoneme", async () => {
+  it("falls back to the model, sanitised, for an L1 with NO table", async () => {
+    // French has no table yet, so the model is still the only judge — and its
+    // answer is still cleaned up on the way through.
     const api = await client();
     createSpy.mockResolvedValueOnce(modelReply({ ...FULL_CARD, trapPhoneme: "/æ/" }));
-    const r = await post(api);
+    const r = await post(api, { l1: "fr" });
     expect(r.body.card.pronunciation.trapPhoneme).toBe("æ");
+    expect(r.body.card.pronunciation.traps).toEqual([]);
+    expect(r.body.card.pronunciation.trapsSource).toBe("model");
   });
 
   it("falls back to the unit when the model returns no syllable split", async () => {

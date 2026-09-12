@@ -36,6 +36,7 @@
 // Both degrade gracefully if Supabase env is missing.
 
 import crypto from "node:crypto";
+import { trapsForWord } from "../lang/l1-traps/index.js";
 
 export const config = {
   api: {
@@ -155,7 +156,11 @@ const L1_SCRIPTS = {
 // v6 = the en|es gate on L1 content is lifted (every language the picker offers
 //      gets the full L1 side, in its own script), and depth 1 gains
 //      pronunciation.trapPhoneme so the card can point the tip at one chip.
-const CARD_VERSION = 6;
+// v8, not v7: during round 6 development this route wrote v7 rows with a trap
+// table that did not yet know the r-coloured vowels, so a handful of cached
+// cards carry wrong traps. The version IS the invalidation mechanism, so it
+// moves rather than leaving known-bad rows to be served.
+const CARD_VERSION = 8;
 
 function wantsL1Block(l1, lang) {
   return !!l1 && l1 !== "universal" && l1 !== lang;
@@ -283,6 +288,35 @@ function sanitizeTrapPhoneme(raw, wantL1) {
   const s = oneLine(raw, 12).replace(/[/[\]]/g, "");
   if (!s) return null;
   return [...s].length <= 3 ? s : null;
+}
+
+// v7 / round 6 item 4: EVERY trap in the word, and how hard each one is.
+//
+// THE TABLE DECIDES, NOT THE MODEL. lang/l1-traps/<l1>.js is a hand-written
+// difficulty table owned by the teacher; this derives the trap list from the
+// word's own IPA by matching that table. The model is still asked for the TIP
+// (the sentence of advice), but it is no longer asked which sounds are hard or
+// how hard they are, because it answered that differently every time.
+//
+// An L1 with no table gets an empty list and trapsSource "model", and the card
+// falls back to the model's single judgement exactly as it did before.
+function derivePronTraps(ipa, l1, wantL1) {
+  if (!wantL1) return { traps: [], trapsSource: "none" };
+  try {
+    const { traps, source } = trapsForWord(ipa, l1);
+    return {
+      traps: traps.slice(0, 12).map((t) => ({
+        symbol: String(t.symbol || "").slice(0, 12),
+        index: Number.isFinite(t.index) ? t.index : 0,
+        tier: t.tier === 2 ? 2 : 1,
+        why: oneLine(t.why, 200),
+      })),
+      trapsSource: source,
+    };
+  } catch (err) {
+    console.warn("[word-info] trap derivation failed:", err?.message || err);
+    return { traps: [], trapsSource: "model" };
+  }
 }
 
 function quickModel() {
@@ -674,6 +708,12 @@ Output MUST be valid JSON only, with exactly these keys:
     const l1Translation =
       l1 === "universal" ? "" : (parsed.l1Translation || "").toString().trim().slice(0, 120);
 
+    // Round 6 item 4: the traps come from the L1 table, not the model.
+    const pronTraps = derivePronTraps(
+      (parsed.ipa || "").toString().trim(),
+      l1,
+      wantL1,
+    );
     const card = {
       word,
       unit: (parsed.unit || word).toString().trim().slice(0, 80),
@@ -719,7 +759,20 @@ Output MUST be valid JSON only, with exactly these keys:
         // v6: the one IPA symbol the tip is about, so the card can colour that
         // phoneme chip and the advice visibly points at a sound rather than
         // floating beside the whole word.
-        trapPhoneme: sanitizeTrapPhoneme(parsed.trapPhoneme, wantL1),
+        //
+        // v7 / round 6 item 4: KEPT FOR ONE RELEASE. It is no longer the model's
+        // answer — it is the first tier-2 entry of the derived list below, so a
+        // client that has not been updated still colours the worst sound and
+        // still asks depth 2 for a minimal pair about it. When every client
+        // reads `traps`, delete this field and the prompt line that feeds it.
+        trapPhoneme: pronTraps.traps.find((t) => t.tier === 2)?.symbol
+          || sanitizeTrapPhoneme(parsed.trapPhoneme, wantL1),
+        // v7: every trap in the word, in phoneme order, each with a tier and the
+        // table's own reason. Zero, one or several.
+        traps: pronTraps.traps,
+        // "table" when a hand-written L1 table decided, "model" when there is
+        // none for this L1 and the single model judgement above is all there is.
+        trapsSource: pronTraps.trapsSource,
       },
       // v4: shares BOTH form and meaning with the L1 equivalent. A false friend
       // is deliberately NOT a cognate — that case is what `trap` above is for.
