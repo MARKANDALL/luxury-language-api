@@ -31,7 +31,6 @@ function mean(nums) {
 function meanMetric(rows, key) {
   return mean(rows.map((r) => metricNum(r?.summary?.[key])));
 }
-
 // EXPORTED (behaviour unchanged) so routes/learner-model.js can build its
 // pronunciation section from the same arithmetic that draws the end-of-
 // conversation report, instead of a second copy of it. Both take rows shaped

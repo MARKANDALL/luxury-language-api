@@ -35,7 +35,7 @@ vi.mock("../lib/supabase.js", () => ({
   }),
 }));
 
-const V2_CARD = {
+const CACHED_CARD = {
   word: "ridge",
   unit: "ridge",
   pos: "noun",
@@ -46,13 +46,15 @@ const V2_CARD = {
   tag: { cefr: "B1", freq: "common" },
   collocations: ["alveolar ridge"],
   trap: "",
-  v: 2,
+  // Card v8 (the per-L1 trap TABLE). A cached card at any other version
+  // is a MISS, so this stamp must track CARD_VERSION in routes/word-info.js.
+  v: 8,
 };
 
 beforeEach(() => {
   vi.resetModules();
   insertSpy.mockClear();
-  cacheState.card = { ...V2_CARD };
+  cacheState.card = { ...CACHED_CARD };
   process.env.ADMIN_TOKEN = "test_admin_token";
   // Deliberately NO OPENAI_API_KEY: none of these paths may reach the model.
 });
@@ -98,7 +100,7 @@ describe("word-info prefetch + logOnly (backend-hygiene item 4)", () => {
       .send({ word: "ridge", sentence: "on the alveolar ridge", lang: "en", surface: "ph-hover", prefetch: true });
 
     expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({ ok: true, cached: true, card: { v: 2, unit: "ridge" } });
+    expect(r.body).toMatchObject({ ok: true, cached: true, card: { v: 8, unit: "ridge" } });
     expect(insertSpy).not.toHaveBeenCalled();
   });
 });
