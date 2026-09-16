@@ -156,6 +156,7 @@
 | **Recommended canonical source** | `api/router.js:normToken` — it's already used by the router's `isAdminRequest()`. |
 | **Minimal fix plan** | Export `normToken` from `api/router.js`. Import in `routes/tts.js` (delete local copy). For `pronunciation-gpt.js` and `update-attempt.js`, note that the router already gates these routes (`ADMIN_ONLY` set), so the route-level checks are redundant. Add `// Router already validates admin token` comments. |
 | **Risk & rollback** | Low. Router-level check means route-level re-check is belt-and-suspenders anyway. |
+| **⚠ CORRECTION (2026-09-03)** | **The premise of the fix plan is false. `update-attempt` is NOT in the router's `ADMIN_ONLY` set** (see the set in `api/router.js`) — nor is `migrate`. Their in-route checks are the **only** authentication they have. Following the plan above would leave `UPDATE public.lux_attempts SET summary = jsonb_set(...) WHERE id = $1` reachable unauthenticated with a caller-supplied row id. `pronunciation-gpt` **is** in the set, so the "redundant" claim holds for that route alone. The `normToken` consolidation half of this finding is unaffected. Line references in the Evidence row are also stale. |
 
 ### B.10 — Duplicate: CORS `cors(res)` function (API, 3 copies) overriding router CORS
 

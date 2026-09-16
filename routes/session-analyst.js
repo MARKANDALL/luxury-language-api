@@ -315,6 +315,15 @@ export default async function handler(req, res) {
     console.error("[session-analyst] dictionary load failed", pack, e?.message || e);
     return res.status(500).json({ ok: false, error: "dictionary_unavailable" });
   }
+  // A pack that does not name its own language cannot be prompted safely: the
+  // model would be left to infer the explanation language, which is exactly how
+  // an English-pack session came back explained in German. Refuse rather than
+  // guess — the same fail-silent posture as a dictionary that will not load.
+  const outputLanguage = String(dict.outputLanguage || "").trim();
+  if (!outputLanguage) {
+    console.error("[session-analyst] pack declares no outputLanguage", pack);
+    return res.status(500).json({ ok: false, error: "dictionary_unavailable" });
+  }
   const validCategoryCodes = new Set((dict.categories || []).map((c) => c.code));
 
   // 5) LOCAL PRE-GATE (hard law 2a). Count only genuinely spontaneous words,
@@ -358,8 +367,22 @@ export default async function handler(req, res) {
     .join("\n");
   const codeList = (dict.categories || []).map((c) => c.code).join(", ");
 
+  // HARD LANGUAGE RULE. The engine stays pack-neutral: the language NAME is the
+  // pack's own literal (dict.outputLanguage), the engine only states it. Before
+  // this block the contract asked for "the analyst's language", a phrase defined
+  // nowhere in the assembled prompt, and the es pack was the only one that said
+  // its language out loud — so an en-pack session was answered in German.
+  const languageRule = `
+LANGUAGE (absolute, overrides everything else): write EVERY learner-facing
+string in ${outputLanguage}. That is "evidenceNote", every item "explanation",
+and every strength "note".
+This does not change with the language of the turns you are reading, the
+learner's level, or the topic. ${outputLanguage} is the language the learner
+chose; answering in any other language is a failure, not a style choice.`.trim();
+
   const system = [
     dict.promptPreamble,
+    languageRule,
     `Taxonomy (category codes you may use):\n${categoryLines}`,
     dict.wordChoiceRubric,
     dict.severityDefinitions,
@@ -371,7 +394,7 @@ turn whose "judgeable" is false.
 Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
 {
   "evidence": "sufficient" | "insufficient",
-  "evidenceNote": "one short sentence, in the analyst's language",
+  "evidenceNote": "one short sentence, in ${outputLanguage}",
   "items": [
     {
       "channel": "grammar" | "word_choice",
@@ -380,11 +403,11 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
       "turnIndex": <integer, a judgeable turn>,
       "utterance": "<exact words the user said>",
       "suggestion": "<the natural alternative>",
-      "explanation": "<one sentence, learner-facing, in the analyst's language>"
+      "explanation": "<one sentence, learner-facing, in ${outputLanguage}>"
     }
   ],
   "strengths": [
-    { "turnIndex": <integer, a judgeable turn>, "utterance": "<exact words>", "note": "<one sentence>" }
+    { "turnIndex": <integer, a judgeable turn>, "utterance": "<exact words>", "note": "<one sentence, in ${outputLanguage}>" }
   ],
   "afnCandidates": ["<up to 3 category codes>"]
 }
@@ -422,7 +445,11 @@ Output STRICT JSON ONLY, exactly this shape (no prose, no markdown):
   async function callModel(messages) {
     const resp = await openai.chat.completions.create({
       model: MODEL,
-      temperature: 0.2,
+      // Analysis is a judgement about what the learner actually said, not a
+      // piece of writing: two readings of one transcript should agree. 0.2 was
+      // enough sampling freedom for the same session to yield a different
+      // strength on a second pass. Local to this route's own call.
+      temperature: 0,
       max_tokens: 2000,
       response_format: { type: "json_object" },
       messages,

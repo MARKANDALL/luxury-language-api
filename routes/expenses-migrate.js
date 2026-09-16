@@ -5,14 +5,15 @@
 // Safe to call more than once; DDL uses IF NOT EXISTS and seeds are guarded.
 
 import { pool } from "../lib/pool.js";
-import { isAdmin, sendJson } from "../lib/expenses/http.js";
+import { sendJson } from "../lib/expenses/http.js";
+import { isAdminKeyRequest } from "../lib/admin-auth.js";
 import { MIGRATION_SQL } from "../lib/expenses/migration.js";
 
 export default async function handler(req, res) {
   const method = String(req.method || "GET").toUpperCase();
   if (method === "OPTIONS") return sendJson(res, 204, {});
   if (method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" });
-  if (!isAdmin(req)) return sendJson(res, 401, { ok: false, error: "unauthorized" });
+  if (!isAdminKeyRequest(req)) return sendJson(res, 401, { ok: false, error: "unauthorized" });
 
   try {
     // Simple-query protocol (no params) permits multiple statements in one call.

@@ -1,0 +1,78 @@
+-- migrations/0010_attempt_azure_detail.sql
+-- What the learner actually said, kept on every attempt row.
+--
+-- THE PROBLEM. Azure Pronunciation Assessment returns, on every attempt, the
+-- full recognized word list in spoken order, with Offset and Duration on every
+-- word, syllable and phoneme, an ErrorType per word, and the recognized text.
+-- routes/attempt.js:16 (toSummaryFromAzure) keeps the ten lowest-scoring words
+-- and the six lowest-scoring phonemes, lowercased and aggregated, and discards
+-- everything else. The row that survives cannot answer "what did they say", in
+-- what order, or when. There is no transcript anywhere in the schema.
+--
+-- WHY THIS IS WORSE THAN MERELY LOSSY. Passages and most conversation turns
+-- send a ReferenceText, so Azure runs SCRIPTED mode, which aligns rather than
+-- transcribes. Off-script speech and fillers come back as phantom words tagged
+-- ErrorType 'Insertion', and those phantoms are then graded like real words.
+-- A session card on 3 September showed "system 7%" as a trouble word and the
+-- schwa inside a phantom as a trouble sound. Without the ErrorType, which the
+-- summary never kept, nothing downstream can tell a phantom from a real word.
+--
+-- WHAT THESE TWO COLUMNS HOLD.
+--
+--   recognized_text  NBest[0].Display: what Azure heard, as one string. The
+--                    single most useful field for a transcript, and the
+--                    cheapest to read. Distinct from lux_attempts.text, which
+--                    on a reading surface is the SCRIPT the learner was asked
+--                    to read, not what came out of their mouth.
+--
+--   azure_detail     The trimmed per-attempt detail: the recognition fields
+--                    (lexical, display, confidence, snr, offset, duration),
+--                    whether the attempt was scripted and against what
+--                    reference text, and words[] in SPOKEN ORDER, each with
+--                    its offset, duration, accuracy, error_type, syllables and
+--                    phonemes. Built server-side by toAzureDetail in
+--                    routes/attempt.js.
+--
+-- WHAT IS DELIBERATELY DROPPED. NBestPhonemes (Azure's per-phoneme alternative
+-- candidate lists) and the per-word prosody Feedback blocks. Together they are
+-- the bulk of the payload and nothing in scope reads either. Dropping them is
+-- what makes a full timed word list fit in a sane row.
+--
+-- WHY jsonb AND NOT COLUMNS. The word list is variable-length and nested three
+-- deep (word, syllable, phoneme). Flattening it would mean a second table and a
+-- join on every transcript read, to store something no query filters on: the
+-- transcript is always fetched whole, by attempt. jsonb also lets the trimmer
+-- degrade gracefully under the size cap (see below) without a schema change.
+--
+-- SIZE. The writer caps the serialized jsonb at 64 KB. An attempt that would
+-- exceed it is re-serialized with the phonemes dropped from every word and
+-- marked with truncated:true, so a long attempt loses phoneme detail rather
+-- than losing the attempt. The word list and its timings always survive.
+--
+-- NULLABLE ON PURPOSE, AND NOT BACKFILLABLE. Every row written before this
+-- column existed has no Azure detail and never will: the payload was discarded
+-- at the door and was never persisted anywhere else, on any surface. Attempts
+-- that legitimately have no Azure result at all (typed conversation turns, free
+-- writing) will keep writing null here forever, so null means "no assessment
+-- for this attempt", never an error and never a missing write.
+--
+-- ADDITIVE AND INVISIBLE. Nothing selects * from lux_attempts; all seven
+-- readers name their columns explicitly (routes/user-recent.js:35-41,
+-- routes/admin-recent.js:129-136, routes/convo-report.js:159,
+-- routes/admin-user-stats.js:56, routes/learner-model.js:164,
+-- routes/pronunciation-gpt/historySummary.js:41, routes/word-history.js:160),
+-- so no existing response gains a field and no existing render changes. The
+-- summary column is not touched by this migration or by the code that fills
+-- these two columns.
+--
+-- Idempotent: safe to run repeatedly (Supabase SQL editor).
+
+alter table public.lux_attempts
+  add column if not exists recognized_text text,
+  add column if not exists azure_detail jsonb;
+
+-- No index. Nothing filters or joins on either column: the transcript reader
+-- fetches by uid, session and passage exactly as every current reader does, and
+-- both columns come along on the row it already found. A gin index on
+-- azure_detail would cost write time on every attempt to serve no query that
+-- exists. Add one when a query needs it, not before.

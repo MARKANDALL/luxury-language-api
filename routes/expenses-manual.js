@@ -4,7 +4,8 @@
 // Body: { slug, amount_usd (or amount), note?, period? ('YYYY-MM'), period_start?, period_end? }
 // Period resolution order: explicit period_start/period_end -> period 'YYYY-MM' -> current UTC month.
 
-import { isAdmin, sendJson, readJsonBody } from "../lib/expenses/http.js";
+import { sendJson, readJsonBody } from "../lib/expenses/http.js";
+import { isAdminKeyRequest } from "../lib/admin-auth.js";
 import { getSourceBySlug, insertSnapshot, currentMonthRange } from "../lib/expenses/db.js";
 
 function monthToRange(period) {
@@ -24,7 +25,7 @@ export default async function handler(req, res) {
   const method = String(req.method || "GET").toUpperCase();
   if (method === "OPTIONS") return sendJson(res, 204, {});
   if (method !== "POST") return sendJson(res, 405, { ok: false, error: "method_not_allowed" });
-  if (!isAdmin(req)) return sendJson(res, 401, { ok: false, error: "unauthorized" });
+  if (!isAdminKeyRequest(req)) return sendJson(res, 401, { ok: false, error: "unauthorized" });
 
   const body = await readJsonBody(req);
   const slug = String(body.slug || "").trim();
