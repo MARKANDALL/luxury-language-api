@@ -5,6 +5,11 @@ import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { tmpdir } from "os";
 import path from "path";
+import {
+  recordTrackEnabled,
+  runRecordTrack,
+  recordFromDictate,
+} from "../lib/record-track.js";
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
@@ -97,16 +102,40 @@ export default async function handler(req, res) {
 
     const endpoint = `https://${region}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=${assessLang}&format=detailed`;
 
-    const azureRes = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Ocp-Apim-Subscription-Key": key,
-        "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
-        "Pronunciation-Assessment": pronAssessmentHeader,
-        Accept: "application/json",
-      },
-      body: audioBuffer,
-    });
+    // THE RECORD TRACK (LUX_RECORD_TRACK, default off).
+    //
+    // The scripted assessment above aligns against referenceText and therefore
+    // cannot report off-script speech as itself. When the flag is on, plain STT
+    // runs on the SAME buffer, in parallel, inside this request, so the row can
+    // carry what was actually said as well as how it scored.
+    //
+    // It rides back on the response under a namespaced key, the same way
+    // __scrutiny already crosses the wire (core/scoring/scrutiny.js:66). The
+    // client posts the whole Azure result to /api/attempt untouched, so the
+    // record reaches the persistence layer with no frontend change.
+    //
+    // A pro-dictate turn already transcribed this clip through /api/dictate
+    // before calling assess, and forwards that transcript as the `record`
+    // field, so it costs no second Azure call.
+    const wantRecord = recordTrackEnabled();
+    const priorTranscript = pickFirst(fields?.record);
+
+    const [azureRes, record] = await Promise.all([
+      fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Ocp-Apim-Subscription-Key": key,
+          "Content-Type": "audio/wav; codecs=audio/pcm; samplerate=16000",
+          "Pronunciation-Assessment": pronAssessmentHeader,
+          Accept: "application/json",
+        },
+        body: audioBuffer,
+      }),
+      wantRecord
+        ? recordFromDictate(priorTranscript) ||
+          runRecordTrack({ audioBuffer, language: assessLang, region, key })
+        : null,
+    ]);
 
     const raw = await azureRes.text();
 
@@ -128,6 +157,10 @@ export default async function handler(req, res) {
         json,
       });
     }
+
+    // Attached only when the flag is on AND a record came back. With the flag
+    // off the response object is untouched, so it is byte-identical to before.
+    if (record) json.__luxRecord = record;
 
     return res.status(200).json(json);
   } catch (e) {

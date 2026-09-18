@@ -31,6 +31,10 @@ beforeEach(() => {
   vi.resetModules();
   delete globalThis.__lux_pool;
   db.calls = [];
+  // These cases pin #81's stats with the flag at its default. Under
+  // LUX_RECORD_TRACK the filler "hm" below is ungraded and stats is omitted,
+  // so an exported flag must not leak in from the shell.
+  delete process.env.LUX_RECORD_TRACK;
 });
 
 // Azure returns per-item scores FLAT on words and phonemes on this path, which
