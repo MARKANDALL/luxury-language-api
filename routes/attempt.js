@@ -14,6 +14,54 @@ function toIso(x) {
   }
 }
 
+// A phoneme occurrence counts as "low" below 80. This is NOT a new threshold:
+// it is the exact test the only reader of the field below already applies to
+// the field it stands beside (features/progress/rollups/rollupsAccumulate.js:265,
+// and :161 on the full-Azure path), copied here so the preferred branch counts
+// lows the same way the fallback branch does and the Progress explainer's
+// "N of M scored below 80%" keeps meaning what it has always meant.
+const PHONEME_LOW_BELOW = 80;
+
+// A real utterance cannot contain this many DISTINCT phonemes in any language
+// Lux serves — English has about 44, Spanish about 25. The ceiling exists only
+// so a malformed or hostile payload cannot write an unbounded object into a
+// column with no size guard of its own. Past it the field is dropped WHOLE
+// rather than sampled, because a partial sample is the exact defect this field
+// exists to remove; readers then fall back to `lows`, which is today's
+// behaviour, so nothing breaks and nothing is quietly biased.
+const SUMMARY_PHONEME_MAX_KEYS = 256;
+
+// { phoneme: { occ, avg, low } } over every scored phoneme, or null.
+// occ is how many times the phoneme was scored in this attempt, avg its mean
+// across those occurrences to one decimal, low how many fell below
+// PHONEME_LOW_BELOW. Storing occ + avg rather than the raw list is exact for
+// averaging — a reader's sum += avg * occ recovers the true mean — and bounds
+// the field by the language's phoneme inventory instead of by how long the
+// learner spoke.
+function toPhonemeStats(phScores) {
+  if (!phScores.length) return null;
+
+  const agg = new Map();
+  for (const { p, s } of phScores) {
+    const cur = agg.get(p) || { occ: 0, sum: 0, low: 0 };
+    cur.occ += 1;
+    cur.sum += s;
+    if (s < PHONEME_LOW_BELOW) cur.low += 1;
+    agg.set(p, cur);
+  }
+  if (agg.size > SUMMARY_PHONEME_MAX_KEYS) return null;
+
+  const phonemes = {};
+  for (const [p, v] of agg) {
+    phonemes[p] = {
+      occ: v.occ,
+      avg: Math.round((v.sum / v.occ) * 10) / 10,
+      low: v.low,
+    };
+  }
+  return { phonemes };
+}
+
 // Words that must never be graded as if the learner meant to say them.
 // Lowercased, matched exactly.
 const FILLER_WORDS = new Set([
@@ -55,8 +103,11 @@ function toSummaryFromAzure(result, ungradeFillers = false) {
 
   // Under the flag, phantoms and fillers drop out of BOTH lists below, and
   // their phonemes drop out of trouble-sound aggregation with them, because
-  // both lists are built from this one array. Nothing above this line reads
-  // it, so the four scores are untouched either way.
+  // both lists are built from this one array. That includes `stats`, which is
+  // built from the same phScores: the Progress rollups read stats.phonemes
+  // before `lows`, so a phantom's schwa kept there would resurface as a
+  // trouble sound on Progress. Nothing above this line reads it, so the four
+  // scores are untouched either way.
   const words = ungradeFillers ? allWords.filter((w) => !isUngraded(w)) : allWords;
 
   // trouble phonemes (lowest 6 by score)
@@ -72,6 +123,23 @@ function toSummaryFromAzure(result, ungradeFillers = false) {
   }
   phScores.sort((a, b) => a.s - b.s);
   const lows = phScores.slice(0, 6).map((x) => [x.p, x.s]);
+
+  // Every scored phoneme of the attempt, beside the six above.
+  //
+  // `lows` is the SIX LOWEST phonemes, and it is the only phoneme record the
+  // Progress page can reach: routes/user-recent.js selects `summary` and no
+  // Azure column, so every rollup downstream averages a deliberately
+  // worst-picked sample. A learner who says /eɪ/ three times at 95, 92 and 78
+  // has 78 stored, attempt after attempt, and is told /eɪ/ is a trouble sound
+  // when its real average is 88.
+  //
+  // This writes the true distribution in the shape the rollups ALREADY prefer:
+  // features/progress/rollups/rollupsAccumulate.js:206-241 reads
+  // summary.stats.phonemes as { ipa: {occ, avg, low} } and only falls back to
+  // `lows` when it is absent. So `lows` stays exactly as it was for its other
+  // readers, rows written before today keep working on the fallback branch, and
+  // new rows get the real average with no frontend change.
+  const stats = toPhonemeStats(phScores);
 
   // trouble words (aggregate avg by word, lowest 10)
   const wordAgg = new Map();
@@ -92,7 +160,17 @@ function toSummaryFromAzure(result, ungradeFillers = false) {
   wordRows.sort((a, b) => a.s - b.s);
   const wordsLow = wordRows.slice(0, 10).map((r) => [r.w, r.s, r.n]);
 
-  return { pron, acc, flu, comp, lows, words: wordsLow };
+  // `stats` is omitted rather than written empty, so a reader's "is it there"
+  // test keeps meaning "this row carries the real distribution".
+  return {
+    pron,
+    acc,
+    flu,
+    comp,
+    lows,
+    words: wordsLow,
+    ...(stats ? { stats } : {}),
+  };
 }
 
 // ---------- Full Azure detail (additive capture) ----------
@@ -114,8 +192,8 @@ const AZURE_DETAIL_MAX_BYTES = 64 * 1024;
 // PronunciationAssessment, depending on granularity and API version, and both
 // shapes are already handled by frontend readers (features/convo/word-feedback/
 // align-plan.js:15, features/progress/rollups/rollupsAccumulate.js:30). Read
-// both, and return undefined rather than null when neither is present:
-// zero. Absent fields are then normalized by numOrNull below.
+// both, and return undefined rather than null when neither is present.
+// Absent fields are then normalized by numOrNull below.
 function azField(item, name) {
   return item?.[name] ?? item?.PronunciationAssessment?.[name];
 }
@@ -253,6 +331,21 @@ function toAzureDetail(result, sentReference) {
   return { ...base, truncated: true, words_dropped: lean.length, words: [] };
 }
 
+// Postgres SQLSTATE 42703, undefined_column. The two columns above are added by
+// migrations/0010_attempt_azure_detail.sql, and migrations in this repo are
+// applied by hand, so a deploy can reach a database that does not have them yet.
+const UNDEFINED_COLUMN = "42703";
+
+// The pre-0010 write, kept verbatim. Its parameters are the first seven of the
+// full insert's, in the same order, so both statements share one params array.
+const LEGACY_ATTEMPT_SQL = `
+  INSERT INTO public.lux_attempts
+    (uid, ts, passage_key, part_index, text, summary, session_id)
+  VALUES
+    ($1, $2::timestamptz, $3, $4, $5, $6::jsonb, $7)
+  RETURNING id
+`;
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method Not Allowed" });
@@ -377,7 +470,34 @@ export default async function handler(req, res) {
       row.azure_detail ? JSON.stringify(row.azure_detail) : null,
     ];
 
-    const { rows } = await pool.query(sql, params);
+    let rows;
+    try {
+      ({ rows } = await pool.query(sql, params));
+    } catch (e) {
+      // Migration 0010 is not applied on this database, so recognized_text and
+      // azure_detail do not exist. 42703 is raised during parse analysis,
+      // before any tuple is formed, and this INSERT is its own implicit
+      // transaction, so nothing was written and there is no partial row.
+      //
+      // The capture is additive, and this file already degrades rather than
+      // fails an attempt when it cannot store everything: AZURE_DETAIL_MAX_BYTES
+      // above drops the phoneme layer instead of dropping the attempt. Losing
+      // the whole attempt because an additive column is absent is that same
+      // trade made the wrong way, so fall back to the pre-0010 write.
+      //
+      // Deliberately unlatched: no flag, no cached probe. The moment 0010 is
+      // applied the first statement succeeds again and capture resumes on its
+      // own, with no redeploy and no stale "the columns are missing" belief
+      // pinned to a warm container. If some other column is genuinely undefined
+      // the fallback raises 42703 too, and that error leaves this block and is
+      // reported by the handler's catch exactly as it is today.
+      if (e?.code !== UNDEFINED_COLUMN) throw e;
+      console.warn(
+        "attempt: recognized_text/azure_detail absent (migration 0010 not applied); " +
+          "wrote the attempt without Azure detail capture"
+      );
+      ({ rows } = await pool.query(LEGACY_ATTEMPT_SQL, params.slice(0, 7)));
+    }
     const insertedId = rows?.[0]?.id || null;
 
     res.status(200).json({ ok: true, id: insertedId });

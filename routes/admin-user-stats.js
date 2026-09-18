@@ -1,28 +1,17 @@
 // routes/admin-user-stats.js
 // One-line: Admin-only stats endpoint that aggregates lux_attempts by user and window, with safe in-handler Supabase init (no import-time crash).
 import { getSupabaseAdmin } from '../lib/supabase.js';
-
-const ADMIN_TOKEN = String(process.env.ADMIN_TOKEN || "").trim();
-
-function normToken(v) {
-  const s = String(v || "").trim();
-  // strip one pair of surrounding quotes if present
-  return s.replace(/^[\"\'](.*)[\"\']$/, "$1").trim();
-}
-
-function getAdminToken(req) {
-  return (
-    normToken(req?.headers?.["x-admin-token"]) ||
-    normToken(req?.query?.token)
-  );
-}
+import { isAdminKeyRequest } from '../lib/admin-auth.js';
+import { metricNum } from '../lib/metrics.js';
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
 
 export default async function handler(req, res) {
   try {
-    const token = getAdminToken(req);
-    if (!ADMIN_TOKEN || !token || token !== ADMIN_TOKEN) {
+    // ADMIN-ONLY: returns one row per user across the whole cohort, with no
+    // per-caller mode. Gated on ADMIN_KEY_PRIVATE only. Read per request (the
+    // old module-scope capture meant an env change needed a redeploy).
+    if (!isAdminKeyRequest(req)) {
       return res.status(401).json({ error: 'unauthorized' });
     }
 
@@ -77,7 +66,14 @@ export default async function handler(req, res) {
     for (const r of data) {
       const uid = r.uid;
       const tsMs = new Date(r.ts).getTime();
-      const pron = Number(r?.summary?.pron);
+      // An attempt Azure never scored is stored with pron null, and it must not
+      // be averaged in. Number(null) is 0, and 0 passes every Number.isFinite
+      // guard below, so a single typed conversation turn used to drag a
+      // learner's cohort average, recent average and delta down by a whole
+      // attempt's worth of zero. metricNum returns null for "not scored" and
+      // keeps a genuine 0 — see lib/metrics.js. s.attempts below deliberately
+      // still counts the attempt: it happened, it just was not scored.
+      const pron = metricNum(r?.summary?.pron);
 
       if (!stats.has(uid)) {
         stats.set(uid, {
