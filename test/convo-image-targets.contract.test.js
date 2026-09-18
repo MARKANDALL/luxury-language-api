@@ -1370,6 +1370,14 @@ describe("convo-image-targets crop verification", () => {
     const r = await post(api);
     expect(r.body.targets).toHaveLength(2);
     expect(cropSpy).not.toHaveBeenCalled();
+    // AND THE ROW DOES NOT CLAIM AN AUDIT IT DID NOT GET. This test used to stop
+    // at the line above, which is how the production failure went unseen: on the
+    // Vercel host ffprobe did not exist, this exact path ran on every scan, the
+    // round survived as this test demands, and every row was written stamped
+    // verified 4. A current stamp is what the heal path trusts, so none of those
+    // rows would ever have been examined, even after the verifier was fixed.
+    expect(bandUpserts()[0].payload.verified).toBe(null);
+    expect(r.body.vintage.verified).toBe(0);
   });
 
   it("checks EVERY instance of a duplicated label, not just the first", async () => {
@@ -1479,6 +1487,10 @@ describe("convo-image-targets cover log", () => {
 });
 
 describe("convo-image-targets serve-time verification", () => {
+  // What an AUDITED row looks like: every boxed target carries the boxOk the
+  // crop check stamps. storedBoxed below does not, which makes it the shape of a
+  // row that was never examined, whatever its stamp says.
+  const audited = (list) => list.map((t) => ({ ...t, boxOk: true }));
   const storedBoxed = [
     { label: "a mug", point: { x: 0.3, y: 0.6 }, box: { x: 0.28, y: 0.55, w: 0.08, h: 0.1 }, cloze: "Holding ___.", choices: ["a mug", "a plate", "a kettle"], answerIndex: 0 },
     { label: "an apron", point: { x: 0.5, y: 0.5 }, box: { x: 0.46, y: 0.45, w: 0.09, h: 0.12 }, cloze: "She wears ___.", choices: ["an apron", "a scarf", "a hat"], answerIndex: 0 },
@@ -1766,7 +1778,7 @@ describe("convo-image-targets serve-time verification", () => {
   });
 
   it("never re-checks a row already stamped", async () => {
-    sbState.row = { targets: storedBoxed, v: 1, verified: 4 };
+    sbState.row = { targets: audited(storedBoxed), v: 1, verified: 4 };
     const api = await client();
     const r = await post(api);
 
@@ -1781,7 +1793,7 @@ describe("convo-image-targets serve-time verification", () => {
     // scanned three weeks ago and one generated ten seconds ago came down the
     // wire identical, so a fix that worked and a cached row that predates it
     // could not be told apart from outside the code.
-    sbState.row = { targets: storedBoxed, v: 1, verified: 4, updated_at: "2026-08-01T10:00:00.000Z", model: "gpt-4.1-mini" };
+    sbState.row = { targets: audited(storedBoxed), v: 1, verified: 4, updated_at: "2026-08-01T10:00:00.000Z", model: "gpt-4.1-mini" };
     const api = await client();
     const r = await post(api);
 
@@ -1813,6 +1825,39 @@ describe("convo-image-targets serve-time verification", () => {
     expect(r.body.cached).toBe(false);
     expect(r.body.vintage.source).toBe("fresh");
     expect(r.body.vintage.now).toEqual({ v: 1, verified: 4 });
+  });
+
+  it("re-examines a row stamped CURRENT whose boxes were never examined", async () => {
+    // The rows production wrote while it could not run ffprobe: stamped
+    // verified 4, boxes untouched. Judged by the stamp alone they are current
+    // and would be served as audited forever. Judged by their contents they
+    // have never been looked at, and that is the fact that decides.
+    sbState.row = { targets: storedBoxed, v: 1, verified: 4 };
+    const api = await client();
+    const r = await post(api);
+
+    expect(r.body.cached).toBe(true);
+    expect(callsOf("crop").length).toBeGreaterThan(0);
+    expect(r.body.vintage.source).toBe("healed");
+    expect(bandUpserts()[0].payload.verified).toBe(4);
+    // Every BOXED target now carries its audit. A target with no box (the mock's
+    // top-up entries have none) has nothing to examine and is not required to.
+    const boxedWritten = bandUpserts()[0].payload.targets.filter((t) => t.box || t.boxes?.length);
+    expect(boxedWritten.length).toBeGreaterThan(0);
+    expect(boxedWritten.every((t) => t.boxOk === true)).toBe(true);
+  });
+
+  it("a row with no boxes is not unaudited: there was nothing to examine", async () => {
+    // The other side of the rule, so it cannot start re-billing the boxless rows
+    // cached before boxes existed, which are stamped once and served for free.
+    const bare = storedBoxed.map(({ box, ...t }) => t);
+    sbState.row = { targets: bare, v: 1, verified: 4 };
+    const api = await client();
+    await post(api);
+
+    expect(cropSpy).not.toHaveBeenCalled();
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(bandUpserts()).toHaveLength(0);
   });
 
   it("regenerates when the crop check guts an old row", async () => {
