@@ -1209,7 +1209,10 @@ function vintageOf({ v, verified, at, source = "fresh", model } = {}) {
   return {
     now: { v: TARGETS_V, verified: VERIFIED_V },
     v: Number.isFinite(v) ? v : TARGETS_V,
-    verified: Number.isFinite(verified) ? verified : VERIFIED_V,
+    // null is "never examined" (migration 0008) and is reported as 0, so the
+    // badge flags it. It used to fall through to VERIFIED_V, which reported an
+    // unexamined row as audited under today's rules.
+    verified: verified === null ? 0 : Number.isFinite(verified) ? verified : VERIFIED_V,
     at: at || new Date().toISOString(),
     source,
     model: model || "",
@@ -3315,6 +3318,39 @@ function pickModel() {
  * responds is a cache that never fills, and the failure is invisible because
  * the game still works.
  */
+/**
+ * Does any boxed target in this set lack an audit result?
+ *
+ * verifyTargets stamps boxOk on every target it examines, and the ones it
+ * rejects never reach a row, so an examined boxed target always carries boxOk.
+ * One that does not was never looked at. The case that made this necessary:
+ * on the production host ffprobe did not exist, verifyTargets could not size
+ * the picture, and it returned the whole set untouched, silently, on every
+ * scan. A target with no box has nothing to examine and is not counted.
+ */
+function auditMissing(targets) {
+  return (targets || []).some(
+    (t) => (t?.box || (Array.isArray(t?.boxes) && t.boxes.length)) && !("boxOk" in t),
+  );
+}
+
+/**
+ * The audit level a set has actually earned: today's, or null for "never
+ * examined". Never VERIFIED_V on trust.
+ *
+ * THE STAMP WAS A PROMISE THE CODE DID NOT CHECK. writeRow stamped VERIFIED_V on
+ * whatever it was handed, so a scan whose verification was skipped wrote a row
+ * that said it had been audited under the current rules, and a row stamped
+ * current is exactly the row the heal path never re-examines. The false claim
+ * was also permanent: fixing the verifier would not have healed a single one of
+ * them. null is what migration 0008 defines as never examined, which the heal
+ * path treats as stale, so a row written while verification is down re-heals on
+ * its next serve once it is back.
+ */
+function stampFor(targets) {
+  return auditMissing(targets) ? null : VERIFIED_V;
+}
+
 async function writeRow(sb, { imageKey, lang, level, targets, model }) {
   if (!sb) return;
   try {
@@ -3325,7 +3361,7 @@ async function writeRow(sb, { imageKey, lang, level, targets, model }) {
           lang,
           level,
           v: TARGETS_V,
-          verified: VERIFIED_V,
+          verified: stampFor(targets),
           targets,
           model,
           updated_at: new Date().toISOString(),
@@ -3334,6 +3370,12 @@ async function writeRow(sb, { imageKey, lang, level, targets, model }) {
       ),
     );
     if (error) console.warn("[convo-image-targets] cache write failed:", error.message);
+    else if (auditMissing(targets)) {
+      console.warn(
+        `[convo-image-targets] wrote key=${imageKey} level=${level || "-"} UNAUDITED ` +
+          "(verification did not run); stamped never-examined so it heals on a later serve",
+      );
+    }
   } catch (e) {
     console.warn("[convo-image-targets] cache write failed", e?.message || e);
   }
@@ -3783,7 +3825,13 @@ async function scan(req, res) {
         // the pictures a learner has already played are precisely the ones
         // nobody re-examined.
         const hasBoxes = kept.some((t) => t.box || (Array.isArray(t.boxes) && t.boxes.length));
-        if (servable && data.verified !== VERIFIED_V && !hasBoxes) {
+        // Stale by its stamp, OR by its contents. The second half catches the
+        // rows already written with a false stamp while verification could not
+        // run on the host: stamped current, boxes unexamined. Without it those
+        // rows would be served as audited forever, because a current stamp is
+        // exactly what the heal path trusts.
+        const stale = data.verified !== VERIFIED_V || auditMissing(kept);
+        if (servable && stale && !hasBoxes) {
           // Nothing to look at. Stamp it so this row is never re-examined, and
           // serve it: a set cached before boxes existed cannot be crop-checked
           // and is not wrong for that.
@@ -3791,11 +3839,11 @@ async function scan(req, res) {
           if (!(deep && kept.length < DEEP_MIN_TARGETS)) {
             return res.status(200).json({
               ok: true, cached: true, imageKey, lang, targets: kept,
-              vintage: vintageOf({ v: data.v, verified: VERIFIED_V, source: "healed", model: data.model }),
+              vintage: vintageOf({ v: data.v, verified: stampFor(kept), source: "healed", model: data.model }),
             });
           }
         }
-        if (servable && data.verified !== VERIFIED_V && imageUrl) {
+        if (servable && stale && imageUrl) {
           const openaiForCheck = await tryOpenAI();
           if (openaiForCheck) {
             const model = pickModel();
@@ -3854,7 +3902,7 @@ async function scan(req, res) {
               await writeRow(sb, { imageKey, lang, level, targets: checked, model });
               return res.status(200).json({
                 ok: true, cached: true, imageKey, lang, targets: checked,
-                vintage: vintageOf({ v: data.v, verified: VERIFIED_V, source: "healed", model }),
+                vintage: vintageOf({ v: data.v, verified: stampFor(checked), source: "healed", model }),
               });
             }
             // Verification gutted the row. Fall through and regenerate: the
@@ -4017,7 +4065,7 @@ async function scan(req, res) {
       targets: early,
       partial: true,
       scanId: makeScanId(imageKey, lang, level),
-      vintage: vintageOf({ model: MODEL }),
+      vintage: vintageOf({ model: MODEL, verified: stampFor(early) }),
     });
     servedEarly = true;
     console.log(
@@ -4117,5 +4165,5 @@ async function scan(req, res) {
     targets.length < MIN_SERVED_TARGETS
       ? { bandShort: true, ...(nearestBand(level, counts) ? { nearest: nearestBand(level, counts) } : null), counts }
       : null;
-  return sendOnce(res, { ok: true, cached: false, imageKey, lang, targets, ...shortInfo, vintage: vintageOf({ model: MODEL }) });
+  return sendOnce(res, { ok: true, cached: false, imageKey, lang, targets, ...shortInfo, vintage: vintageOf({ model: MODEL, verified: stampFor(targets) }) });
 }
